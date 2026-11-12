@@ -72,10 +72,22 @@ Las imágenes fuente están en `assets/`. Si las cambias: `npm run assets`.
 ### Identificador de la app
 `com.neura.app` (en `capacitor.config.json`). Cámbialo por uno tuyo (p. ej. `com.tuempresa.neura`) **antes** de publicar en las tiendas; después ya no se puede cambiar.
 
-## Instalar como web app (sin tiendas)
+## Web app (gratis, sin tiendas)
 
-- **Rápido:** el puente también sirve la app. Abre `http://IP-DE-TU-PC:8787/` en el móvil (misma wifi).
-- **Con icono:** sube `app/` a un hosting con HTTPS. iPhone: Safari → Compartir → *Añadir a pantalla de inicio*. Android: Chrome → ⋮ → *Instalar app*. En este modo el puente también necesita HTTPS (`tailscale serve 8787` o `cloudflared tunnel --url http://localhost:8787`).
+La carpeta `app/` se publica sola en un repositorio público aparte, `AngelazoGit/neura-web`, con GitHub Pages. El código fuente, el puente y los proyectos nativos siguen en este repo privado.
+
+**Enlace:** https://angelazogit.github.io/neura-web/
+
+**Actualizar la web** después de cambiar algo en `app/` y hacer commit:
+```bash
+npm run deploy:web
+```
+
+**Instalar en el móvil desde el enlace**
+- **iPhone:** ábrelo en Safari → Compartir → *Añadir a pantalla de inicio*.
+- **Android:** ábrelo en Chrome → menú ⋮ → *Instalar app*.
+
+**Diferencias con la versión nativa:** algunas IAs bloquean las llamadas desde el navegador (CORS), y para usar el puente MCP desde la web este necesita HTTPS (`tailscale serve 8787` o `cloudflared tunnel --url http://localhost:8787`). La versión nativa no tiene esas limitaciones.
 
 ## Seguridad
 
