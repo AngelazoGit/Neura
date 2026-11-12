@@ -1,0 +1,30 @@
+{
+  "name": "neura",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Neura: todas las IAs públicas en un solo chat + puente MCP a IA local",
+  "author": "AngelazoGit (https://github.com/AngelazoGit)",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/AngelazoGit/neura",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AngelazoGit/neura.git"
+  },
+  "scripts": {
+    "sync": "cap sync",
+    "android": "cap open android",
+    "ios": "cap open ios",
+    "assets": "capacitor-assets generate --ios --android --iconBackgroundColor '#07060a' --iconBackgroundColorDark '#07060a' --splashBackgroundColor '#07060a' --splashBackgroundColorDark '#07060a'",
+    "apk": "cap sync android && cd android && ./gradlew assembleDebug",
+    "bridge": "node bridge/server.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/ios": "^8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^4.0.0",
+    "@capacitor/cli": "^8.6.2"
+  }
+}

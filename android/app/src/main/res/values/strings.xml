@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Neura</string>
+    <string name="title_activity_main">Neura</string>
+    <string name="package_name">com.neura.app</string>
+    <string name="custom_url_scheme">com.neura.app</string>
+</resources>

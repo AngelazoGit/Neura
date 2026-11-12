@@ -1,0 +1,13 @@
+{
+  "port": 8787,
+  "host": "0.0.0.0",
+  "token": "cambia-esto-por-un-secreto-largo",
+  "timeoutMs": 300000,
+  "serveApp": true,
+  "backends": [
+    { "id": "ollama",   "type": "ollama", "url": "http://127.0.0.1:11434" },
+    { "id": "lmstudio", "type": "openai", "url": "http://127.0.0.1:1234/v1" },
+    { "id": "llamacpp", "type": "openai", "url": "http://127.0.0.1:8080/v1" },
+    { "id": "gpu-server", "type": "openai", "url": "http://10.0.0.5:8000/v1", "apiKey": "opcional", "models": ["Qwen/Qwen3-32B"] }
+  ]
+}

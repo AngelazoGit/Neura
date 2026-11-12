@@ -1,0 +1,15 @@
+{
+  "appId": "com.neura.app",
+  "appName": "Neura",
+  "webDir": "app",
+  "backgroundColor": "#07060a",
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#07060a"
+  }
+}

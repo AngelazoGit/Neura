@@ -1,0 +1,22 @@
+{
+  "name": "neura-bridge",
+  "version": "1.0.0",
+  "description": "Servidor MCP que expone la IA local (Ollama, LM Studio, llama.cpp, vLLM) a la app Neura",
+  "author": "AngelazoGit (https://github.com/AngelazoGit)",
+  "homepage": "https://github.com/AngelazoGit/neura",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AngelazoGit/neura.git"
+  },
+  "type": "module",
+  "bin": {
+    "neura-bridge": "server.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "SEE LICENSE IN ../LICENSE"
+}

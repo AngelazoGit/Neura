@@ -1,0 +1,13 @@
+node_modules/
+bridge/config.json
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/public/
+ios/App/App/public/
+ios/DerivedData/
+*.apk
+*.aab
+*.keystore
+.DS_Store
