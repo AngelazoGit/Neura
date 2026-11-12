@@ -72,11 +72,12 @@ Todo queda en la carpeta de usuario de Neura:
 | `neura-datos.json` | Tus hilos, IAs, claves API y servidores MCP |
 | `neura-datos.bak.json` | Copia de seguridad que se hace cada vez que abres la app |
 | `hilos.json` | Los hilos que guarda el puente para compartirlos con el móvil y la web |
-| `escritorio.json` | Puerto, token del puente y si está abierto a tu red |
+| `escritorio.json` | Puerto, token del puente, si está abierto a tu red y carpetas compartidas con la IA |
+| `indice.json` | Índice de búsqueda de tus documentos (para `search_docs`) |
 | `puente.json` | *(opcional)* Backends de IA del puente, mismo formato que `bridge/config.example.json` |
 
 - **Copia de seguridad o cambio de PC:** copia esta carpeta entera.
-- **Las claves API se guardan sin cifrar** en `neura-datos.json`. No compartas ese archivo.
+- **Las claves API se guardan cifradas con el llavero del sistema** (Windows DPAPI, Llavero de macOS, o libsecret/kwallet en Linux). En ⚙ → SEGURIDAD verás cuál se usa. En un Linux sin llavero se guardan sin cifrar: no compartas ese archivo.
 - Las escrituras son atómicas: un cierre inesperado no deja el archivo a medias.
 
 ---
@@ -91,10 +92,11 @@ Todo queda en la carpeta de usuario de Neura:
 
 Los hilos se sincronizan a través del puente MCP: cualquier dispositivo conectado al mismo puente ve los mismos hilos.
 
-1. En el PC, abre **⬡** → tarjeta **ESTE PC** → marca **ABRIR A MI RED (para el móvil)**.
-2. Aparecen una **URL** (p. ej. `http://192.168.1.20:8787/mcp`) y un **TOKEN** (botón COPIAR).
-3. En el móvil (app nativa o web), abre **⬡**, pega la URL y el token y pulsa **CONECTAR**.
-4. Abre **≡** en el móvil: aparecen los hilos del PC. Lo que escribas en un dispositivo aparece en el otro al abrir **≡**, al volver a la app o, como mucho, al cabo de un minuto.
+1. En el PC, abre **⬡** → tarjeta **ESTE PC** → marca **ABRIR A MI RED**.
+2. Aparece un **código QR**:
+   - **Sin instalar nada:** escanéalo con la cámara del móvil. Se abre Neura en el navegador ya conectada a tu PC.
+   - **Con la app instalada:** **⬡ → 📷 ESCANEAR QR DE MI PC** (Android). En iPhone, o si prefieres, pega la URL y el **TOKEN** que aparecen bajo el QR.
+3. Abre **≡** en el móvil: aparecen los hilos del PC. Lo que escribas en un dispositivo aparece en el otro al abrir **≡**, al volver a la app o, como mucho, al cabo de un minuto.
 
 Detalles:
 - La casilla **SINCRONIZAR HILOS** de cada servidor la activa o desactiva.
@@ -102,6 +104,33 @@ Detalles:
 - Si escribes en dos dispositivos a la vez en el mismo hilo, no se pierde ningún mensaje: se unen y se ordenan por hora.
 - La web publicada en GitHub Pages (https) solo puede conectar con el puente por https (ver el README: `tailscale serve` o `cloudflared`). La app nativa del móvil se conecta por `http://` en tu red sin problemas.
 - El firewall de Windows preguntará si permites que Neura acepte conexiones: acepta en **redes privadas**.
+
+### Fuera de casa (Tailscale)
+
+[Tailscale](https://tailscale.com/download) crea una red privada gratuita entre tus dispositivos, sin abrir puertos del router.
+
+1. Instálalo en el PC y en el móvil, e inicia sesión con la misma cuenta en ambos.
+2. En Neura para PC: **⬡ → ESTE PC → FUERA DE CASA**:
+   - Con **ABRIR A MI RED** activado, la app instalada del móvil puede conectarse a `http://100.x.y.z:8787/mcp` (la IP de Tailscale que aparece).
+   - **ACTIVAR HTTPS CON TAILSCALE** publica el puente en `https://tu-pc.tu-red.ts.net/` (solo dentro de tu red Tailscale) y muestra un segundo QR. Así funciona también la web de GitHub Pages, que exige https.
+
+> Para activar HTTPS, tu red Tailscale debe tener HTTPS habilitado (Tailscale lo propone la primera vez).
+
+---
+
+## 4 bis. Funciones del chat
+
+| Función | Cómo se usa |
+|---|---|
+| **AUTO-SALTO inteligente** | Si una IA agota su cuota, Neura sabe hasta cuándo (⏳ en el desplegable y en ⚙) y no la vuelve a probar antes de tiempo. Las demás se ordenan por éxito y velocidad. **REINTENTAR YA** en ⚙ borra la espera. |
+| **Memoria de contexto** | ⚙ → MEMORIA DE CONTEXTO (6000 tokens por defecto). Al pasar ese tamaño, lo antiguo se resume (🗜 VER RESUMEN en el chat). Con Ollama, el resumen lo hace tu IA local y no gasta cuota. |
+| **⚖ CONSEJO** | Actívalo en la barra. Responden 3 IAs de proveedores distintos (o las que elijas en ⚙) y la IA elegida escribe la síntesis. |
+| **📎 Adjuntar** | Fotos (para modelos con visión, p. ej. Gemini), PDF (el texto se extrae en tu dispositivo) y archivos de texto o código. También puedes arrastrarlos o pegarlos. |
+| **🎤 Dictar** | Con una clave de **Groq** (gratis) usa Whisper. Sin ella, el dictado del navegador si existe. |
+| **LEER** | Lee la respuesta en voz alta con las voces del sistema. |
+| **ƒ HERRAMIENTAS** | Deja que la IA use las herramientas de tus servidores MCP (ver apartado 5.5). |
+| **Buscar / exportar** | En **≡**: buscador, **EXPORTAR ESTE HILO (.md)**, **COPIA DE TODOS (.json)** e **IMPORTAR**. |
+| **PIN** | En el móvil y la web: ⚙ → SEGURIDAD DE LAS CLAVES → ACTIVAR PIN. Te lo pedirá al abrir. Si lo olvidas, se borran las claves (no los hilos). |
 
 ---
 
@@ -174,6 +203,19 @@ ollama rm qwen3:4b
 
 El puente detecta también **LM Studio** (`http://127.0.0.1:1234/v1`) si lo tienes abierto con el servidor local activado.
 
+### 5.5 Que la IA lea tus documentos (carpetas + RAG local)
+
+1. En Neura para PC: **⬡ → ESTE PC → 📁 CARPETAS PARA LA IA → + AÑADIR CARPETA** (p. ej. `Documentos/Facturas`).
+2. Descarga el modelo de búsqueda semántica (pequeño, ~270 MB):
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+3. Activa **ƒ HERRAMIENTAS** en la barra y pregunta, por ejemplo: "¿cuánto pagué de luz en marzo según mis facturas?".
+
+La IA puede listar, buscar por nombre o contenido, leer archivos de texto y hacer búsqueda semántica (`search_docs`). Todo es **solo lectura** y nunca sale de las carpetas que elijas. Funciona tanto con IAs públicas (el fragmento leído se envía a ese proveedor) como con tu IA local (no sale nada del PC). Para que un modelo local use herramientas, elige uno que las soporte: `qwen3`, `llama3.1` o `llama3.2`.
+
+> Cualquiera que tenga el token del puente puede leer esas carpetas. No compartas el token y no añadas carpetas con datos que no quieras exponer.
+
 ---
 
 ## 6. IA en otro ordenador o servidor (opcional)
@@ -224,4 +266,7 @@ En `config.json` del puente, apunta el backend a esa máquina: `{ "id": "ollama"
 | Aviso "Puertos 8787-8796 ocupados" | Hay otro puente abierto: ciérralo o cambia `port` en `escritorio.json` |
 | El móvil no conecta con el PC | Mismo Wi-Fi, **ABRIR A MI RED** activado, permite Neura en el firewall y revisa el token |
 | En iPhone no conecta | Acepta el permiso de **red local** que pide iOS la primera vez |
+| La búsqueda en documentos dice "keyword" | Falta el modelo de embeddings: `ollama pull nomic-embed-text` |
+| El dictado no funciona | Añade Groq en ⚙ (gratis) y permite el micrófono |
+| ⏳ en una IA con la clave ya corregida | ⚙ → **REINTENTAR YA** en esa IA (cambiar la clave también lo reinicia) |
 | Quiero reiniciar Neura de cero | Cierra la app y borra la carpeta de datos (apartado 3); haz antes una copia |

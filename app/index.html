@@ -44,12 +44,22 @@
     <label class="auto" title="Si la IA elegida agota su cuota gratuita o falla, Neura pasa a otra automáticamente">
       <input type="checkbox" id="autoSkip"> AUTO-SALTO
     </label>
+    <label class="auto" title="CONSEJO: varias IAs responden a la vez y una de ellas combina la mejor respuesta">
+      <input type="checkbox" id="council"> ⚖ CONSEJO
+    </label>
+    <label class="auto" id="toolsLbl" hidden title="Deja que la IA use las herramientas de tus servidores MCP (buscar y leer tus documentos, estado del PC…)">
+      <input type="checkbox" id="useTools"> ƒ HERRAMIENTAS
+    </label>
   </nav>
 
   <main id="log" aria-live="polite"></main>
 
+  <div id="attachBar" class="chips" hidden></div>
   <form id="composer">
+    <button type="button" class="ico tool" id="attachBtn" aria-label="Adjuntar imagen, PDF o texto" title="Adjuntar imagen, PDF o texto">📎</button>
+    <input type="file" id="fileIn" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
     <textarea id="input" rows="1" placeholder="ESCRIBE TU MENSAJE…" enterkeyhint="send"></textarea>
+    <button type="button" class="ico tool" id="mic" aria-label="Dictar por voz" aria-pressed="false" title="Dictar por voz">🎤</button>
     <button type="submit" id="send"><span>ENVIAR</span></button>
   </form>
 </div>
@@ -58,8 +68,15 @@
   <div class="sheet-in">
     <header><h2>HILOS <em>// GUARDADOS</em></h2><button class="ico close">✕</button></header>
     <button class="btn wide" id="newThread">+ NUEVO HILO</button>
+    <input type="search" id="threadSearch" class="search" placeholder="BUSCAR EN LOS HILOS…" aria-label="Buscar en los hilos">
     <div id="threadList"></div>
     <p class="hint" id="syncInfo"></p>
+    <div class="row wrap">
+      <button class="btn sm" id="exportMd">EXPORTAR ESTE HILO (.md)</button>
+      <button class="btn sm ghost" id="exportAll">COPIA DE TODOS (.json)</button>
+      <button class="btn sm ghost" id="importBtn">IMPORTAR (.json)</button>
+      <input type="file" id="importFile" accept=".json,application/json" hidden>
+    </div>
   </div>
 </section>
 
@@ -73,6 +90,7 @@
     </div>
     <div id="provList"></div>
     <p class="hint">Las claves se guardan solo en este dispositivo y se envían únicamente a su proveedor.</p>
+    <div id="settings"></div>
   </div>
 </section>
 
@@ -80,9 +98,10 @@
   <div class="sheet-in">
     <header><h2>MCP <em>// IA LOCAL</em></h2><button class="ico close">✕</button></header>
     <p class="hint">Conéctate a un servidor MCP que haga de puente con la IA local de tus ordenadores y servidores (<b>neura-bridge</b> u otro compatible). Sus modelos aparecerán en el chat.</p>
+    <button class="btn wide" id="scanBtn" hidden>📷 ESCANEAR QR DE MI PC</button>
     <form id="mcpForm" class="card">
       <label>NOMBRE DEL EQUIPO<input name="name" placeholder="PC-ESTUDIO" required></label>
-      <label>URL DEL SERVIDOR<input name="url" type="url" placeholder="http://192.168.1.20:8787/mcp" required></label>
+      <label>URL DEL SERVIDOR (o enlace de emparejamiento)<input name="url" type="url" placeholder="http://192.168.1.20:8787/mcp" required></label>
       <label>TOKEN<input name="token" type="password" placeholder="opcional" autocomplete="off"></label>
       <button class="btn wide" type="submit">CONECTAR</button>
     </form>
@@ -93,7 +112,25 @@ NEURA_TOKEN=mi-secreto node server.mjs</pre>
   </div>
 </section>
 
+<div id="scan" class="overlay" hidden>
+  <video id="scanVideo" playsinline muted></video>
+  <p>Apunta al código QR que muestra Neura en tu PC (⬡ → ESTE PC)</p>
+  <button class="btn" id="scanClose">CANCELAR</button>
+</div>
+
+<div id="lock" class="overlay" hidden>
+  <form id="lockForm" class="card">
+    <h2>🔒 CLAVES PROTEGIDAS</h2>
+    <p class="hint">Escribe tu PIN para desbloquear las claves API y los tokens.</p>
+    <input type="password" id="lockPin" inputmode="numeric" autocomplete="current-password" placeholder="PIN" aria-label="PIN">
+    <button class="btn wide" type="submit">DESBLOQUEAR</button>
+    <button class="btn sm ghost" type="button" id="lockSkip">SEGUIR SIN CLAVES</button>
+    <button class="btn sm red" type="button" id="lockReset">OLVIDÉ EL PIN</button>
+  </form>
+</div>
+
 <div id="toast" role="status"></div>
+<script src="md.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -68,5 +68,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/AngelazoGit/neura.git"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }
