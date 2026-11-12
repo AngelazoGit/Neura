@@ -147,3 +147,6 @@ h3{font:700 13px var(--cond);letter-spacing:.24em;color:var(--orange2);margin:24
 .chip.off{color:var(--red)}
 /* iOS hace zoom al enfocar campos de menos de 16px */
 @media (pointer:coarse){input,select,textarea{font-size:16px!important}}
+.card label.auto{flex-direction:row;flex-wrap:wrap;align-self:flex-start}
+.lan{border-top:1px dashed var(--line);margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:6px}
+.secret{color:var(--green);word-break:break-all}

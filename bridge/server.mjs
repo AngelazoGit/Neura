@@ -4,7 +4,7 @@
 // OpenAI) a la app Neura u otro cliente MCP. Sin dependencias: Node 18+.
 import http from 'node:http';
 import os from 'node:os';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join, extname, normalize, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -24,6 +24,9 @@ const TIMEOUT = Number(cfg.timeoutMs || 300000);
 const APP_DIR = cfg.appDir || join(HERE, '..', 'app');
 const SERVE_APP = cfg.serveApp !== false && existsSync(join(APP_DIR, 'index.html'));
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+// Hilos sincronizados entre la app del PC, el móvil y la web (ver threads_sync).
+const DATA_DIR = process.env.NEURA_DATA || cfg.dataDir || join(os.homedir(), '.neura-bridge');
+const SYNC = cfg.sync !== false;
 const BACKENDS = cfg.backends?.length ? cfg.backends : [
   { id: 'ollama', type: 'ollama', url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434' },
   { id: 'lmstudio', type: 'openai', url: 'http://127.0.0.1:1234/v1' },
@@ -107,6 +110,53 @@ async function systemInfo() {
   };
 }
 
+// ---------- hilos ----------
+// Fusión sin conflictos: los mensajes se unen por id y el resto de campos los gana
+// la versión con ts (última actividad) más reciente. Mantener igual que mergeThread() en app/app.js.
+function mergeThread(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const [old, neu] = (b.ts || 0) > (a.ts || 0) ? [a, b] : [b, a];
+  const byId = new Map();
+  for (const m of [...(old.messages || []), ...(neu.messages || [])]) if (m?.id) byId.set(m.id, m);
+  const messages = neu.deleted ? [] : [...byId.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  return { ...old, ...neu, messages, ts: Math.max(a.ts || 0, b.ts || 0) };
+}
+
+const storeFile = join(DATA_DIR, 'hilos.json');
+let store = null;
+function loadStore() {
+  if (store) return store;
+  try { store = JSON.parse(readFileSync(storeFile, 'utf8')); } catch { store = {}; }
+  store.rev ||= 0; store.threads ||= {};
+  return store;
+}
+function saveStore() {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = storeFile + '.tmp';
+  writeFileSync(tmp, JSON.stringify(store));
+  renameSync(tmp, storeFile); // escritura atómica: un corte de luz no deja el archivo a medias
+}
+const strip = ({ rev, ...t }) => t;
+
+async function threadsSync({ threads = [], since = 0 }) {
+  if (!Array.isArray(threads)) throw new Error('threads debe ser una lista');
+  const st = loadStore();
+  let changed = false;
+  for (const t of threads) {
+    if (typeof t?.id !== 'string' || !t.id) continue;
+    const cur = st.threads[t.id];
+    const merged = mergeThread(cur && strip(cur), t);
+    if (!cur || JSON.stringify(merged) !== JSON.stringify(strip(cur))) {
+      st.threads[t.id] = { ...merged, rev: ++st.rev };
+      changed = true;
+    }
+  }
+  if (changed) saveStore();
+  const out = Object.values(st.threads).filter((t) => t.rev > (Number(since) || 0)).map(strip);
+  return { rev: st.rev, threads: out };
+}
+
 // ---------- MCP ----------
 const TOOLS = [
   { name: 'list_models', title: 'Listar modelos locales',
@@ -122,8 +172,12 @@ const TOOLS = [
   { name: 'system_info', title: 'Estado del equipo',
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
     inputSchema: { type: 'object', properties: {} } },
+  ...(SYNC ? [{ name: 'threads_sync', title: 'Sincronizar hilos',
+    description: 'Guarda en este equipo los hilos de chat enviados y devuelve los que cambiaron desde la revisión since.',
+    inputSchema: { type: 'object', properties: {
+      threads: { type: 'array', items: { type: 'object' } }, since: { type: 'integer' } } } }] : []),
 ];
-const IMPL = { list_models: listModels, chat, system_info: systemInfo };
+const IMPL = { list_models: listModels, chat, system_info: systemInfo, ...(SYNC ? { threads_sync: threadsSync } : {}) };
 
 async function rpc(msg, session) {
   const { id, method, params } = msg ?? {};
@@ -146,7 +200,8 @@ async function rpc(msg, session) {
       if (!fn) return err(-32602, `Herramienta desconocida: ${params?.name}`);
       try {
         const data = await fn(params.arguments || {});
-        const text = typeof data.text === 'string' ? data.text : JSON.stringify(data, null, 2);
+        const text = typeof data.text === 'string' ? data.text : params.name === 'threads_sync'
+          ? `rev ${data.rev} · ${data.threads.length} hilos` : JSON.stringify(data, null, 2);
         return ok({ content: [{ type: 'text', text }], structuredContent: data });
       } catch (e) {
         return ok({ content: [{ type: 'text', text: `Error: ${e.cause?.code || e.message}` }], isError: true });
@@ -174,7 +229,7 @@ function authorized(req) {
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
-function readBody(req, limit = 5 * 2 ** 20) {
+function readBody(req, limit = 25 * 2 ** 20) {
   return new Promise((res, rej) => {
     let size = 0; const chunks = [];
     req.on('data', (c) => { size += c.length; if (size > limit) { rej(new Error('too large')); req.destroy(); } else chunks.push(c); });
@@ -231,6 +286,7 @@ server.listen(PORT, HOST, () => {
   console.log(`  MCP:   http://localhost:${PORT}/mcp`);
   for (const ip of ips) console.log(`         http://${ip}:${PORT}/mcp`);
   if (SERVE_APP) console.log(`  APP:   http://${ips[0] || 'localhost'}:${PORT}/  (ábrela en el móvil)`);
+  if (SYNC) console.log(`  Hilos: ${storeFile}`);
   console.log(`  Backends: ${BACKENDS.map((b) => `${b.id}→${b.url}`).join(', ')}`);
   if (TOKEN_GENERATED) console.log(`  TOKEN: ${TOKEN}\n         (generado al azar; fija uno propio con NEURA_TOKEN para que no cambie)`);
   console.log('');

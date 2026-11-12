@@ -1,0 +1,227 @@
+# Neura en el PC + IA local con Ollama
+
+Esta guía explica cómo instalar **Neura para PC** (Windows, macOS y Linux), dónde guarda tus datos, cómo mantener los mismos hilos en el PC, el móvil y la web, y cómo instalar **Ollama** para usar IA gratis en tu propio ordenador a través del puente MCP.
+
+---
+
+## 1. Qué es Neura para PC
+
+Es la misma app que en el móvil y la web (carpeta `app/`) dentro de una ventana de escritorio, con tres extras:
+
+| | Web | Móvil (Capacitor) | **PC** |
+|---|---|---|---|
+| Todas las IAs públicas + AUTO-SALTO | ✅ | ✅ | ✅ |
+| Hilos (varias conversaciones) | ✅ | ✅ | ✅ |
+| Sin bloqueos CORS | ❌ | ✅ | ✅ |
+| Datos guardados en un **archivo en disco** | ❌ | ❌ | ✅ |
+| **Puente MCP integrado** (Ollama sin terminal) | ❌ | ❌ | ✅ |
+| Comparte los hilos con el móvil y la web | vía puente | vía puente | ✅ es el puente |
+
+Al abrir Neura en el PC se arranca solo el puente MCP (`bridge/server.mjs`). En el menú **⬡** aparece **ESTE PC** con los modelos de Ollama que tengas instalados, sin ejecutar nada en la terminal.
+
+---
+
+## 2. Instalar Neura en el PC
+
+### Opción A: descargar el instalador (recomendada)
+
+1. En GitHub, abre el repositorio → **Actions** → la última ejecución verde de **Compilar app**.
+2. En **Artifacts**, descarga el de tu sistema:
+   - `neura-pc-Windows` → `Neura-1.0.0-win-x64.exe`
+   - `neura-pc-macOS` → `Neura-1.0.0-mac-arm64.dmg` (Mac con Apple Silicon)
+   - `neura-pc-Linux` → `Neura-1.0.0-linux-x86_64.AppImage` o `.deb`
+3. Instálalo:
+   - **Windows:** ejecuta el `.exe`. Como el instalador no está firmado, Windows SmartScreen avisará: pulsa **Más información → Ejecutar de todas formas**.
+   - **macOS:** abre el `.dmg` y arrastra Neura a Aplicaciones. La primera vez, haz **clic derecho → Abrir**. Si dice que "está dañada", ejecuta en Terminal:
+     ```bash
+     xattr -cr /Applications/Neura.app
+     ```
+   - **Linux:** `chmod +x Neura-*.AppImage` y ábrelo, o instala el `.deb`:
+     ```bash
+     sudo apt install ./Neura-1.0.0-linux-amd64.deb
+     ```
+
+> Para que Windows y macOS no muestren avisos hay que firmar los instaladores (certificado de firma de código de Windows y cuenta de Apple Developer).
+
+### Opción B: ejecutarlo desde el código
+
+Necesitas Node 18 o superior.
+
+```bash
+cd neura/desktop
+npm install
+npm start
+```
+
+Para generar el instalador de tu sistema: `npm run dist` → aparece en `desktop/dist/`.
+
+---
+
+## 3. Dónde se guardan tus datos
+
+Todo queda en la carpeta de usuario de Neura:
+
+| Sistema | Carpeta |
+|---|---|
+| Windows | `%APPDATA%\Neura\` |
+| macOS | `~/Library/Application Support/Neura/` |
+| Linux | `~/.config/Neura/` |
+
+| Archivo | Contenido |
+|---|---|
+| `neura-datos.json` | Tus hilos, IAs, claves API y servidores MCP |
+| `neura-datos.bak.json` | Copia de seguridad que se hace cada vez que abres la app |
+| `hilos.json` | Los hilos que guarda el puente para compartirlos con el móvil y la web |
+| `escritorio.json` | Puerto, token del puente y si está abierto a tu red |
+| `puente.json` | *(opcional)* Backends de IA del puente, mismo formato que `bridge/config.example.json` |
+
+- **Copia de seguridad o cambio de PC:** copia esta carpeta entera.
+- **Las claves API se guardan sin cifrar** en `neura-datos.json`. No compartas ese archivo.
+- Las escrituras son atómicas: un cierre inesperado no deja el archivo a medias.
+
+---
+
+## 4. Hilos: no perder nunca una conversación
+
+- Pulsa **≡** para ver tus hilos, abrir uno anterior o empezar uno **+ NUEVO HILO**.
+- Cada hilo guarda su conversación completa. Puedes cambiar de IA a mitad de un hilo y la nueva IA recibe todo el contexto.
+- Si ya usabas Neura, tu chat anterior se convierte en el primer hilo automáticamente.
+
+### Mismos hilos en el PC, el móvil y la web
+
+Los hilos se sincronizan a través del puente MCP: cualquier dispositivo conectado al mismo puente ve los mismos hilos.
+
+1. En el PC, abre **⬡** → tarjeta **ESTE PC** → marca **ABRIR A MI RED (para el móvil)**.
+2. Aparecen una **URL** (p. ej. `http://192.168.1.20:8787/mcp`) y un **TOKEN** (botón COPIAR).
+3. En el móvil (app nativa o web), abre **⬡**, pega la URL y el token y pulsa **CONECTAR**.
+4. Abre **≡** en el móvil: aparecen los hilos del PC. Lo que escribas en un dispositivo aparece en el otro al abrir **≡**, al volver a la app o, como mucho, al cabo de un minuto.
+
+Detalles:
+- La casilla **SINCRONIZAR HILOS** de cada servidor la activa o desactiva.
+- Si borras un hilo, se borra también en los demás dispositivos.
+- Si escribes en dos dispositivos a la vez en el mismo hilo, no se pierde ningún mensaje: se unen y se ordenan por hora.
+- La web publicada en GitHub Pages (https) solo puede conectar con el puente por https (ver el README: `tailscale serve` o `cloudflared`). La app nativa del móvil se conecta por `http://` en tu red sin problemas.
+- El firewall de Windows preguntará si permites que Neura acepte conexiones: acepta en **redes privadas**.
+
+---
+
+## 5. Instalar Ollama (IA gratis en tu ordenador)
+
+[Ollama](https://ollama.com) descarga y ejecuta modelos de IA abiertos en tu equipo. No necesita cuenta, no tiene límites de uso y tus conversaciones no salen del PC.
+
+### 5.1 Instalación
+
+**Windows 10/11**
+1. Descarga `OllamaSetup.exe` desde https://ollama.com/download e instálalo.
+2. Queda funcionando en segundo plano (icono de la llama en la bandeja).
+
+**macOS 12 o superior**
+1. Descarga Ollama desde https://ollama.com/download, ábrelo y muévelo a Aplicaciones.
+2. Ábrelo una vez: queda en la barra de menú.
+
+**Linux**
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+Se instala como servicio (`systemctl status ollama`).
+
+Comprueba la instalación en una terminal (PowerShell en Windows):
+```bash
+ollama --version
+```
+
+### 5.2 Elegir un modelo para tu PC
+
+Regla rápida: el modelo tiene que caber en la RAM (o en la memoria de la tarjeta gráfica) con margen.
+
+| Tu equipo | Modelo | Descarga aprox. | Para qué |
+|---|---|---|---|
+| 8 GB RAM, sin gráfica | `llama3.2:3b` | 2 GB | Chat rápido y respuestas cortas |
+| 8 GB RAM | `qwen3:4b` | 2,5 GB | Chat y razonamiento ligero, buen español |
+| 8–16 GB RAM | `gemma3:4b` | 3,3 GB | Chat general y resúmenes |
+| 16 GB RAM o gráfica de 8 GB | `qwen3:8b` | 5 GB | **Mejor equilibrio** calidad/velocidad |
+| 16 GB RAM | `llama3.1:8b` | 5 GB | Generalista |
+| 16 GB RAM, para programar | `qwen2.5-coder:7b` | 4,7 GB | Código |
+| 32 GB RAM o gráfica de 12 GB+ | `gemma3:12b` | 8 GB | Más calidad, más lento |
+
+Los modelos se renuevan a menudo: en https://ollama.com/library están los actuales. Con poca RAM, elige siempre el más pequeño.
+
+### 5.3 Descargar y probar un modelo
+
+```bash
+ollama pull qwen3:4b
+```
+
+```bash
+ollama run qwen3:4b "Hola, preséntate en una frase"
+```
+
+Para ver los modelos instalados:
+```bash
+ollama list
+```
+
+Para borrar uno y liberar espacio:
+```bash
+ollama rm qwen3:4b
+```
+
+### 5.4 Usarlo en Neura
+
+- **Neura para PC:** abre **⬡** → **ESTE PC** → **RECONECTAR**. El modelo aparece en el desplegable como `⬡ ESTE PC / ollama/qwen3:4b`. Elígelo y escribe.
+- **Móvil:** conéctalo a tu PC como en el apartado 4 y tendrás los modelos de tu PC en el móvil.
+- **AUTO-SALTO:** si una IA pública agota su cuota gratuita, Neura puede pasar a tu IA local, que nunca se agota.
+
+El puente detecta también **LM Studio** (`http://127.0.0.1:1234/v1`) si lo tienes abierto con el servidor local activado.
+
+---
+
+## 6. IA en otro ordenador o servidor (opcional)
+
+Para usar la IA de otra máquina (p. ej. un PC con buena gráfica), instala allí Ollama y el puente sin la app:
+
+```bash
+git clone https://github.com/AngelazoGit/neura.git
+```
+
+```bash
+cd neura/bridge && cp config.example.json config.json
+```
+
+Edita `config.json` (token y backends) y arranca:
+
+```bash
+NEURA_TOKEN=un-secreto-largo node server.mjs
+```
+
+En Windows (PowerShell):
+
+```bash
+$env:NEURA_TOKEN="un-secreto-largo"; node server.mjs
+```
+
+Después, añade su URL y token en **⬡** de Neura. Cada puente guarda sus propios hilos: para tener los hilos en todos tus dispositivos, conéctalos todos al **mismo** puente (desactiva **SINCRONIZAR HILOS** en los demás si no lo necesitas).
+
+Si Ollama está en una máquina y el puente en otra, haz que Ollama escuche en la red con la variable `OLLAMA_HOST=0.0.0.0` y reinícialo:
+- **Windows:** Configuración → "Editar las variables de entorno" → nueva variable `OLLAMA_HOST` = `0.0.0.0` → cierra y vuelve a abrir Ollama.
+- **macOS:**
+  ```bash
+  launchctl setenv OLLAMA_HOST "0.0.0.0"
+  ```
+- **Linux:** `sudo systemctl edit ollama` → añade `[Service]` y `Environment="OLLAMA_HOST=0.0.0.0"` → `sudo systemctl restart ollama`.
+
+En `config.json` del puente, apunta el backend a esa máquina: `{ "id": "ollama", "type": "ollama", "url": "http://IP-DE-OLLAMA:11434" }`.
+
+---
+
+## 7. Problemas frecuentes
+
+| Síntoma | Solución |
+|---|---|
+| **ESTE PC** sale con `ollama ○` (apagado) | Abre Ollama (Windows/macOS) o ejecuta `ollama serve` y pulsa **RECONECTAR** |
+| No aparece ningún modelo de Ollama | No hay modelos descargados: `ollama pull qwen3:4b` |
+| La respuesta tarda mucho | Modelo demasiado grande para tu equipo: prueba `llama3.2:3b` |
+| Aviso "Puertos 8787-8796 ocupados" | Hay otro puente abierto: ciérralo o cambia `port` en `escritorio.json` |
+| El móvil no conecta con el PC | Mismo Wi-Fi, **ABRIR A MI RED** activado, permite Neura en el firewall y revisa el token |
+| En iPhone no conecta | Acepta el permiso de **red local** que pide iOS la primera vez |
+| Quiero reiniciar Neura de cero | Cierra la app y borra la carpeta de datos (apartado 3); haz antes una copia |

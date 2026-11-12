@@ -4,8 +4,23 @@ const $ = (s, r = document) => r.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2, 10);
 const esc = (x) => String(x ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LS = 'neura.v1';
-// Dentro de la app nativa (Capacitor) las peticiones salen por la red del móvil: sin CORS ni bloqueo http.
-const NATIVE = !!window.Capacitor?.isNativePlatform?.();
+// Neura Desktop (Electron) expone window.neuraDesktop: guarda en disco y hace las peticiones desde el PC.
+const DESK = window.neuraDesktop || null;
+// En la app nativa (Capacitor) y en el PC las peticiones no pasan por el navegador: sin CORS ni bloqueo http.
+const NATIVE = !!window.Capacitor?.isNativePlatform?.() || !!DESK;
+const xfetch = DESK ? deskFetch : (...a) => fetch(...a);
+// La petición la hace el proceso principal del PC; aquí se reconstruye como un Response normal.
+async function deskFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  const id = uid() + uid();
+  const onAbort = () => DESK.abort(id);
+  signal?.addEventListener('abort', onAbort);
+  try {
+    const r = await DESK.fetch(id, { url: String(url), method, headers, body });
+    if (r.aborted || signal?.aborted) throw new DOMException('Cancelado', 'AbortError');
+    if (r.error || r.status < 200) throw new TypeError('Failed to fetch: ' + (r.error || r.status));
+    return new Response([204, 205, 304].includes(r.status) ? null : r.body, { status: r.status, headers: r.headers });
+  } finally { signal?.removeEventListener('abort', onAbort); }
+}
 
 // IAs públicas con API. Los nombres de modelo cambian: usa ESCANEAR para actualizarlos.
 const PRESETS = {
@@ -27,15 +42,29 @@ const PRESETS = {
 const S = Object.assign({ providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true }, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
+// Los mensajes necesitan id para fusionar hilos entre dispositivos sin duplicarlos.
+S.threads.forEach((t) => t.messages.forEach((m) => { m.id ||= uid() + uid(); }));
 function thread() {
-  let t = S.threads.find((x) => x.id === S.active);
+  let t = S.threads.find((x) => x.id === S.active && !x.deleted);
   if (!t) { t = { id: uid(), title: 'NUEVO HILO', messages: [], ts: Date.now() }; S.threads.unshift(t); S.active = t.id; }
   return t;
 }
-function load() { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } }
+function load() { try { return JSON.parse(DESK ? DESK.load() : localStorage.getItem(LS)) || {}; } catch { return {}; } }
 function save() {
-  try { localStorage.setItem(LS, JSON.stringify({ ...S, mcp: S.mcp.map(({ sessionId, status, ...m }) => m) })); }
+  const data = JSON.stringify({ ...S, mcp: S.mcp.map(({ sessionId, status, syncing, ...m }) => m) });
+  try { if (DESK) DESK.save(data); else localStorage.setItem(LS, data); }
   catch (e) { toast('No se pudo guardar: ' + e.message, true); }
+}
+// Fusión de un hilo de dos dispositivos: mensajes unidos por id, el resto lo gana el ts más reciente.
+// Mantener igual que mergeThread() en bridge/server.mjs.
+function mergeThread(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const [old, neu] = (b.ts || 0) > (a.ts || 0) ? [a, b] : [b, a];
+  const byId = new Map();
+  for (const m of [...(old.messages || []), ...(neu.messages || [])]) if (m?.id) byId.set(m.id, m);
+  const messages = neu.deleted ? [] : [...byId.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  return { ...old, ...neu, messages, ts: Math.max(a.ts || 0, b.ts || 0) };
 }
 let busy = false, abortCtl = null, rpcId = 0;
 
@@ -64,7 +93,7 @@ async function callOpenAI(p, model, messages, onDelta, signal) {
   const headers = { 'Content-Type': 'application/json' };
   if (p.apiKey) headers.Authorization = 'Bearer ' + p.apiKey;
   if (p.baseUrl.includes('openrouter.ai')) { headers['HTTP-Referer'] = location.origin; headers['X-Title'] = 'Neura'; }
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+  const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST', headers, signal, body: JSON.stringify({ model, messages, stream: !NATIVE }),
   });
   if (!r.ok) throw httpErr(r.status, await r.text());
@@ -94,7 +123,7 @@ async function callOpenAI(p, model, messages, onDelta, signal) {
 }
 
 async function callAnthropic(p, model, messages, onDelta, signal) {
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
+  const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
     method: 'POST', signal, body: JSON.stringify({ model, max_tokens: 4096, messages }),
     headers: { 'content-type': 'application/json', 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
   });
@@ -123,7 +152,7 @@ async function fetchModels(p) {
   const headers = p.kind === 'anthropic'
     ? { 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
     : (p.apiKey ? { Authorization: 'Bearer ' + p.apiKey } : {});
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/models', { headers });
+  const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/models', { headers });
   if (!r.ok) throw httpErr(r.status, await r.text());
   const j = await r.json();
   let list = j.data || j.models || [];
@@ -140,7 +169,7 @@ async function mcpRpc(s, method, params, notify = false, signal, retried = false
   if (s.token) headers.Authorization = 'Bearer ' + s.token;
   if (s.sessionId) headers['Mcp-Session-Id'] = s.sessionId;
   if (s.protocolVersion) headers['MCP-Protocol-Version'] = s.protocolVersion;
-  const r = await fetch(s.url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const r = await xfetch(s.url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const sid = r.headers.get('Mcp-Session-Id'); if (sid) s.sessionId = sid;
   if (r.status === 404 && s.sessionId && !retried && method !== 'initialize') {
     await mcpConnect(s, true); return mcpRpc(s, method, params, notify, signal, true);
@@ -177,6 +206,7 @@ async function mcpConnect(s, quiet) {
     }
     s.status = 'on'; s.error = null;
     if (!quiet) toast(`${s.name}: CONECTADO · ${s.models.length} modelos`);
+    syncWith(s);
   } catch (e) {
     s.status = 'err'; s.error = netHint(e);
     if (!quiet) toast(`${s.name}: ${s.error}`, true);
@@ -184,6 +214,37 @@ async function mcpConnect(s, quiet) {
   }
   save(); renderMcp(); renderTargets();
 }
+
+// ---------- sincronización de hilos ----------
+const canSync = (s) => s.status === 'on' && s.sync !== false && (s.tools || []).some((t) => t.name === 'threads_sync');
+async function syncWith(s) {
+  if (!canSync(s) || s.syncing) return;
+  s.syncing = true;
+  const startedAt = Date.now();
+  try {
+    // Solo se envía lo cambiado desde la última vez; los mensajes a medias no salen del dispositivo.
+    const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length))
+      .map((t) => ({ ...t, messages: t.messages.filter((m) => !m.pending) }));
+    const r = await mcpRpc(s, 'tools/call', { name: 'threads_sync', arguments: { since: s.syncRev || 0, threads: out } });
+    if (r.isError) throw new Error(r.content?.[0]?.text || 'Error al sincronizar');
+    const data = r.structuredContent || JSON.parse(r.content?.[0]?.text || '{}');
+    let changed = false;
+    for (const t of data.threads || []) {
+      const i = S.threads.findIndex((x) => x.id === t.id);
+      const local = S.threads[i];
+      if (local?.messages.some((m) => m.pending)) continue; // respuesta en curso: se fusiona en la próxima
+      const merged = mergeThread(local, t);
+      if (JSON.stringify(merged) === JSON.stringify(local)) continue;
+      if (i >= 0) S.threads[i] = merged; else S.threads.push(merged);
+      changed = true;
+    }
+    s.syncRev = data.rev; s.pushedAt = startedAt; s.syncedAt = Date.now(); s.syncError = null;
+    save();
+    if (changed && !busy) { renderLog(); if ($('#sheetThreads').classList.contains('open')) renderThreads(); }
+  } catch (e) { s.syncError = netHint(e); }
+  finally { s.syncing = false; if ($('#sheetMcp').classList.contains('open')) renderMcp(); }
+}
+const syncAll = () => S.mcp.forEach((s) => syncWith(s));
 
 // ---------- envío ----------
 function history(th) {
@@ -203,13 +264,14 @@ async function send(text) {
   hist.push({ role: 'user', content: text });
   if (!msgs.length) th.title = text.slice(0, 48);
   th.ts = Date.now();
-  msgs.push({ role: 'user', content: text, ts: Date.now() });
+  msgs.push({ id: uid(), role: 'user', content: text, ts: Date.now() });
+  save();
   const all = targets();
   const first = findT(S.target);
   const queue = first ? [first, ...(S.autoSkip ? all.filter((t) => t.key !== first.key) : [])] : [];
   setBusy(true);
   if (!queue.length) {
-    msgs.push({ role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
+    msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
   }
   for (const t of queue) {
     const msg = { id: uid(), role: 'assistant', label: t.label, content: '', pending: true, ts: Date.now() };
@@ -224,7 +286,7 @@ async function send(text) {
       if (!msg.skipped) break;
     }
   }
-  setBusy(false); save(); renderLog();
+  th.ts = Date.now(); setBusy(false); save(); renderLog(); syncAll();
 }
 
 function setBusy(b) {
@@ -324,9 +386,25 @@ function renderMcp() {
       ${(s.backends || []).length ? `<div class="chips">${s.backends.map((b) => `<span class="chip ${b.online ? '' : 'off'}">${esc(b.id)} ${b.online ? '● ' + b.count : '○'}</span>`).join('')}</div>` : ''}
       ${(s.models || []).length ? `<div class="chips">${s.models.map((m) => `<span class="chip">${esc(m)}</span>`).join('')}</div>` : ''}
       ${(s.tools || []).length ? `<div class="chips">${s.tools.map((t) => `<span class="chip tool" title="${esc(t.description || '')}">ƒ ${esc(t.name)}</span>`).join('')}</div>` : ''}
-      <div class="row"><button class="btn sm" data-act="reconnect">RECONECTAR</button><button class="btn sm red" data-act="del">ELIMINAR</button></div>
+      ${(s.tools || []).some((t) => t.name === 'threads_sync') ? `<label class="auto"><input type="checkbox" data-act="sync" ${s.sync !== false ? 'checked' : ''}> SINCRONIZAR HILOS
+        <span class="mono">${s.syncError ? `<span class="red">${esc(s.syncError)}</span>` : s.syncedAt ? '· ' + hhmm(s.syncedAt) : ''}</span></label>` : ''}
+      ${s.local && DESK ? localBridgeHTML() : ''}
+      <div class="row"><button class="btn sm" data-act="reconnect">RECONECTAR</button>${s.local ? '' : '<button class="btn sm red" data-act="del">ELIMINAR</button>'}</div>
     </div>`;
   }).join('');
+}
+
+// Puente integrado en Neura Desktop: el móvil se conecta a él para usar la IA del PC y compartir hilos.
+function localBridgeHTML() {
+  const b = DESK.bridge();
+  const urls = b.lan ? b.ips.map((ip) => `http://${ip}:${b.port}/mcp`) : [];
+  return `<div class="lan">
+    <label class="auto"><input type="checkbox" data-act="lan" ${b.lan ? 'checked' : ''}> ABRIR A MI RED (para el móvil)</label>
+    ${b.lan ? `<div class="mono">URL: ${urls.map(esc).join(' · ') || 'sin red'}</div>
+      <div class="mono">TOKEN: <span class="secret">${esc(b.token)}</span> <button class="btn sm ghost" data-act="copytoken">COPIAR</button></div>`
+      : '<div class="mono">Solo accesible desde este PC.</div>'}
+    ${b.error ? `<div class="mono red">${esc(b.error)}</div>` : ''}
+  </div>`;
 }
 
 let toastT;
@@ -341,9 +419,13 @@ function closeSheets() { document.querySelectorAll('.sheet').forEach((s) => { s.
 $('#btnAis').onclick = () => { renderProviders(); openSheet('#sheetAis'); };
 $('#btnMcp').onclick = () => { renderMcp(); openSheet('#sheetMcp'); };
 function renderThreads() {
-  $('#threadList').innerHTML = [...S.threads].sort((a, b) => b.ts - a.ts).map((t) => `<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`).join('');
+  const sv = S.mcp.filter(canSync);
+  $('#syncInfo').innerHTML = sv.length
+    ? `⇄ Sincronizado con ${sv.map((s) => `<b>${esc(s.name)}</b>`).join(', ')}: los mismos hilos en el PC, el móvil y la web.`
+    : 'Se guardan en este dispositivo. Para tener los mismos hilos en el PC y el móvil, conéctalos al mismo puente en <b>⬡</b>.';
+  $('#threadList').innerHTML = S.threads.filter((t) => !t.deleted && (t.messages.length || t.id === S.active)).sort((a, b) => b.ts - a.ts).map((t) => `<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`).join('');
 }
-$('#btnThreads').onclick = () => { renderThreads(); openSheet('#sheetThreads'); };
+$('#btnThreads').onclick = () => { renderThreads(); openSheet('#sheetThreads'); syncAll(); };
 $('#newThread').onclick = () => {
   if (busy) return toast('Espera a que termine la respuesta');
   if (thread().messages.length) S.active = null;
@@ -353,10 +435,11 @@ $('#threadList').addEventListener('click', (e) => {
   if (busy) return toast('Espera a que termine la respuesta');
   const del = e.target.dataset.del;
   if (del) {
-    if (!confirm('¿Borrar este hilo?')) return;
-    S.threads = S.threads.filter((t) => t.id !== del);
-    if (S.active === del) S.active = S.threads[0]?.id ?? null;
-    save(); renderThreads(); renderLog(); return;
+    if (!confirm('¿Borrar este hilo? Se borrará también en los equipos sincronizados.')) return;
+    // Se deja una marca de borrado para que el borrado llegue a los demás dispositivos.
+    Object.assign(S.threads.find((t) => t.id === del), { deleted: true, messages: [], ts: Date.now() });
+    if (S.active === del) S.active = S.threads.find((t) => !t.deleted)?.id ?? null;
+    save(); renderThreads(); renderLog(); syncAll(); return;
   }
   const it = e.target.closest('[data-tid]'); if (!it) return;
   S.active = it.dataset.tid; save(); renderLog(); closeSheets();
@@ -426,15 +509,37 @@ $('#mcpForm').onsubmit = (e) => {
   const s = { id: uid(), name: String(f.get('name')).trim().toUpperCase(), url, token: String(f.get('token')).trim(), models: [], tools: [] };
   S.mcp.push(s); e.target.reset(); save(); mcpConnect(s);
 };
+$('#mcpList').addEventListener('change', async (e) => {
+  const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
+  const s = S.mcp.find((x) => x.id === card.dataset.sid);
+  if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
+  if (act === 'lan') {
+    e.target.disabled = true;
+    await DESK.setLan(e.target.checked);
+    await mcpConnect(s, true).catch(() => {});
+    renderMcp();
+  }
+});
 $('#mcpList').addEventListener('click', (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
+  if (act === 'copytoken') navigator.clipboard?.writeText(DESK.bridge().token).then(() => toast('TOKEN COPIADO'));
   if (act === 'reconnect') mcpConnect(s);
   if (act === 'del') { S.mcp = S.mcp.filter((x) => x !== s); save(); renderMcp(); renderTargets(); renderLog(); }
 });
 
 // ---------- arranque ----------
 S.threads.flatMap((t) => t.messages).forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
+if (DESK) {
+  // El puente integrado del PC aparece siempre como primer servidor MCP.
+  const b = DESK.bridge();
+  let s = S.mcp.find((x) => x.local);
+  if (!s) S.mcp.unshift(s = { id: 'local', local: true, name: 'ESTE PC', models: [], tools: [] });
+  Object.assign(s, { url: `http://127.0.0.1:${b.port}/mcp`, token: b.token });
+}
+save();
 renderTargets(); renderLog();
 S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));
+setInterval(() => { if (document.visibilityState === 'visible') syncAll(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncAll(); });
 if (!NATIVE && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});

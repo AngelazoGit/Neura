@@ -7,6 +7,8 @@ neura/
 ├── app/       La app (HTML/CSS/JS, sin build)
 ├── android/   Proyecto nativo Android (Capacitor)
 ├── ios/       Proyecto nativo iOS (Capacitor)
+├── desktop/   App para PC (Windows, macOS, Linux) con Electron y el puente integrado
+├── docs/      Guías (PC + Ollama)
 ├── assets/    Fuentes del icono y la pantalla de arranque
 └── bridge/    neura-bridge: servidor MCP sin dependencias (Node 18+)
 ```
@@ -16,6 +18,7 @@ neura/
 1. **Un solo chat con todas las IAs públicas.** En **⚙** añades Gemini, Groq, OpenRouter (modelos gratis), Cerebras, Mistral, GitHub Models, Hugging Face o Cohere con la clave gratuita de cada una. Opcionales de pago: Anthropic, OpenAI, DeepSeek. Eliges el modelo en el desplegable y la conversación continúa aunque cambies de IA.
 2. **AUTO-SALTO para tokens gratis.** Si la IA elegida agota su cuota gratuita (429), falla o rechaza la clave, Neura reenvía el mensaje a la siguiente IA conectada.
 3. **Menú MCP (⬡).** Conecta con uno o varios servidores MCP (`neura-bridge` u otro compatible). Sus modelos locales aparecen en el mismo desplegable.
+4. **Hilos (≡).** Varias conversaciones guardadas. Con un puente conectado, los hilos se sincronizan entre el PC, el móvil y la web sin perder mensajes.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.
 
@@ -27,15 +30,28 @@ cp config.example.json config.json   # edita backends y token
 NEURA_TOKEN=un-secreto-largo node server.mjs
 ```
 
-Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` y `system_info`. Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
+Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat`, `system_info` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`). Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
 
-Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`.
+Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`.
 
 Si el puente escucha en la red y no defines token, genera uno aleatorio en cada arranque y lo muestra en pantalla. Fija el tuyo con `NEURA_TOKEN` para que no cambie.
 
 Tests de seguridad del puente: `node --test bridge/test.mjs`.
 
 Si alguna IA pública bloquea las llamadas desde el navegador (CORS), añádela como backend del puente (admite `url` + `apiKey`) y úsala a través de él.
+
+## App para PC (Windows, macOS, Linux)
+
+`desktop/` empaqueta `app/` con Electron. Guarda los hilos y ajustes en un archivo en disco, hace las peticiones sin CORS y arranca solo el puente MCP, que aparece en **⬡** como **ESTE PC** con los modelos de Ollama. Con **ABRIR A MI RED**, el móvil se conecta al PC y comparte sus hilos.
+
+```bash
+npm run pc              # abrir en modo desarrollo (la primera vez: cd desktop && npm install)
+npm run pc:instalador   # genera el instalador de tu sistema en desktop/dist/
+```
+
+GitHub Actions genera los instaladores de Windows (.exe), macOS (.dmg) y Linux (.AppImage/.deb) en cada push a `main` (artifacts `neura-pc-*`).
+
+**Guía completa (instalación, datos, sincronización e instalación de Ollama):** [docs/ESCRITORIO-Y-OLLAMA.md](docs/ESCRITORIO-Y-OLLAMA.md)
 
 ## App nativa (Android e iOS) con Capacitor
 
