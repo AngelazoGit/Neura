@@ -20,6 +20,7 @@
 <body>
 <div id="app">
   <header class="top">
+    <button class="ico" id="btnThreads" aria-label="Hilos guardados">≡</button>
     <div class="brand">
       <svg viewBox="0 0 40 46" class="logo" aria-hidden="true">
         <path d="M20 2 38 12.5v21L20 44 2 33.5v-21z" fill="none" stroke="var(--orange)" stroke-width="2.4"/>
@@ -33,7 +34,6 @@
       </div>
     </div>
     <div class="sync"><span class="dot" id="syncDot"></span><span id="syncTxt">0 IA</span></div>
-    <button class="ico" id="btnClear" aria-label="Vaciar chat">⌫</button>
     <button class="ico" id="btnAis" aria-label="IAs conectadas">⚙</button>
     <button class="ico" id="btnMcp" aria-label="Servidores MCP">⬡</button>
   </header>
@@ -53,6 +53,15 @@
     <button type="submit" id="send"><span>ENVIAR</span></button>
   </form>
 </div>
+
+<section class="sheet" id="sheetThreads" aria-hidden="true">
+  <div class="sheet-in">
+    <header><h2>HILOS <em>// GUARDADOS</em></h2><button class="ico close">✕</button></header>
+    <button class="btn wide" id="newThread">+ NUEVO HILO</button>
+    <div id="threadList"></div>
+    <p class="hint">Las conversaciones se guardan solo en este dispositivo.</p>
+  </div>
+</section>
 
 <section class="sheet" id="sheetAis" aria-hidden="true">
   <div class="sheet-in">

@@ -24,7 +24,14 @@ const PRESETS = {
 };
 
 // ---------- estado ----------
-const S = Object.assign({ providers: [], mcp: [], messages: [], target: null, autoSkip: true }, load());
+const S = Object.assign({ providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true }, load());
+// Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
+if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
+function thread() {
+  let t = S.threads.find((x) => x.id === S.active);
+  if (!t) { t = { id: uid(), title: 'NUEVO HILO', messages: [], ts: Date.now() }; S.threads.unshift(t); S.active = t.id; }
+  return t;
+}
 function load() { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } }
 function save() {
   try { localStorage.setItem(LS, JSON.stringify({ ...S, mcp: S.mcp.map(({ sessionId, status, ...m }) => m) })); }
@@ -179,9 +186,9 @@ async function mcpConnect(s, quiet) {
 }
 
 // ---------- envío ----------
-function history() {
+function history(th) {
   const h = [];
-  for (const m of S.messages) {
+  for (const m of th.messages) {
     if (m.role === 'user') h.push({ role: 'user', content: m.content });
     else if (m.content && !m.error) h.push({ role: 'assistant', content: m.content });
   }
@@ -191,19 +198,22 @@ function history() {
 const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 401 || e.status === 403 || e.status === 402);
 
 async function send(text) {
-  const hist = history();
+  const th = thread(), msgs = th.messages;
+  const hist = history(th);
   hist.push({ role: 'user', content: text });
-  S.messages.push({ role: 'user', content: text, ts: Date.now() });
+  if (!msgs.length) th.title = text.slice(0, 48);
+  th.ts = Date.now();
+  msgs.push({ role: 'user', content: text, ts: Date.now() });
   const all = targets();
   const first = findT(S.target);
   const queue = first ? [first, ...(S.autoSkip ? all.filter((t) => t.key !== first.key) : [])] : [];
   setBusy(true);
   if (!queue.length) {
-    S.messages.push({ role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
+    msgs.push({ role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
   }
   for (const t of queue) {
     const msg = { id: uid(), role: 'assistant', label: t.label, content: '', pending: true, ts: Date.now() };
-    S.messages.push(msg); renderLog();
+    msgs.push(msg); renderLog();
     try {
       msg.content = (await callTarget(t, hist, (x) => { msg.content = x; schedule(msg); }, abortCtl.signal)) || msg.content || '(respuesta vacía)';
       msg.pending = false; break;
@@ -247,7 +257,8 @@ function msgHTML(m) {
 function renderLog() {
   const log = $('#log');
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-  if (!S.messages.length) {
+  const msgs = thread().messages;
+  if (!msgs.length) {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
@@ -257,7 +268,7 @@ function renderLog() {
       <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li></ol></div>`;
     return;
   }
-  log.innerHTML = S.messages.map(msgHTML).join('');
+  log.innerHTML = msgs.map(msgHTML).join('');
   if (stick) log.scrollTop = log.scrollHeight;
 }
 
@@ -329,10 +340,27 @@ function openSheet(id) { closeSheets(); const s = $(id); s.classList.add('open')
 function closeSheets() { document.querySelectorAll('.sheet').forEach((s) => { s.classList.remove('open'); s.setAttribute('aria-hidden', 'true'); }); }
 $('#btnAis').onclick = () => { renderProviders(); openSheet('#sheetAis'); };
 $('#btnMcp').onclick = () => { renderMcp(); openSheet('#sheetMcp'); };
-$('#btnClear').onclick = () => {
-  if (busy || !S.messages.length || !confirm('¿Vaciar el chat?')) return;
-  S.messages = []; save(); renderLog();
+function renderThreads() {
+  $('#threadList').innerHTML = [...S.threads].sort((a, b) => b.ts - a.ts).map((t) => `<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`).join('');
+}
+$('#btnThreads').onclick = () => { renderThreads(); openSheet('#sheetThreads'); };
+$('#newThread').onclick = () => {
+  if (busy) return toast('Espera a que termine la respuesta');
+  if (thread().messages.length) S.active = null;
+  thread(); save(); renderLog(); closeSheets();
 };
+$('#threadList').addEventListener('click', (e) => {
+  if (busy) return toast('Espera a que termine la respuesta');
+  const del = e.target.dataset.del;
+  if (del) {
+    if (!confirm('¿Borrar este hilo?')) return;
+    S.threads = S.threads.filter((t) => t.id !== del);
+    if (S.active === del) S.active = S.threads[0]?.id ?? null;
+    save(); renderThreads(); renderLog(); return;
+  }
+  const it = e.target.closest('[data-tid]'); if (!it) return;
+  S.active = it.dataset.tid; save(); renderLog(); closeSheets();
+});
 document.querySelectorAll('.sheet').forEach((s) => s.addEventListener('click', (e) => { if (e.target === s || e.target.closest('.close')) closeSheets(); }));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheets(); });
 
@@ -353,7 +381,7 @@ $('#composer').onsubmit = (e) => {
 };
 $('#log').addEventListener('click', (e) => {
   const id = e.target.dataset?.copy; if (!id) return;
-  const m = S.messages.find((x) => x.id === id);
+  const m = thread().messages.find((x) => x.id === id);
   navigator.clipboard?.writeText(m?.content || '').then(() => toast('COPIADO'), () => toast('No se pudo copiar', true));
 });
 
@@ -406,7 +434,7 @@ $('#mcpList').addEventListener('click', (e) => {
 });
 
 // ---------- arranque ----------
-S.messages.forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
+S.threads.flatMap((t) => t.messages).forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
 renderTargets(); renderLog();
 S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));
 if (!NATIVE && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
