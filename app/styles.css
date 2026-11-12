@@ -39,10 +39,10 @@ h1{margin:0;font:900 26px/1 var(--serif);letter-spacing:.06em;transform:scaleX(.
 .stripe{height:6px;flex:none;background:repeating-linear-gradient(-45deg,var(--orange) 0 10px,#000 10px 20px);opacity:.85}
 
 /* bar */
-.bar{display:flex;gap:8px;padding:8px 12px;align-items:center;border-bottom:1px solid var(--line)}
+.bar{display:flex;flex-wrap:wrap;gap:6px 8px;padding:8px 12px;align-items:center;border-bottom:1px solid var(--line)}
 .auto{display:flex;align-items:center;gap:6px;font:700 11px var(--cond);letter-spacing:.14em;color:var(--purple2);white-space:nowrap;border:1px solid var(--purple);padding:7px 10px;clip-path:var(--cut);cursor:pointer}
 .auto input{accent-color:var(--orange);width:16px;height:16px;margin:0}
-#target{flex:1;min-width:0}
+#target{flex:1 1 220px;min-width:0}
 select,input,textarea{background:var(--panel);border:1px solid var(--line);padding:8px 10px;border-radius:0;outline:none;min-width:0}
 select:focus,input:focus,textarea:focus{border-color:var(--orange)}
 select{font:13px var(--mono);color:var(--orange2)}
@@ -147,3 +147,71 @@ h3{font:700 13px var(--cond);letter-spacing:.24em;color:var(--orange2);margin:24
 .chip.off{color:var(--red)}
 /* iOS hace zoom al enfocar campos de menos de 16px */
 @media (pointer:coarse){input,select,textarea{font-size:16px!important}}
+.card label.auto{flex-direction:row;flex-wrap:wrap;align-self:flex-start}
+.lan{border-top:1px dashed var(--line);margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:6px}
+.secret{color:var(--green);word-break:break-all}
+
+/* markdown */
+.txt p{margin:0 0 8px}
+.txt p:last-child{margin-bottom:0}
+.txt ul,.txt ol{margin:4px 0 8px;padding-left:22px}
+.txt li{margin:2px 0}
+.txt blockquote{margin:6px 0;padding:4px 10px;border-left:3px solid var(--purple);color:var(--dim)}
+.txt a{color:var(--orange2);text-decoration:underline;word-break:break-all}
+.txt hr{border:0;border-top:1px dashed var(--line);margin:10px 0}
+.txt .h1,.txt .h2{font-size:1.15em}
+.tbl{overflow-x:auto;margin:6px 0}
+.tbl table{border-collapse:collapse;font:13px var(--mono)}
+.tbl th,.tbl td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.tbl th{color:var(--orange2);background:var(--panel2)}
+.tbl .ar{text-align:right}.tbl .ac{text-align:center}
+mark{background:rgba(255,122,0,.35);color:var(--text)}
+
+/* respuestas: acciones, herramientas, consejo, resumen */
+.reply .tag .acts{display:flex;gap:6px;align-items:center}
+.reply .ms{font:11px var(--mono);color:var(--dim)}
+.reply>.chips{margin-bottom:6px}
+.chip.off{color:var(--red);border-color:rgba(255,45,45,.4)}
+.council>.tag{color:var(--orange2)}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin-bottom:8px}
+.cgrid .reply{max-height:340px;overflow-y:auto;border-top-color:var(--purple)}
+.cgrid .reply .tag{color:var(--purple2)}
+.reply.synth{border-top-color:var(--green);box-shadow:0 0 0 1px rgba(93,255,122,.15)}
+.reply.synth .tag{color:var(--green)}
+.note{max-width:900px;width:100%;margin:0 auto;font:12px var(--mono);color:var(--dim);border:1px dashed var(--line);padding:6px 10px}
+.note summary{cursor:pointer;color:var(--purple2)}
+.note .txt{margin-top:6px;font-family:var(--cond);font-size:14px}
+.files{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.thumb{max-width:160px;max-height:160px;border:1px solid var(--line);display:block}
+
+/* adjuntos y composer */
+#attachBar{padding:6px 12px 0;background:#0b0810;border-top:1px solid var(--line)}
+#attachBar .chip{display:inline-flex;align-items:center;gap:6px;color:var(--text)}
+#attachBar img{width:28px;height:28px;object-fit:cover}
+#attachBar button{background:none;border:0;color:var(--red);cursor:pointer;padding:0 2px}
+#composer .ico.tool{align-self:flex-end;height:42px;width:38px}
+#mic.rec{background:var(--red);color:#fff;animation:pulse 1s infinite}
+#mic.busy{opacity:.5}
+
+/* hilos */
+.search{width:100%;margin:0 0 8px;font:13px var(--mono)}
+.chatItem .snip{display:block;font:11px var(--mono);color:var(--dim);font-style:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row.wrap{flex-wrap:wrap;margin-top:10px}
+
+/* ajustes */
+.field{display:flex;flex-direction:column;gap:3px;font:500 10px var(--cond);letter-spacing:.22em;color:var(--dim)}
+.checks{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto}
+.checks .auto{white-space:normal;font:12px var(--mono);letter-spacing:0;color:var(--text)}
+
+/* PC: puente integrado */
+.lan h4{margin:12px 0 2px;font:700 11px var(--cond);letter-spacing:.2em;color:var(--orange2)}
+.qr{display:flex;gap:10px;align-items:center}
+.qr img{width:150px;height:150px;background:#fff;padding:6px;flex:none}
+.folder{display:flex;justify-content:space-between;gap:8px;align-items:center}
+
+/* superposiciones: escáner QR y PIN */
+.overlay{position:fixed;inset:0;z-index:60;background:rgba(7,6,10,.96);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px;text-align:center}
+.overlay[hidden]{display:none}
+.overlay video{width:min(90vw,420px);aspect-ratio:1;object-fit:cover;border:2px solid var(--orange)}
+.overlay .card{width:min(92vw,360px);text-align:left}
+.overlay h2{font-size:18px}

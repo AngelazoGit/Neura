@@ -3,14 +3,48 @@
 const $ = (s, r = document) => r.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2, 10);
 const esc = (x) => String(x ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const md = (s) => window.NeuraMD.render(s);
 const LS = 'neura.v1';
-// Dentro de la app nativa (Capacitor) las peticiones salen por la red del móvil: sin CORS ni bloqueo http.
-const NATIVE = !!window.Capacitor?.isNativePlatform?.();
+// Neura Desktop (Electron) expone window.neuraDesktop: guarda en disco y hace las peticiones desde el PC.
+const DESK = window.neuraDesktop || null;
+const CAP = !!window.Capacitor?.isNativePlatform?.();
+// En la app nativa (Capacitor) y en el PC las peticiones no pasan por el navegador: sin CORS ni bloqueo http.
+const NATIVE = CAP || !!DESK;
+// CapacitorHttp entrega la respuesta completa de una vez: allí no hay streaming real.
+const STREAM = !CAP;
+const xfetch = DESK ? deskFetch : (...a) => fetch(...a);
+const MAX_ATTEMPTS = 6;
+
+// La petición la hace el proceso principal del PC y llega por trozos: aquí se convierte en un Response normal.
+function deskFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  const id = uid() + uid();
+  let ctrl;
+  const stream = new ReadableStream({ start(c) { ctrl = c; }, cancel() { DESK.abort(id); } });
+  const onAbort = () => DESK.abort(id);
+  signal?.addEventListener('abort', onAbort);
+  const done = () => signal?.removeEventListener('abort', onAbort);
+  return new Promise((resolve, reject) => {
+    let head = false;
+    DESK.request(id, { url: String(url), method, headers, body }, (type, data) => {
+      if (type === 'head') {
+        head = true;
+        resolve(new Response([204, 205, 304].includes(data.status) ? null : stream, { status: data.status, headers: data.headers }));
+      } else if (type === 'chunk') ctrl.enqueue(data);
+      else if (type === 'end') { done(); try { ctrl.close(); } catch {} }
+      else if (type === 'error') {
+        done();
+        const err = data.aborted || signal?.aborted ? new DOMException('Cancelado', 'AbortError') : new TypeError('Failed to fetch: ' + data.message);
+        if (head) { try { ctrl.error(err); } catch {} } else reject(err);
+      }
+    });
+  });
+}
 
 // IAs públicas con API. Los nombres de modelo cambian: usa ESCANEAR para actualizarlos.
+// stt: modelo de dictado por voz (API /audio/transcriptions compatible con OpenAI).
 const PRESETS = {
   gemini:     { name: 'Google Gemini', kind: 'openai', tier: 'free', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-flash', 'gemini-2.5-flash-lite'], keyUrl: 'https://aistudio.google.com/apikey' },
-  groq:       { name: 'Groq', kind: 'openai', tier: 'free', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'], keyUrl: 'https://console.groq.com/keys' },
+  groq:       { name: 'Groq', kind: 'openai', tier: 'free', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'], keyUrl: 'https://console.groq.com/keys', stt: 'whisper-large-v3-turbo' },
   openrouter: { name: 'OpenRouter', kind: 'openai', tier: 'free', baseUrl: 'https://openrouter.ai/api/v1', models: [], freeOnly: true, keyUrl: 'https://openrouter.ai/keys' },
   cerebras:   { name: 'Cerebras', kind: 'openai', tier: 'free', baseUrl: 'https://api.cerebras.ai/v1', models: ['llama-3.3-70b', 'gpt-oss-120b'], keyUrl: 'https://cloud.cerebras.ai' },
   mistral:    { name: 'Mistral', kind: 'openai', tier: 'free', baseUrl: 'https://api.mistral.ai/v1', models: ['mistral-small-latest', 'open-mistral-nemo'], keyUrl: 'https://console.mistral.ai/api-keys' },
@@ -18,26 +52,50 @@ const PRESETS = {
   hf:         { name: 'Hugging Face', kind: 'openai', tier: 'free', baseUrl: 'https://router.huggingface.co/v1', models: ['meta-llama/Llama-3.3-70B-Instruct'], keyUrl: 'https://huggingface.co/settings/tokens' },
   cohere:     { name: 'Cohere', kind: 'openai', tier: 'free', baseUrl: 'https://api.cohere.ai/compatibility/v1', models: ['command-a-03-2025'], keyUrl: 'https://dashboard.cohere.com/api-keys' },
   anthropic:  { name: 'Anthropic Claude', kind: 'anthropic', tier: 'paid', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], keyUrl: 'https://console.anthropic.com/settings/keys' },
-  openai:     { name: 'OpenAI', kind: 'openai', tier: 'paid', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1-mini'], keyUrl: 'https://platform.openai.com/api-keys' },
+  openai:     { name: 'OpenAI', kind: 'openai', tier: 'paid', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1-mini'], keyUrl: 'https://platform.openai.com/api-keys', stt: 'gpt-4o-mini-transcribe' },
   deepseek:   { name: 'DeepSeek', kind: 'openai', tier: 'paid', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat'], keyUrl: 'https://platform.deepseek.com/api_keys' },
   custom:     { name: 'Otra (compatible OpenAI)', kind: 'openai', tier: 'other', baseUrl: '', models: [] },
 };
 
 // ---------- estado ----------
-const S = Object.assign({ providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true }, load());
+const S = Object.assign({
+  providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
+  health: {}, ctxTokens: 6000, council: false, councilKeys: [], useTools: false, vault: null,
+}, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
+// Los mensajes necesitan id para fusionar hilos entre dispositivos sin duplicarlos.
+S.threads.forEach((t) => t.messages.forEach((m) => { m.id ||= uid() + uid(); }));
 function thread() {
-  let t = S.threads.find((x) => x.id === S.active);
+  let t = S.threads.find((x) => x.id === S.active && !x.deleted);
   if (!t) { t = { id: uid(), title: 'NUEVO HILO', messages: [], ts: Date.now() }; S.threads.unshift(t); S.active = t.id; }
   return t;
 }
-function load() { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } }
+function load() { try { return JSON.parse(DESK ? DESK.load() : localStorage.getItem(LS)) || {}; } catch { return {}; } }
 function save() {
-  try { localStorage.setItem(LS, JSON.stringify({ ...S, mcp: S.mcp.map(({ sessionId, status, ...m }) => m) })); }
+  const st = { ...S, mcp: S.mcp.map(({ sessionId, status, syncing, ...m }) => m) };
+  if (S.vault) {
+    // Con PIN, las claves solo se guardan cifradas dentro de S.vault.
+    st.providers = st.providers.map(({ apiKey, ...p }) => p);
+    st.mcp = st.mcp.map((m) => (m.local ? m : (({ token, ...x }) => x)(m)));
+    if (vault.key) sealSoon();
+  }
+  const data = JSON.stringify(st);
+  try { if (DESK) DESK.save(data); else localStorage.setItem(LS, data); }
   catch (e) { toast('No se pudo guardar: ' + e.message, true); }
 }
-let busy = false, abortCtl = null, rpcId = 0;
+// Fusión de un hilo de dos dispositivos: mensajes unidos por id, el resto lo gana el ts más reciente.
+// Mantener igual que mergeThread() en bridge/server.mjs.
+function mergeThread(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const [old, neu] = (b.ts || 0) > (a.ts || 0) ? [a, b] : [b, a];
+  const byId = new Map();
+  for (const m of [...(old.messages || []), ...(neu.messages || [])]) if (m?.id) byId.set(m.id, m);
+  const messages = neu.deleted ? [] : [...byId.values()].sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  return { ...old, ...neu, messages, ts: Math.max(a.ts || 0, b.ts || 0) };
+}
+let busy = false, abortCtl = null, rpcId = 0, attach = [];
 
 function targets() {
   const t = [];
@@ -46,34 +104,127 @@ function targets() {
   return t;
 }
 const findT = (k) => targets().find((t) => t.key === k);
+const hhmm = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// ---------- AUTO-SALTO inteligente: salud de cada IA ----------
+// Recuerda qué IA agotó su cuota y hasta cuándo, su velocidad y su tasa de éxito.
+const H = (k) => (S.health[k] ||= { ok: 0, fail: 0, ms: 0 });
+const cooling = (k) => (S.health[k]?.coolUntil || 0) > Date.now();
+function parseWait(text) {
+  const m = String(text).match(/(?:try again|retry|retrydelay|wait|reintenta|espera)[^0-9]{0,20}((?:\d+(?:\.\d+)?\s*(?:ms|h|m|s)\w*\s*)+)/i);
+  if (!m) return 0;
+  let s = 0;
+  for (const [, n, u] of m[1].matchAll(/(\d+(?:\.\d+)?)\s*(ms|h|m|s)/gi)) s += n * { ms: 0.001, h: 3600, m: 60, s: 1 }[u.toLowerCase()];
+  return Math.ceil(s);
+}
+const untilMidnightUTC = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 0); return Math.ceil((d - Date.now()) / 1000); };
+// Gemini y otras devuelven 400 (no 401) con una clave inválida.
+const isKeyErr = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api.?key|unauthori[sz]ed|invalid.{0,12}(key|token|credential)/i.test(e.message || ''));
+function noteOk(t, ms) { Object.assign(H(t.key), { coolUntil: 0, reason: null, streak: 0 }); const h = H(t.key); h.ok++; h.ms = h.ms ? Math.round(h.ms * 0.7 + ms * 0.3) : ms; }
+function noteFail(t, e) {
+  if (e.name === 'AbortError') return;
+  const h = H(t.key), msg = e.message || '';
+  h.fail++; h.streak = (h.streak || 0) + 1;
+  if (e.status === 429 || /quota|rate.?limit|resource.?exhausted|too many requests/i.test(msg)) {
+    let wait = e.retryAfter || parseWait(msg) || 60;
+    if (!e.retryAfter && /per.?day|daily|\bRPD\b|\bTPD\b|por día|diari/i.test(msg)) wait = untilMidnightUTC();
+    Object.assign(h, { coolUntil: Date.now() + wait * 1000, reason: 'CUOTA' });
+  } else if (isKeyErr(e) && t.pid) {
+    // Una clave rechazada afecta a todos los modelos del proveedor hasta que la cambies.
+    for (const x of targets()) if (x.pid === t.pid) Object.assign(H(x.key), { coolUntil: Date.now() + 365 * 864e5, reason: 'CLAVE' });
+  } else if (e.status === 402) Object.assign(h, { coolUntil: Date.now() + 3600e3, reason: 'SALDO' });
+  else if (h.streak >= 2) Object.assign(h, { coolUntil: Date.now() + 30e3 * Math.min(h.streak, 10), reason: 'FALLA' });
+}
+function score(t) {
+  const h = S.health[t.key] || {};
+  const rate = ((h.ok || 0) + 1) / ((h.ok || 0) + (h.fail || 0) + 2);
+  return rate - 0.3 * (h.ms ? Math.min(h.ms, 60000) / 60000 : 0.3);
+}
+// Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
+function plan(first) {
+  if (!first) return [];
+  if (!S.autoSkip) return [first];
+  const rest = targets().filter((t) => t.key !== first.key);
+  const adj = (t) => score(t) - (t.pid && t.pid === first.pid ? 0.5 : 0);
+  const ready = rest.filter((t) => !cooling(t.key)).sort((a, b) => adj(b) - adj(a));
+  const cold = rest.filter((t) => cooling(t.key)).sort((a, b) => S.health[a.key].coolUntil - S.health[b.key].coolUntil);
+  return [first, ...ready, ...cold];
+}
+function coolText(k) {
+  const h = S.health[k];
+  if (h.reason === 'CLAVE') return 'CLAVE RECHAZADA';
+  const until = new Date(h.coolUntil);
+  return `${h.reason} · hasta ${until.toDateString() === new Date().toDateString() ? hhmm(h.coolUntil) : until.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
+}
 
 // ---------- llamadas a IAs ----------
-function httpErr(status, body) {
+function httpErr(status, body, headers) {
   let m = body;
   try { const j = JSON.parse(body); m = j.error?.message || j.message || j.error || body; } catch {}
   const e = new Error(String(typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 300));
-  e.status = status; return e;
+  e.status = status;
+  const ra = headers?.get?.('retry-after');
+  if (ra) e.retryAfter = /^\d+(\.\d+)?$/.test(ra) ? Math.ceil(+ra) : Math.max(0, Math.ceil((Date.parse(ra) - Date.now()) / 1000)) || 0;
+  if (!e.retryAfter && status === 429) e.retryAfter = parseWait('retry ' + (headers?.get?.('x-ratelimit-reset-requests') || '')) || 0;
+  return e;
 }
 function netHint(e) {
   if (e.name === 'AbortError') return 'Cancelado';
   if (e instanceof TypeError && /fetch|network|load/i.test(e.message)) return 'Sin conexión: servidor apagado, CORS bloqueado o contenido mixto (http desde https).';
   return e.message;
 }
+const isCtxErr = (e) => e.status === 413 || /context.{0,20}(length|window|limit)|too (long|large)|maximum.{0,30}tokens|token.{0,10}limit|reduce the length|prompt is too long/i.test(e.message || '');
+const textOf = (c) => (typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n'));
 
-async function callOpenAI(p, model, messages, onDelta, signal) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (p.apiKey) headers.Authorization = 'Bearer ' + p.apiKey;
-  if (p.baseUrl.includes('openrouter.ai')) { headers['HTTP-Referer'] = location.origin; headers['X-Title'] = 'Neura'; }
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-    method: 'POST', headers, signal, body: JSON.stringify({ model, messages, stream: !NATIVE }),
-  });
-  if (!r.ok) throw httpErr(r.status, await r.text());
+// Herramientas MCP disponibles para las IAs (todas menos las internas de Neura).
+const INTERNAL = new Set(['chat', 'list_models', 'threads_sync']);
+function toolbox() {
+  const list = [], used = new Set();
+  for (const s of S.mcp) if (s.status === 'on') for (const t of s.tools || []) {
+    // system_info revela nombre del PC e IPs internas: solo la usa la IA local (dentro del puente).
+    if (INTERNAL.has(t.name) || t.name === 'system_info') continue;
+    const base = t.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 56);
+    let name = base, n = 2;
+    while (used.has(name)) name = `${base}_${n++}`;
+    used.add(name);
+    list.push({ name, s, tool: t });
+  }
+  return list;
+}
+const trusted = (s) => s.local || s.serverInfo?.name === 'neura-bridge' || s.trustTools;
+async function runTool(tb, name, rawArgs, signal, onTool) {
+  const x = tb.find((y) => y.name === name);
+  let args = rawArgs;
+  if (typeof args === 'string') { try { args = JSON.parse(args || '{}'); } catch { args = {}; } }
+  if (!x) return `Herramienta desconocida: ${name}`;
+  if (!trusted(x.s) && !confirm(`La IA quiere usar «${x.tool.name}» de ${x.s.name} con:\n${JSON.stringify(args).slice(0, 400)}\n\n¿Permitir?`)) {
+    onTool?.({ name: x.tool.name, args, ok: false, server: x.s.name });
+    return 'El usuario no permitió usar esta herramienta.';
+  }
+  try {
+    const r = await mcpRpc(x.s, 'tools/call', { name: x.tool.name, arguments: args || {} }, { signal });
+    let out = (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+    if (!out && r.structuredContent) out = JSON.stringify(r.structuredContent);
+    onTool?.({ name: x.tool.name, args, ok: !r.isError, server: x.s.name });
+    return out.slice(0, 20000) || '(sin resultado)';
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    onTool?.({ name: x.tool.name, args, ok: false, server: x.s.name });
+    return 'Error: ' + netHint(e);
+  }
+}
+
+async function readOpenAI(r, onText) {
   if (!(r.headers.get('content-type') || '').includes('event-stream')) {
-    const j = await r.json(); const txt = j.choices?.[0]?.message?.content ?? '';
-    onDelta(txt); return txt;
+    const j = await r.json();
+    const msg = j.choices?.[0]?.message || {};
+    const text = textOf(msg.content ?? '');
+    onText(text);
+    return { text, calls: msg.tool_calls || [] };
   }
   const reader = r.body.getReader(), dec = new TextDecoder();
-  let buf = '', out = '';
+  let buf = '', text = '';
+  const calls = [];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -86,45 +237,114 @@ async function callOpenAI(p, model, messages, onDelta, signal) {
       if (!d || d === '[DONE]') continue;
       let j; try { j = JSON.parse(d); } catch { continue; }
       if (j.error) throw httpErr(j.error.code || 0, JSON.stringify(j));
-      const c = j.choices?.[0]?.delta?.content;
-      if (c) { out += c; onDelta(out); }
+      const delta = j.choices?.[0]?.delta || {};
+      if (delta.content) { text += delta.content; onText(text); }
+      for (const tc of delta.tool_calls || []) {
+        const c = (calls[tc.index ?? calls.length] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
+        if (tc.id) c.id = tc.id;
+        if (tc.function?.name) c.function.name += tc.function.name;
+        if (tc.function?.arguments) c.function.arguments += tc.function.arguments;
+      }
     }
   }
-  return out;
+  return { text, calls: calls.filter(Boolean).map((c, k) => ({ ...c, id: c.id || `call_${k}` })) };
 }
 
-async function callAnthropic(p, model, messages, onDelta, signal) {
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
-    method: 'POST', signal, body: JSON.stringify({ model, max_tokens: 4096, messages }),
-    headers: { 'content-type': 'application/json', 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-  });
-  if (!r.ok) throw httpErr(r.status, await r.text());
-  const j = await r.json();
-  const txt = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-  onDelta(txt); return txt;
+async function callOpenAI(p, model, messages, onDelta, signal, opt = {}) {
+  const tb = opt.tools ? toolbox() : [];
+  let tools = tb.map((x) => ({ type: 'function', function: { name: x.name, description: `[${x.s.name}] ${x.tool.description || ''}`.slice(0, 1000), parameters: x.tool.inputSchema || { type: 'object', properties: {} } } }));
+  const headers = { 'Content-Type': 'application/json' };
+  if (p.apiKey) headers.Authorization = 'Bearer ' + p.apiKey;
+  if (p.baseUrl.includes('openrouter.ai')) { headers['HTTP-Referer'] = location.origin; headers['X-Title'] = 'Neura'; }
+  const post = (body) => xfetch(p.baseUrl.replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers, signal, body: JSON.stringify(body) });
+  const msgs = [...messages];
+  let prefix = '';
+  for (let round = 0; ; round++) {
+    const body = { model, messages: msgs, stream: STREAM };
+    if (tools.length && round < 6) body.tools = tools;
+    let r = await post(body);
+    if (!r.ok && body.tools && r.status === 400) {
+      const t = await r.text();
+      if (!/tool|function/i.test(t)) throw httpErr(400, t, r.headers);
+      tools = []; delete body.tools; // el modelo no admite herramientas: se responde sin ellas
+      r = await post(body);
+    }
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+    const { text, calls } = await readOpenAI(r, (x) => onDelta(prefix + x));
+    if (!calls.length || !body.tools) return prefix + text;
+    if (text) prefix += text + '\n\n';
+    msgs.push({ role: 'assistant', content: text || null, tool_calls: calls });
+    for (const c of calls) msgs.push({ role: 'tool', tool_call_id: c.id, content: await runTool(tb, c.function.name, c.function.arguments, signal, opt.onTool) });
+  }
 }
 
-async function callTarget(t, messages, onDelta, signal) {
+// Anthropic: el sistema va aparte, las imágenes en su formato y las herramientas como tool_use/tool_result.
+function toAnthropic(messages) {
+  const system = messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n\n');
+  const msgs = messages.filter((m) => m.role !== 'system').map((m) => ({
+    role: m.role,
+    content: typeof m.content === 'string' ? m.content : m.content.map((c) => {
+      if (c.type !== 'image_url') return { type: 'text', text: c.text };
+      const [, type, data] = c.image_url.url.match(/^data:([^;]+);base64,(.*)$/) || [];
+      return { type: 'image', source: { type: 'base64', media_type: type, data } };
+    }),
+  }));
+  return { system, msgs };
+}
+async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
+  const tb = opt.tools ? toolbox() : [];
+  const tools = tb.map((x) => ({ name: x.name, description: `[${x.s.name}] ${x.tool.description || ''}`.slice(0, 1000), input_schema: x.tool.inputSchema || { type: 'object', properties: {} } }));
+  const { system, msgs } = toAnthropic(messages);
+  let prefix = '';
+  for (let round = 0; ; round++) {
+    const body = { model, max_tokens: 4096, messages: msgs };
+    if (system) body.system = system;
+    if (tools.length && round < 6) body.tools = tools;
+    const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
+      method: 'POST', signal, body: JSON.stringify(body),
+      headers: { 'content-type': 'application/json', 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+    const j = await r.json();
+    const txt = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    const uses = (j.content || []).filter((b) => b.type === 'tool_use');
+    onDelta(prefix + txt);
+    if (!uses.length || !body.tools) return prefix + txt;
+    if (txt) prefix += txt + '\n\n';
+    msgs.push({ role: 'assistant', content: j.content });
+    const results = [];
+    for (const u of uses) results.push({ type: 'tool_result', tool_use_id: u.id, content: await runTool(tb, u.name, u.input, signal, opt.onTool) });
+    msgs.push({ role: 'user', content: results });
+  }
+}
+
+async function callTarget(t, messages, onDelta, signal, opt = {}) {
   if (t.kind === 'mcp') {
     const s = S.mcp.find((x) => x.id === t.sid);
     if (!s) throw new Error('Servidor MCP eliminado');
     if (!s.sessionId) await mcpConnect(s, true);
-    const r = await mcpRpc(s, 'tools/call', { name: 'chat', arguments: { model: t.model, messages } }, false, signal);
+    const args = { model: t.model, messages };
+    // Con herramientas, el puente deja que el modelo local use los archivos compartidos del PC.
+    if (opt.tools && (s.tools || []).some((x) => x.name === 'read_file')) args.tools = true;
+    let acc = '';
+    const r = await mcpRpc(s, 'tools/call', { name: 'chat', arguments: args }, { signal, onProgress: (d) => { acc += d; onDelta(acc); } });
     const txt = (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
     if (r.isError) throw new Error(txt || 'Error MCP');
-    onDelta(txt); return txt;
+    for (const x of r.structuredContent?.tool_log || []) opt.onTool?.({ name: x.name, args: x.arguments, ok: x.ok, server: s.name });
+    const text = r.structuredContent?.text ?? txt;
+    onDelta(text); return text;
   }
   const p = S.providers.find((x) => x.id === t.pid);
   if (!p) throw new Error('IA eliminada');
-  return (p.kind === 'anthropic' ? callAnthropic : callOpenAI)(p, t.model, messages, onDelta, signal);
+  return (p.kind === 'anthropic' ? callAnthropic : callOpenAI)(p, t.model, messages, onDelta, signal, opt);
 }
 
 async function fetchModels(p) {
   const headers = p.kind === 'anthropic'
     ? { 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
     : (p.apiKey ? { Authorization: 'Bearer ' + p.apiKey } : {});
-  const r = await fetch(p.baseUrl.replace(/\/+$/, '') + '/models', { headers });
-  if (!r.ok) throw httpErr(r.status, await r.text());
+  const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/models', { headers });
+  if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
   const j = await r.json();
   let list = j.data || j.models || [];
   if (p.freeOnly) list = list.filter((m) => String(m.id).endsWith(':free') || (m.pricing && +m.pricing.prompt === 0 && +m.pricing.completion === 0));
@@ -132,27 +352,42 @@ async function fetchModels(p) {
 }
 
 // ---------- cliente MCP (Streamable HTTP) ----------
-async function mcpRpc(s, method, params, notify = false, signal, retried = false) {
+// o.onProgress recibe los trozos de texto que el puente envía mientras el modelo escribe.
+async function mcpRpc(s, method, params, o = {}) {
   const body = { jsonrpc: '2.0', method };
   if (params !== undefined) body.params = params;
-  if (!notify) body.id = ++rpcId;
+  if (!o.notify) body.id = ++rpcId;
+  const token = o.onProgress ? 'neura-' + body.id : null;
+  if (token) body.params = { ...body.params, _meta: { progressToken: token } };
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
   if (s.token) headers.Authorization = 'Bearer ' + s.token;
   if (s.sessionId) headers['Mcp-Session-Id'] = s.sessionId;
   if (s.protocolVersion) headers['MCP-Protocol-Version'] = s.protocolVersion;
-  const r = await fetch(s.url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const r = await xfetch(s.url, { method: 'POST', headers, body: JSON.stringify(body), signal: o.signal });
   const sid = r.headers.get('Mcp-Session-Id'); if (sid) s.sessionId = sid;
-  if (r.status === 404 && s.sessionId && !retried && method !== 'initialize') {
-    await mcpConnect(s, true); return mcpRpc(s, method, params, notify, signal, true);
+  if (r.status === 404 && s.sessionId && !o.retried && method !== 'initialize') {
+    await mcpConnect(s, true); return mcpRpc(s, method, params, { ...o, retried: true });
   }
-  if (notify) return;
-  if (!r.ok) throw httpErr(r.status, await r.text());
+  if (o.notify) return;
+  if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
   let msg;
   if ((r.headers.get('content-type') || '').includes('text/event-stream')) {
-    for (const line of (await r.text()).split('\n')) {
-      if (!line.startsWith('data:')) continue;
-      try { const j = JSON.parse(line.slice(5)); if (j.id === body.id) msg = j; } catch {}
+    const handle = (line) => {
+      if (!line.startsWith('data:')) return;
+      let j; try { j = JSON.parse(line.slice(5)); } catch { return; }
+      if (j.method === 'notifications/progress' && token && j.params?.progressToken === token) { if (typeof j.params.message === 'string') o.onProgress(j.params.message); }
+      else if (j.id === body.id) msg = j;
+    };
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, i).trim()); buf = buf.slice(i + 1); }
     }
+    handle(buf.trim());
   } else msg = await r.json();
   if (!msg) throw new Error('Respuesta MCP vacía');
   if (msg.error) throw new Error(msg.error.message || 'Error MCP');
@@ -162,11 +397,11 @@ async function mcpRpc(s, method, params, notify = false, signal, retried = false
 async function mcpConnect(s, quiet) {
   s.status = 'wait'; s.sessionId = null; s.protocolVersion = null; renderMcp();
   try {
-    const init = await mcpRpc(s, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'neura-app', version: '1.0.0' } });
+    const init = await mcpRpc(s, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'neura-app', version: '2.0.0' } });
     s.protocolVersion = init.protocolVersion; s.serverInfo = init.serverInfo;
-    await mcpRpc(s, 'notifications/initialized', undefined, true);
+    await mcpRpc(s, 'notifications/initialized', undefined, { notify: true });
     const tl = await mcpRpc(s, 'tools/list', {});
-    s.tools = (tl.tools || []).map((t) => ({ name: t.name, description: t.description }));
+    s.tools = (tl.tools || []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
     s.models = []; s.backends = [];
     if (s.tools.some((t) => t.name === 'list_models') && s.tools.some((t) => t.name === 'chat')) {
       const r = await mcpRpc(s, 'tools/call', { name: 'list_models', arguments: {} });
@@ -177,54 +412,229 @@ async function mcpConnect(s, quiet) {
     }
     s.status = 'on'; s.error = null;
     if (!quiet) toast(`${s.name}: CONECTADO · ${s.models.length} modelos`);
+    syncWith(s);
   } catch (e) {
     s.status = 'err'; s.error = netHint(e);
     if (!quiet) toast(`${s.name}: ${s.error}`, true);
-    if (quiet) { save(); renderMcp(); throw e; }
+    if (quiet) { save(); renderMcp(); renderTargets(); throw e; }
   }
   save(); renderMcp(); renderTargets();
 }
 
-// ---------- envío ----------
-function history(th) {
-  const h = [];
-  for (const m of th.messages) {
-    if (m.role === 'user') h.push({ role: 'user', content: m.content });
-    else if (m.content && !m.error) h.push({ role: 'assistant', content: m.content });
+// ---------- sincronización de hilos ----------
+const canSync = (s) => s.status === 'on' && s.sync !== false && (s.tools || []).some((t) => t.name === 'threads_sync');
+async function syncWith(s) {
+  if (!canSync(s) || s.syncing) return;
+  s.syncing = true;
+  const startedAt = Date.now();
+  try {
+    // Solo se envía lo cambiado desde la última vez; los mensajes a medias no salen del dispositivo.
+    const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length))
+      .map((t) => ({ ...t, messages: t.messages.filter((m) => !m.pending) }));
+    const r = await mcpRpc(s, 'tools/call', { name: 'threads_sync', arguments: { since: s.syncRev || 0, threads: out } });
+    if (r.isError) throw new Error(r.content?.[0]?.text || 'Error al sincronizar');
+    const data = r.structuredContent || JSON.parse(r.content?.[0]?.text || '{}');
+    let changed = false;
+    for (const t of data.threads || []) {
+      const i = S.threads.findIndex((x) => x.id === t.id);
+      const local = S.threads[i];
+      if (local?.messages.some((m) => m.pending)) continue; // respuesta en curso: se fusiona en la próxima
+      const merged = mergeThread(local, t);
+      if (JSON.stringify(merged) === JSON.stringify(local)) continue;
+      if (i >= 0) S.threads[i] = merged; else S.threads.push(merged);
+      changed = true;
+    }
+    s.syncRev = data.rev; s.pushedAt = startedAt; s.syncedAt = Date.now(); s.syncError = null;
+    save();
+    if (changed && !busy) { renderLog(); if ($('#sheetThreads').classList.contains('open')) renderThreads(); }
+  } catch (e) { s.syncError = netHint(e); }
+  finally { s.syncing = false; if ($('#sheetMcp').classList.contains('open')) renderMcp(); }
+}
+const syncAll = () => S.mcp.forEach((s) => syncWith(s));
+
+// ---------- contexto: historial, resúmenes y recorte ----------
+// Las imágenes solo se reenvían en los últimos mensajes; antes quedan como una nota de texto.
+function userContent(m, withImg) {
+  let text = m.content || '';
+  for (const f of m.files || []) if (f.kind === 'text') text += `\n\n[Archivo adjunto: ${f.name}]\n\`\`\`\n${f.text}\n\`\`\``;
+  const imgs = (m.files || []).filter((f) => f.kind === 'image');
+  if (!imgs.length) return text;
+  if (!withImg) return text + imgs.map((f) => `\n[Imagen adjunta: ${f.name}]`).join('');
+  return [{ type: 'text', text: text || 'Describe la imagen.' }, ...imgs.map((f) => ({ type: 'image_url', image_url: { url: f.data } }))];
+}
+// De un CONSEJO solo pasa al historial la síntesis (o la primera respuesta válida).
+function groupBest(msgs, g) {
+  const ok = msgs.filter((m) => m.group === g && !m.error && !m.pending && m.content);
+  return ok.find((m) => m.synth) || ok[0];
+}
+function buildHistory(th) {
+  const msgs = th.messages, h = [], seen = new Set();
+  let start = 0;
+  if (th.summary?.upto) {
+    const k = msgs.findIndex((m) => m.id === th.summary.upto);
+    if (k >= 0) { start = k + 1; h.push({ role: 'system', content: 'Resumen de la conversación anterior (úsalo como contexto):\n' + th.summary.text }); }
+  }
+  for (let i = start; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === 'user') h.push({ role: 'user', content: userContent(m, i >= msgs.length - 6) });
+    else if (m.group) { if (seen.has(m.group)) continue; seen.add(m.group); const b = groupBest(msgs, m.group); if (b) h.push({ role: 'assistant', content: b.content }); }
+    else if (m.content && !m.error && !m.pending) h.push({ role: 'assistant', content: m.content });
   }
   return h;
 }
-// Errores que merecen probar otra IA: cuota agotada, sobrecarga, sin conexión, clave inválida.
-const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 401 || e.status === 403 || e.status === 402);
+const tok = (m) => Math.ceil((typeof m.content === 'string' ? m.content.length : m.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : 3000), 0)) / 3.5) + 4;
+const tokens = (h) => h.reduce((n, m) => n + tok(m), 0);
+function trimTo(h, budget) {
+  const out = [...h];
+  while (out.length > 2 && tokens(out) > budget) out.splice(out[0].role === 'system' ? 1 : 0, 1);
+  return out;
+}
+// Para resumir se prefiere la IA local (gratis y sin límites), luego la elegida y luego las demás disponibles.
+async function summarize(messages, signal) {
+  const all = targets().filter((t) => !cooling(t.key));
+  const order = [...all.filter((t) => t.kind === 'mcp'), findT(S.target), ...plan(findT(S.target)).slice(1)].filter((t, i, a) => t && !cooling(t.key) && a.findIndex((x) => x?.key === t.key) === i);
+  let last;
+  for (const t of order.slice(0, 3)) {
+    try { const r = await callTarget(t, messages, () => {}, signal); if (r?.trim()) return r.trim(); }
+    catch (e) { if (e.name === 'AbortError') throw e; noteFail(t, e); last = e; }
+  }
+  throw last || new Error('Sin IA para resumir');
+}
+// Si el historial no cabe, lo antiguo se resume (y se guarda en el hilo) y se envía resumen + lo reciente.
+async function fitContext(th, hist, budget, signal) {
+  if (tokens(hist) <= budget) return hist;
+  const done = th.messages.filter((m) => !m.pending);
+  const cut = done.length - 4;
+  const from = th.summary?.upto ? done.findIndex((m) => m.id === th.summary.upto) + 1 : 0;
+  const chunk = cut > from ? done.slice(from, cut) : [];
+  if (!chunk.length) return trimTo(hist, budget);
+  const transcript = chunk.map((m) => (m.role === 'user' ? `USUARIO: ${textOf(userContent(m, false))}` : m.content && !m.error ? `IA: ${m.content}` : ''))
+    .filter(Boolean).join('\n\n').slice(-Math.max(12000, budget * 3));
+  const prompt = [
+    { role: 'system', content: 'Resumes conversaciones para que otra IA pueda continuarlas. Escribe en el idioma de la conversación, en viñetas, máximo 300 palabras. Conserva datos concretos, nombres, cifras, código importante, decisiones, preferencias del usuario y tareas pendientes.' },
+    { role: 'user', content: (th.summary?.text ? `Resumen previo:\n${th.summary.text}\n\n` : '') + `Conversación a resumir:\n${transcript}` },
+  ];
+  try {
+    const text = await summarize(prompt, signal);
+    th.summary = { text, upto: chunk[chunk.length - 1].id, ts: Date.now() };
+    th.ts = Date.now(); save();
+    return trimTo(buildHistory(th), budget);
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    return trimTo(hist, budget);
+  }
+}
 
-async function send(text) {
+// ---------- envío ----------
+// Errores que merecen probar otra IA: cuota agotada, sobrecarga, sin conexión, clave inválida.
+const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e));
+function failMsg(msg, e, t) {
+  msg.pending = false; msg.content = '';
+  msg.error = (e.status ? `[${e.status}] ` : '') + netHint(e);
+  noteFail(t, e);
+}
+async function runTarget(t, hist, msg, signal, tools) {
+  const t0 = performance.now();
+  msg.tools = [];
+  const out = await callTarget(t, hist, (x) => { msg.content = x; schedule(msg); }, signal, {
+    tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
+  });
+  msg.content = out || msg.content || '(respuesta vacía)';
+  msg.ms = Math.round(performance.now() - t0);
+  msg.pending = false;
+  noteOk(t, msg.ms);
+}
+
+async function send(text, files = []) {
   const th = thread(), msgs = th.messages;
-  const hist = history(th);
-  hist.push({ role: 'user', content: text });
-  if (!msgs.length) th.title = text.slice(0, 48);
+  if (!msgs.length) th.title = (text || files[0]?.name || 'HILO').slice(0, 48);
   th.ts = Date.now();
-  msgs.push({ role: 'user', content: text, ts: Date.now() });
-  const all = targets();
-  const first = findT(S.target);
-  const queue = first ? [first, ...(S.autoSkip ? all.filter((t) => t.key !== first.key) : [])] : [];
+  msgs.push({ id: uid(), role: 'user', content: text, ...(files.length ? { files } : {}), ts: Date.now() });
+  save();
   setBusy(true);
-  if (!queue.length) {
-    msgs.push({ role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
-  }
-  for (const t of queue) {
-    const msg = { id: uid(), role: 'assistant', label: t.label, content: '', pending: true, ts: Date.now() };
-    msgs.push(msg); renderLog();
-    try {
-      msg.content = (await callTarget(t, hist, (x) => { msg.content = x; schedule(msg); }, abortCtl.signal)) || msg.content || '(respuesta vacía)';
-      msg.pending = false; break;
-    } catch (e) {
-      msg.pending = false; msg.content = '';
-      msg.error = (e.status ? `[${e.status}] ` : '') + netHint(e);
-      msg.skipped = S.autoSkip && skippable(e) && t !== queue[queue.length - 1];
-      if (!msg.skipped) break;
+  const signal = abortCtl.signal;
+  try {
+    let hist = await fitContext(th, buildHistory(th), S.ctxTokens, signal);
+    renderLog();
+    const first = findT(S.target);
+    if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
+    else if (S.council) await sendCouncil(th, hist, first, signal);
+    else {
+      const queue = plan(first);
+      let attempts = 0, ctxRetried = false;
+      for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
+        const t = queue[qi];
+        // La elegida está agotada: se avisa y se pasa a la siguiente sin gastar una petición.
+        if (S.autoSkip && cooling(t.key) && queue.slice(qi + 1).some((x) => !cooling(x.key))) {
+          if (qi === 0) msgs.push({ id: uid(), role: 'assistant', label: t.label, error: `⏳ ${coolText(t.key)}`, skipped: true, ts: Date.now() });
+          continue;
+        }
+        attempts++;
+        const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now() };
+        msgs.push(msg); renderLog();
+        try { await runTarget(t, hist, msg, signal, S.useTools); break; }
+        catch (e) {
+          if (isCtxErr(e) && !ctxRetried) {
+            // No cabía en el contexto de este modelo: se comprime a la mitad y se reintenta con la misma IA.
+            ctxRetried = true;
+            hist = await fitContext(th, hist, Math.floor(tokens(hist) / 2), signal);
+            msgs.splice(msgs.indexOf(msg), 1);
+            qi--; attempts--;
+            continue;
+          }
+          failMsg(msg, e, t);
+          msg.skipped = S.autoSkip && skippable(e) && qi < queue.length - 1 && attempts < MAX_ATTEMPTS;
+          if (!msg.skipped) break;
+        }
+      }
     }
+  } catch (e) {
+    if (e.name !== 'AbortError') msgs.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
   }
-  setBusy(false); save(); renderLog();
+  msgs.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
+  th.ts = Date.now(); setBusy(false); save(); renderLog(); renderTargets(); syncAll();
+}
+
+// ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
+function councilMembers(first) {
+  const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key));
+  if (chosen.length >= 2) return chosen.slice(0, 5);
+  const seen = new Set(), out = [];
+  for (const t of plan(first)) {
+    if (cooling(t.key)) continue;
+    const prov = t.pid || t.sid;
+    if (seen.has(prov)) continue;
+    seen.add(prov); out.push(t);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+async function sendCouncil(th, hist, first, signal) {
+  const group = uid();
+  const members = councilMembers(first);
+  const runs = members.map((t) => {
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, ts: Date.now() };
+    th.messages.push(msg);
+    return { t, msg };
+  });
+  renderLog();
+  await Promise.all(runs.map(async ({ t, msg }) => {
+    try { await runTarget(t, hist, msg, signal, S.useTools); }
+    catch (e) { failMsg(msg, e, t); }
+    schedule(msg);
+  }));
+  const good = runs.filter((r) => !r.msg.error);
+  if (good.length < 2 || signal.aborted) { renderLog(); return; }
+  const question = textOf(hist[hist.length - 1]?.content);
+  const prompt = [{ role: 'user', content: `Pregunta del usuario:\n${question}\n\nRespuestas de varias IAs:\n\n${good.map((r, i) => `### Respuesta ${i + 1} (${r.t.label})\n${r.msg.content}`).join('\n\n')}\n\nEscribe la mejor respuesta final para el usuario: combina lo correcto de cada una, corrige errores y, si discrepan en algo importante, indícalo brevemente. No hables de "las respuestas" ni de que eres un moderador; responde directamente.` }];
+  const syn = { id: uid(), role: 'assistant', label: '⚖ SÍNTESIS', group, synth: true, content: '', pending: true, ts: Date.now() };
+  th.messages.push(syn); renderLog();
+  const judges = [first, ...good.map((r) => r.t)].filter((t, i, a) => !cooling(t.key) && a.findIndex((x) => x.key === t.key) === i);
+  for (const t of judges.slice(0, 3)) {
+    syn.label = `⚖ SÍNTESIS · ${t.label}`; syn.error = null; syn.pending = true;
+    try { await runTarget(t, prompt, syn, signal, false); break; }
+    catch (e) { failMsg(syn, e, t); if (e.name === 'AbortError') break; }
+  }
 }
 
 function setBusy(b) {
@@ -236,39 +646,57 @@ function setBusy(b) {
 }
 
 // ---------- render ----------
-function md(s) {
-  return String(s).split('```').map((seg, i) => {
-    if (i % 2) { const nl = seg.indexOf('\n'); return `<pre><code>${esc(nl >= 0 ? seg.slice(nl + 1) : seg)}</code></pre>`; }
-    return esc(seg)
-      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
-      .replace(/^#{1,6} (.*)$/gm, '<b class="h">$1</b>')
-      .replace(/\n/g, '<br>');
-  }).join('');
+const CAN_SPEAK = 'speechSynthesis' in window;
+function filesHTML(m) {
+  return (m.files || []).map((f) => (f.kind === 'image'
+    ? `<img class="thumb" src="${esc(f.data)}" alt="${esc(f.name)}">`
+    : `<span class="chip">📄 ${esc(f.name)}</span>`)).join('');
 }
-const hhmm = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
+function replyHTML(m) {
+  if (m.error) return `<div class="reply err ${m.skipped ? 'skip' : ''}"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}${m.skipped ? ' → SALTANDO A OTRA IA' : ''}</span></div><div class="txt">${esc(m.error)}</div></div>`;
+  const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
+  const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
+    : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button>`;
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)}</span><span class="acts">${acts}</span></div>${tools}<div class="txt">${md(m.content)}</div></div>`;
+}
 function msgHTML(m) {
-  if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}</div><div class="body">${esc(m.content)}</div></div>`;
-  if (m.error) return `<div class="msg"><div class="reply err ${m.skipped ? 'skip' : ''}"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}${m.skipped ? ' → SALTANDO A OTRA IA' : ''}</span></div><div class="txt">${esc(m.error)}</div></div></div>`;
-  return `<div class="msg"><div class="reply ${m.pending ? 'pending' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)}</span>${m.pending ? '<span class="processing">PROCESANDO</span>' : `<button data-copy="${m.id}">COPIAR</button>`}</div><div class="txt">${md(m.content)}</div></div></div>`;
+  if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}</div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
+  return `<div class="msg">${replyHTML(m)}</div>`;
+}
+function logHTML(th) {
+  const msgs = th.messages, out = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.group) {
+      const g = [];
+      while (i < msgs.length && msgs[i].group === m.group) g.push(msgs[i++]);
+      i--;
+      const answers = g.filter((x) => !x.synth), synth = g.find((x) => x.synth);
+      out.push(`<div class="msg council"><div class="tag">⚖ CONSEJO · ${answers.length} IAs</div><div class="cgrid">${answers.map(replyHTML).join('')}</div>${synth ? replyHTML(synth) : ''}</div>`);
+    } else out.push(msgHTML(m));
+    if (th.summary?.upto === m.id && i < msgs.length - 1) {
+      out.push(`<details class="note"><summary>🗜 Lo anterior se resumió para ahorrar tokens · VER RESUMEN</summary><div class="txt">${md(th.summary.text)}</div></details>`);
+    }
+  }
+  return out.join('');
 }
 
 function renderLog() {
   const log = $('#log');
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-  const msgs = thread().messages;
-  if (!msgs.length) {
+  const th = thread();
+  if (!th.messages.length) {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
       <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
       <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
       <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
-      <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li></ol></div>`;
+      <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li>
+      <li><b>⚖ CONSEJO</b>: pregunta a varias IAs a la vez y recibe la mejor respuesta combinada.</li></ol></div>`;
     return;
   }
-  log.innerHTML = msgs.map(msgHTML).join('');
+  log.innerHTML = logHTML(th);
   if (stick) log.scrollTop = log.scrollHeight;
 }
 
@@ -278,10 +706,10 @@ function schedule(m) {
   pend.add(m);
   requestAnimationFrame(() => {
     pend.delete(m);
-    const el = document.querySelector(`.reply[data-id="${m.id}"] .txt`);
+    const el = document.querySelector(`.reply[data-id="${m.id}"]`);
     if (!el) return renderLog();
     const log = $('#log'); const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-    el.innerHTML = md(m.content);
+    el.outerHTML = replyHTML(m);
     if (stick) log.scrollTop = log.scrollHeight;
   });
 }
@@ -290,15 +718,30 @@ function renderTargets() {
   const all = targets();
   if (!all.some((t) => t.key === S.target)) S.target = all[0]?.key || null;
   const sel = $('#target');
-  sel.innerHTML = all.length ? all.map((t) => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('') : '<option value="">— SIN IAs CONECTADAS —</option>';
+  sel.innerHTML = all.length ? all.map((t) => `<option value="${esc(t.key)}">${cooling(t.key) ? '⏳ ' : ''}${esc(t.label)}</option>`).join('') : '<option value="">— SIN IAs CONECTADAS —</option>';
   sel.value = S.target || '';
   $('#autoSkip').checked = S.autoSkip;
-  $('#syncTxt').textContent = `${all.length} IA`;
-  $('#syncDot').classList.toggle('on', all.length > 0);
+  $('#council').checked = S.council;
+  $('#useTools').checked = S.useTools;
+  const hasTools = toolbox().length > 0;
+  $('#toolsLbl').hidden = !hasTools;
+  if (!hasTools && S.useTools) $('#useTools').checked = false;
+  const ready = all.filter((t) => !cooling(t.key)).length;
+  $('#syncTxt').textContent = ready === all.length ? `${all.length} IA` : `${ready}/${all.length} IA`;
+  $('#syncDot').classList.toggle('on', ready > 0);
 }
 
 const tierBadge = (t) => t === 'free' ? '<span class="badge free">GRATIS</span>' : t === 'paid' ? '<span class="badge paid">PAGO</span>' : '<span class="badge local">OTRA</span>';
-
+function healthChips(p) {
+  const chips = p.models.map((m) => {
+    const k = `${p.id}::${m}`, h = S.health[k];
+    if (!h || (!h.ok && !h.fail && !cooling(k))) return '';
+    if (cooling(k)) return `<span class="chip off" title="${esc(m)}">⏳ ${esc(m)} · ${esc(coolText(k))}</span>`;
+    const pct = Math.round((h.ok / Math.max(1, h.ok + h.fail)) * 100);
+    return `<span class="chip" title="${esc(m)}">● ${esc(m)} · ${(h.ms / 1000).toFixed(1)} s · ${pct}%</span>`;
+  }).join('');
+  return chips ? `<div class="chips">${chips}</div>` : '';
+}
 function renderProviders() {
   $('#provList').innerHTML = S.providers.map((p) => `
     <div class="card ${p.enabled === false ? 'off' : ''}" data-pid="${p.id}">
@@ -306,11 +749,33 @@ function renderProviders() {
         <button class="btn sm ghost" data-act="toggle">${p.enabled === false ? 'ACTIVAR' : 'PAUSAR'}</button>
         <button class="btn sm red" data-act="del">✕</button></div>
       <label>ENDPOINT<input data-f="baseUrl" value="${esc(p.baseUrl)}" placeholder="https://…/v1"></label>
-      <label>CLAVE API<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="pega tu clave"></label>
+      <label>CLAVE API<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
       ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
       <label>MODELOS (separados por coma)<input data-f="models" value="${esc(p.models.join(', '))}"></label>
-      <div class="row"><button class="btn sm" data-act="scan">ESCANEAR MODELOS</button><button class="btn sm ghost" data-act="test">PROBAR</button></div>
+      ${healthChips(p)}
+      <div class="row"><button class="btn sm" data-act="scan">ESCANEAR MODELOS</button><button class="btn sm ghost" data-act="test">PROBAR</button>${p.models.some((m) => cooling(`${p.id}::${m}`)) ? '<button class="btn sm ghost" data-act="reset">REINTENTAR YA</button>' : ''}</div>
     </div>`).join('') || '<p class="hint">Todavía no hay IAs. Elige una arriba y pulsa + AÑADIR.</p>';
+  renderSettings();
+}
+
+function renderSettings() {
+  const all = targets();
+  const sec = DESK?.secure?.();
+  $('#settings').innerHTML = `
+    <h3>MEMORIA DE CONTEXTO</h3>
+    <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
+    <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
+    <h3>⚖ CONSEJO</h3>
+    <p class="hint">Elige qué IAs forman el consejo (2 a 5). Si no eliges, Neura usa las 3 mejores de proveedores distintos.</p>
+    <div class="checks">${all.map((t) => `<label class="auto"><input type="checkbox" data-council="${esc(t.key)}" ${S.councilKeys.includes(t.key) ? 'checked' : ''}> ${esc(t.label)}</label>`).join('') || '<span class="hint">Añade IAs primero.</span>'}</div>
+    <h3>SEGURIDAD DE LAS CLAVES</h3>
+    ${sec ? `<p class="hint">🔒 En este PC las claves se guardan cifradas con el llavero del sistema (${esc(sec)}).</p>` : ''}
+    ${!crypto.subtle ? '<p class="hint">El PIN necesita una conexión segura (https o la app instalada).</p>'
+      : S.vault ? `<p class="hint">🔒 Claves cifradas con PIN${vault.locked ? ' · <b>BLOQUEADAS</b>' : ''}.</p>
+        <div class="row">${vault.locked ? '<button class="btn sm" id="vaultUnlock">DESBLOQUEAR</button>' : '<button class="btn sm red" id="vaultOff">QUITAR PIN</button>'}</div>`
+      : `<p class="hint">Cifra tus claves API y tokens con un PIN (AES-256). Te lo pedirá al abrir Neura.</p>
+        <div class="row"><input type="password" id="pinNew" inputmode="numeric" autocomplete="new-password" placeholder="PIN (mín. 4)"><button class="btn sm" id="vaultOn">ACTIVAR PIN</button></div>`}
+    <p class="hint">Las claves nunca se sincronizan entre dispositivos: solo viajan los hilos.</p>`;
 }
 
 function renderMcp() {
@@ -324,9 +789,40 @@ function renderMcp() {
       ${(s.backends || []).length ? `<div class="chips">${s.backends.map((b) => `<span class="chip ${b.online ? '' : 'off'}">${esc(b.id)} ${b.online ? '● ' + b.count : '○'}</span>`).join('')}</div>` : ''}
       ${(s.models || []).length ? `<div class="chips">${s.models.map((m) => `<span class="chip">${esc(m)}</span>`).join('')}</div>` : ''}
       ${(s.tools || []).length ? `<div class="chips">${s.tools.map((t) => `<span class="chip tool" title="${esc(t.description || '')}">ƒ ${esc(t.name)}</span>`).join('')}</div>` : ''}
-      <div class="row"><button class="btn sm" data-act="reconnect">RECONECTAR</button><button class="btn sm red" data-act="del">ELIMINAR</button></div>
+      ${(s.tools || []).some((t) => t.name === 'threads_sync') ? `<label class="auto"><input type="checkbox" data-act="sync" ${s.sync !== false ? 'checked' : ''}> SINCRONIZAR HILOS
+        <span class="mono">${s.syncError ? `<span class="red">${esc(s.syncError)}</span>` : s.syncedAt ? '· ' + hhmm(s.syncedAt) : ''}</span></label>` : ''}
+      ${!trusted(s) && (s.tools || []).some((t) => !INTERNAL.has(t.name)) ? `<label class="auto"><input type="checkbox" data-act="trust" ${s.trustTools ? 'checked' : ''}> USAR SUS HERRAMIENTAS SIN PREGUNTAR</label>` : ''}
+      ${s.local && DESK ? localBridgeHTML() : ''}
+      <div class="row"><button class="btn sm" data-act="reconnect">RECONECTAR</button>${s.local ? '' : '<button class="btn sm red" data-act="del">ELIMINAR</button>'}</div>
     </div>`;
   }).join('');
+}
+
+// Puente integrado en Neura Desktop: emparejar el móvil, carpetas para la IA y acceso fuera de casa.
+function localBridgeHTML() {
+  const b = DESK.bridge();
+  const urls = b.lan ? b.ips.map((ip) => `http://${ip}:${b.port}/mcp`) : [];
+  const ts = b.tailscale || {};
+  return `<div class="lan">
+    <h4>📱 CONECTAR EL MÓVIL</h4>
+    <label class="auto"><input type="checkbox" data-act="lan" ${b.lan ? 'checked' : ''}> ABRIR A MI RED</label>
+    ${b.lan ? `${b.qr ? `<div class="qr"><img src="${esc(b.qr)}" alt="Código QR de emparejamiento"><span class="hint">Escanéalo con la cámara del móvil: se abre Neura ya conectada a este PC. En la app instalada: ⬡ → 📷 ESCANEAR QR.</span></div>` : ''}
+      <div class="mono">URL: ${urls.map(esc).join(' · ') || 'sin red'}</div>
+      <div class="mono">TOKEN: <span class="secret">${esc(b.token)}</span> <button class="btn sm ghost" data-act="copytoken">COPIAR</button></div>`
+      : '<div class="mono">Solo accesible desde este PC.</div>'}
+    <h4>🌍 FUERA DE CASA (Tailscale)</h4>
+    ${!ts.installed ? '<div class="hint">Instala Tailscale (gratis) en el PC y el móvil para usar Neura y tu IA local desde cualquier sitio. <a href="https://tailscale.com/download" target="_blank" rel="noopener">▸ descargar</a></div>'
+      : !ts.running ? `<div class="hint">Tailscale está instalado pero apagado: ábrelo e inicia sesión.${ts.error ? ` <span class="red">${esc(ts.error)}</span>` : ''}</div>`
+      : `<div class="mono">${b.lan && ts.ip ? `App instalada: http://${esc(ts.ip)}:${b.port}/mcp` : 'Activa ABRIR A MI RED para usar la IP de Tailscale.'}</div>
+        ${ts.https ? `<div class="mono">Web (https): https://${esc(ts.dns)}/ · MCP: https://${esc(ts.dns)}/mcp</div>${b.qrTs ? `<div class="qr"><img src="${esc(b.qrTs)}" alt="QR para fuera de casa"><span class="hint">QR para conectarte desde fuera (con Tailscale activo en el móvil).</span></div>` : ''}<button class="btn sm ghost" data-act="tsoff">DESACTIVAR HTTPS</button>`
+        : `<button class="btn sm" data-act="tson">ACTIVAR HTTPS CON TAILSCALE</button>`}
+        ${ts.error ? `<div class="mono red">${esc(ts.error)}</div>` : ''}`}
+    <h4>📁 CARPETAS PARA LA IA</h4>
+    <div class="hint">La IA podrá buscar y leer (nunca modificar) estos documentos con ƒ HERRAMIENTAS. Cualquiera con el token puede leerlos.</div>
+    ${(b.folders || []).map((f) => `<div class="mono folder">${esc(f)} <button class="btn sm red" data-act="rmfolder" data-path="${esc(f)}">✕</button></div>`).join('')}
+    <button class="btn sm" data-act="addfolder">+ AÑADIR CARPETA</button>
+    ${b.error ? `<div class="mono red">${esc(b.error)}</div>` : ''}
+  </div>`;
 }
 
 let toastT;
@@ -335,15 +831,280 @@ function toast(m, err) {
   clearTimeout(toastT); toastT = setTimeout(() => (t.className = ''), 3800);
 }
 
+// ---------- hilos: lista, búsqueda, exportar e importar ----------
+const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+function renderThreads() {
+  const sv = S.mcp.filter(canSync);
+  $('#syncInfo').innerHTML = sv.length
+    ? `⇄ Sincronizado con ${sv.map((s) => `<b>${esc(s.name)}</b>`).join(', ')}: los mismos hilos en el PC, el móvil y la web.`
+    : 'Se guardan en este dispositivo. Para tener los mismos hilos en el PC y el móvil, conéctalos al mismo puente en <b>⬡</b>.';
+  const q = norm($('#threadSearch').value.trim());
+  const rows = [];
+  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active)).sort((a, b) => b.ts - a.ts)) {
+    let snip = '';
+    if (q) {
+      if (!norm(t.title).includes(q)) {
+        const m = t.messages.find((x) => norm(x.content).includes(q));
+        if (!m) continue;
+        const c = String(m.content), k = norm(c).indexOf(q);
+        snip = `<em class="snip">…${esc(c.slice(Math.max(0, k - 40), k))}<mark>${esc(c.slice(k, k + q.length))}</mark>${esc(c.slice(k + q.length, k + q.length + 60))}…</em>`;
+      }
+    }
+    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}${snip}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
+  }
+  $('#threadList').innerHTML = rows.join('') || `<p class="hint">${q ? 'Nada coincide con la búsqueda.' : ''}</p>`;
+}
+function threadMd(th) {
+  const out = [`# ${th.title}`, '', `_Exportado de Neura el ${new Date().toLocaleString()}_`, ''];
+  for (const m of th.messages) {
+    if (m.error) continue;
+    if (m.role === 'user') out.push(`## 🧑 Tú · ${new Date(m.ts).toLocaleString()}`, '', m.content || '', ...(m.files || []).map((f) => `> 📎 ${f.name}`), '');
+    else out.push(`## 🤖 ${m.label || 'IA'}`, '', m.content || '', '');
+  }
+  return out.join('\n');
+}
+async function download(name, text, type) {
+  if (DESK) { const p = await DESK.saveFile(name, text); if (p) toast('GUARDADO: ' + p); return; }
+  const file = new File([text], name, { type });
+  if (CAP && navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const safeName = (s) => String(s).replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 40) || 'hilo';
+async function importThreads(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    const list = Array.isArray(data) ? data : data.threads;
+    if (!Array.isArray(list)) throw new Error('No es una copia de Neura');
+    let n = 0;
+    for (const t of list) {
+      if (!t?.id || !Array.isArray(t.messages)) continue;
+      t.messages.forEach((m) => { m.id ||= uid() + uid(); });
+      const i = S.threads.findIndex((x) => x.id === t.id);
+      if (i >= 0) S.threads[i] = mergeThread(S.threads[i], t); else S.threads.push(t);
+      n++;
+    }
+    save(); renderThreads(); syncAll();
+    toast(`${n} hilos importados`);
+  } catch (e) { toast('Importar: ' + e.message, true); }
+}
+
+// ---------- adjuntos: imágenes, PDF y texto ----------
+async function shrink(file, max = 1280) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.85);
+}
+async function pdfText(file) {
+  const pdfjs = await import('./vendor/pdf.min.js');
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL('vendor/pdf.worker.min.js', location.href).href;
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
+  let out = '';
+  for (let i = 1; i <= Math.min(doc.numPages, 100) && out.length < 60000; i++) {
+    const c = await (await doc.getPage(i)).getTextContent();
+    out += c.items.map((x) => x.str + (x.hasEOL ? '\n' : ' ')).join('') + '\n\n';
+  }
+  if (!out.trim()) throw new Error('el PDF no tiene texto (¿es escaneado?)');
+  return out.slice(0, 60000);
+}
+async function addFiles(list) {
+  for (const f of list) {
+    try {
+      if (f.type.startsWith('image/')) attach.push({ kind: 'image', name: f.name, data: await shrink(f) });
+      else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) { toast('Leyendo PDF…'); attach.push({ kind: 'text', name: f.name, text: await pdfText(f) }); }
+      else {
+        if (f.size > 5e6) throw new Error('demasiado grande (máx. 5 MB)');
+        const t = await f.text();
+        if (t.slice(0, 4000).includes('\u0000')) throw new Error('no es un archivo de texto');
+        attach.push({ kind: 'text', name: f.name, text: t.slice(0, 60000) });
+      }
+    } catch (e) { toast(`${f.name}: ${e.message}`, true); }
+  }
+  renderAttach();
+}
+function renderAttach() {
+  $('#attachBar').hidden = !attach.length;
+  $('#attachBar').innerHTML = attach.map((f, i) => `<span class="chip">${f.kind === 'image' ? `<img src="${esc(f.data)}" alt="">` : '📄'} ${esc(f.name)} <button type="button" data-unattach="${i}" aria-label="Quitar">✕</button></span>`).join('');
+}
+
+// ---------- voz: dictado y lectura en voz alta ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+const sttProvider = () => S.providers.find((p) => p.enabled !== false && p.apiKey && PRESETS[p.preset]?.stt);
+async function multipart(fields, filename, blob) {
+  const b = '----neura' + uid() + uid(), enc = new TextEncoder(), parts = [];
+  for (const [k, v] of Object.entries(fields)) parts.push(enc.encode(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  parts.push(enc.encode(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`));
+  parts.push(new Uint8Array(await blob.arrayBuffer()), enc.encode(`\r\n--${b}--\r\n`));
+  const body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0; for (const p of parts) { body.set(p, o); o += p.length; }
+  return { body, type: `multipart/form-data; boundary=${b}` };
+}
+async function transcribe(p, blob) {
+  const ext = /mp4|m4a/.test(blob.type) ? 'mp4' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+  const fields = { model: PRESETS[p.preset].stt, response_format: 'json' };
+  const headers = { Authorization: 'Bearer ' + p.apiKey };
+  let body;
+  if (DESK) { const mp = await multipart(fields, `voz.${ext}`, blob); body = mp.body; headers['Content-Type'] = mp.type; }
+  else { body = new FormData(); for (const [k, v] of Object.entries(fields)) body.append(k, v); body.append('file', blob, `voz.${ext}`); }
+  const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/audio/transcriptions', { method: 'POST', headers, body });
+  if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+  return String((await r.json()).text || '').trim();
+}
+function insertText(t) {
+  if (!t) return;
+  input.value += (input.value && !/\s$/.test(input.value) ? ' ' : '') + t;
+  input.dispatchEvent(new Event('input')); input.focus();
+}
+const micUI = (on) => { $('#mic').classList.toggle('rec', on); $('#mic').setAttribute('aria-pressed', on); };
+async function toggleMic() {
+  if (rec) { rec.stop(); return; }
+  const p = sttProvider();
+  if (!p && SR) {
+    // Sin clave de Groq/OpenAI: dictado del propio navegador.
+    rec = new SR(); rec.lang = navigator.language || 'es-ES'; rec.interimResults = false;
+    rec.onresult = (e) => insertText([...e.results].map((r) => r[0].transcript).join(' '));
+    rec.onerror = (e) => toast('Dictado: ' + e.error, true);
+    rec.onend = () => { rec = null; micUI(false); };
+    rec.start(); micUI(true); return;
+  }
+  if (!p) return toast('Para dictar, añade Groq (gratis) en ⚙', true);
+  if (!navigator.mediaDevices?.getUserMedia) return toast('Este dispositivo no permite grabar audio aquí', true);
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { return toast('Micrófono: ' + e.message, true); }
+  const chunks = [];
+  rec = new MediaRecorder(stream);
+  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  rec.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    rec = null; micUI(false);
+    const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' });
+    if (!blob.size) return;
+    $('#mic').classList.add('busy');
+    try { insertText(await transcribe(p, blob)); }
+    catch (e) { toast('Dictado: ' + netHint(e), true); }
+    finally { $('#mic').classList.remove('busy'); }
+  };
+  rec.start(); micUI(true);
+}
+let speaking = null;
+function speak(id) {
+  const stop = speaking === id;
+  speechSynthesis.cancel(); speaking = null;
+  if (stop) return;
+  const m = thread().messages.find((x) => x.id === id);
+  if (!m?.content) return;
+  const u = new SpeechSynthesisUtterance(m.content.replace(/```[\s\S]*?```/g, ' (código) ').replace(/[*_#>`|~-]+/g, ' ').replace(/https?:\/\/\S+/g, 'enlace'));
+  u.lang = navigator.language || 'es-ES';
+  u.onend = () => { speaking = null; };
+  speaking = id; speechSynthesis.speak(u);
+}
+
+// ---------- emparejar con un PC: enlace o código QR ----------
+// El PC genera http://IP:PUERTO/#pair=<base64url {u: url MCP, t: token, n: nombre}>.
+function parsePair(text) {
+  const m = String(text).match(/#pair=([A-Za-z0-9_-]+)/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')))));
+    return j.u ? { url: j.u, token: j.t || '', name: String(j.n || 'PC').toUpperCase() } : null;
+  } catch { return null; }
+}
+function pairWith(p) {
+  let s = S.mcp.find((x) => x.url === p.url);
+  if (s) Object.assign(s, { token: p.token });
+  else S.mcp.push(s = { id: uid(), name: p.name, url: p.url, token: p.token, models: [], tools: [] });
+  save(); mcpConnect(s);
+  toast(`Emparejando con ${s.name}…`);
+}
+let scanStream = null;
+async function scanQR() {
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (e) { return toast('Cámara: ' + e.message, true); }
+  const v = $('#scanVideo');
+  v.srcObject = scanStream; $('#scan').hidden = false; await v.play();
+  const det = new BarcodeDetector({ formats: ['qr_code'] });
+  while (scanStream) {
+    try {
+      const [code] = await det.detect(v);
+      const p = code && parsePair(code.rawValue);
+      if (p) { stopScan(); pairWith(p); return; }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+function stopScan() { scanStream?.getTracks().forEach((t) => t.stop()); scanStream = null; $('#scan').hidden = true; }
+
+// ---------- PIN: claves cifradas con AES-GCM ----------
+const vault = { key: null, locked: !!S.vault, sealed: '', timer: null };
+const b64 = (u8) => btoa(String.fromCharCode(...new Uint8Array(u8)));
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function deriveKey(pin, salt) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 250000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+const secretsOf = () => JSON.stringify({ p: Object.fromEntries(S.providers.map((p) => [p.id, p.apiKey || ''])), m: Object.fromEntries(S.mcp.filter((s) => !s.local).map((s) => [s.id, s.token || ''])) });
+function applySecrets(json) {
+  const x = JSON.parse(json);
+  for (const p of S.providers) if (x.p?.[p.id] != null) p.apiKey = x.p[p.id];
+  for (const s of S.mcp) if (!s.local && x.m?.[s.id] != null) s.token = x.m[s.id];
+}
+function sealSoon() {
+  clearTimeout(vault.timer);
+  vault.timer = setTimeout(async () => {
+    const plain = secretsOf();
+    if (plain === vault.sealed || !vault.key) return;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, vault.key, new TextEncoder().encode(plain));
+    S.vault = { ...S.vault, iv: b64(iv), data: b64(data) };
+    vault.sealed = plain; save();
+  }, 200);
+}
+async function vaultEnable(pin) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  vault.key = await deriveKey(pin, salt); vault.locked = false; vault.sealed = '';
+  S.vault = { salt: b64(salt) };
+  save(); // sealSoon cifra y vuelve a guardar sin las claves en claro
+}
+async function vaultOpen(pin) {
+  const key = await deriveKey(pin, unb64(S.vault.salt));
+  const plain = new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(S.vault.iv) }, key, unb64(S.vault.data)));
+  applySecrets(plain);
+  Object.assign(vault, { key, locked: false, sealed: plain });
+}
+function unlockDialog() {
+  return new Promise((resolve) => {
+    const dlg = $('#lock'), form = $('#lockForm'), pin = $('#lockPin');
+    dlg.hidden = false; pin.value = ''; setTimeout(() => pin.focus(), 50);
+    const close = () => { dlg.hidden = true; form.onsubmit = null; $('#lockSkip').onclick = null; $('#lockReset').onclick = null; renderProviders(); renderMcp(); resolve(); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      try { await vaultOpen(pin.value); close(); toast('CLAVES DESBLOQUEADAS'); }
+      catch { pin.value = ''; toast('PIN incorrecto', true); }
+    };
+    $('#lockSkip').onclick = close;
+    $('#lockReset').onclick = () => {
+      if (!confirm('Se borrarán las claves API y tokens guardados (los hilos se conservan). ¿Continuar?')) return;
+      S.vault = null; Object.assign(vault, { key: null, locked: false });
+      save(); close();
+    };
+  });
+}
+
 // ---------- eventos ----------
 function openSheet(id) { closeSheets(); const s = $(id); s.classList.add('open'); s.setAttribute('aria-hidden', 'false'); }
 function closeSheets() { document.querySelectorAll('.sheet').forEach((s) => { s.classList.remove('open'); s.setAttribute('aria-hidden', 'true'); }); }
 $('#btnAis').onclick = () => { renderProviders(); openSheet('#sheetAis'); };
 $('#btnMcp').onclick = () => { renderMcp(); openSheet('#sheetMcp'); };
-function renderThreads() {
-  $('#threadList').innerHTML = [...S.threads].sort((a, b) => b.ts - a.ts).map((t) => `<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`).join('');
-}
-$('#btnThreads').onclick = () => { renderThreads(); openSheet('#sheetThreads'); };
+$('#btnThreads').onclick = () => { renderThreads(); openSheet('#sheetThreads'); syncAll(); };
+$('#threadSearch').oninput = () => renderThreads();
 $('#newThread').onclick = () => {
   if (busy) return toast('Espera a que termine la respuesta');
   if (thread().messages.length) S.active = null;
@@ -353,56 +1114,83 @@ $('#threadList').addEventListener('click', (e) => {
   if (busy) return toast('Espera a que termine la respuesta');
   const del = e.target.dataset.del;
   if (del) {
-    if (!confirm('¿Borrar este hilo?')) return;
-    S.threads = S.threads.filter((t) => t.id !== del);
-    if (S.active === del) S.active = S.threads[0]?.id ?? null;
-    save(); renderThreads(); renderLog(); return;
+    if (!confirm('¿Borrar este hilo? Se borrará también en los equipos sincronizados.')) return;
+    // Se deja una marca de borrado para que el borrado llegue a los demás dispositivos.
+    Object.assign(S.threads.find((t) => t.id === del), { deleted: true, messages: [], summary: null, ts: Date.now() });
+    if (S.active === del) S.active = S.threads.find((t) => !t.deleted)?.id ?? null;
+    save(); renderThreads(); renderLog(); syncAll(); return;
   }
   const it = e.target.closest('[data-tid]'); if (!it) return;
   S.active = it.dataset.tid; save(); renderLog(); closeSheets();
 });
+$('#exportMd').onclick = () => { const th = thread(); if (!th.messages.length) return toast('El hilo está vacío', true); download(`${safeName(th.title)}.md`, threadMd(th), 'text/markdown'); };
+$('#exportAll').onclick = () => download(`neura-hilos-${new Date().toISOString().slice(0, 10)}.json`,
+  JSON.stringify({ app: 'neura', version: 2, exported: new Date().toISOString(), threads: S.threads.filter((t) => !t.deleted && t.messages.length) }, null, 1), 'application/json');
+$('#importBtn').onclick = () => $('#importFile').click();
+$('#importFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importThreads(f); };
 document.querySelectorAll('.sheet').forEach((s) => s.addEventListener('click', (e) => { if (e.target === s || e.target.closest('.close')) closeSheets(); }));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheets(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSheets(); stopScan(); } });
 
 $('#target').onchange = (e) => { S.target = e.target.value; save(); };
 $('#autoSkip').onchange = (e) => { S.autoSkip = e.target.checked; save(); };
+$('#council').onchange = (e) => { S.council = e.target.checked; save(); if (S.council) toast(`⚖ CONSEJO: ${councilMembers(findT(S.target)).length} IAs responderán a la vez`); };
+$('#useTools').onchange = (e) => { S.useTools = e.target.checked; save(); if (S.useTools) toast(`ƒ ${toolbox().length} herramientas disponibles para la IA`); };
 
 const input = $('#input');
 input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px'; });
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && matchMedia('(pointer:fine)').matches) { e.preventDefault(); $('#send').click(); }
 });
+input.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
 $('#composer').onsubmit = (e) => {
   e.preventDefault();
   if (busy) { abortCtl?.abort(); return; }
-  const text = input.value.trim(); if (!text) return;
+  const text = input.value.trim();
+  if (!text && !attach.length) return;
+  const files = attach; attach = []; renderAttach();
   input.value = ''; input.style.height = 'auto';
-  send(text);
+  send(text, files);
 };
+$('#attachBtn').onclick = () => $('#fileIn').click();
+$('#fileIn').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
+$('#attachBar').addEventListener('click', (e) => { const i = e.target.dataset.unattach; if (i != null) { attach.splice(+i, 1); renderAttach(); } });
+$('#mic').hidden = !(SR || (navigator.mediaDevices?.getUserMedia && window.MediaRecorder));
+$('#mic').onclick = toggleMic;
+$('#app').addEventListener('dragover', (e) => e.preventDefault());
+$('#app').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
 $('#log').addEventListener('click', (e) => {
-  const id = e.target.dataset?.copy; if (!id) return;
-  const m = thread().messages.find((x) => x.id === id);
+  const { copy, speak: sp } = e.target.dataset || {};
+  if (sp) return speak(sp);
+  if (!copy) return;
+  const m = thread().messages.find((x) => x.id === copy);
   navigator.clipboard?.writeText(m?.content || '').then(() => toast('COPIADO'), () => toast('No se pudo copiar', true));
 });
 
-// IAs
+// IAs y ajustes
 $('#presetSel').innerHTML = Object.entries(PRESETS).map(([k, p]) => `<option value="${k}">${p.name}${p.tier === 'free' ? ' — GRATIS' : p.tier === 'paid' ? ' — PAGO' : ''}</option>`).join('');
 $('#addProv').onclick = () => {
   const k = $('#presetSel').value;
   S.providers.push({ id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), apiKey: '', enabled: true });
   save(); renderProviders(); renderTargets(); renderLog();
 };
+const resetHealth = (p) => p.models.forEach((m) => delete S.health[`${p.id}::${m}`]);
 $('#provList').addEventListener('change', (e) => {
   const card = e.target.closest('[data-pid]'), f = e.target.dataset.f; if (!card || !f) return;
   const p = S.providers.find((x) => x.id === card.dataset.pid);
   p[f] = f === 'models' ? e.target.value.split(',').map((s) => s.trim()).filter(Boolean) : e.target.value.trim();
+  if (f === 'apiKey' || f === 'baseUrl') resetHealth(p);
+  if (f === 'apiKey' && vault.locked) toast('Las claves están bloqueadas con PIN: desbloquéalas para guardar cambios', true);
   save(); renderTargets();
 });
 $('#provList').addEventListener('click', async (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-pid]'); if (!act || !card) return;
   const p = S.providers.find((x) => x.id === card.dataset.pid);
-  if (act === 'del') { if (!confirm(`¿Eliminar ${p.name}?`)) return; S.providers = S.providers.filter((x) => x !== p); }
+  if (act === 'del') { if (!confirm(`¿Eliminar ${p.name}?`)) return; resetHealth(p); S.providers = S.providers.filter((x) => x !== p); }
   if (act === 'toggle') p.enabled = p.enabled === false;
+  if (act === 'reset') resetHealth(p);
   if (act === 'scan') {
     e.target.textContent = 'ESCANEANDO…';
     try { const m = await fetchModels(p); if (!m.length) throw new Error('No se encontraron modelos'); p.models = m; toast(`${p.name}: ${m.length} modelos`); }
@@ -411,30 +1199,100 @@ $('#provList').addEventListener('click', async (e) => {
   if (act === 'test') {
     if (!p.models[0]) return toast('Sin modelos', true);
     e.target.textContent = 'PROBANDO…';
-    try { const t0 = performance.now(); const r = await callTarget({ pid: p.id, model: p.models[0], kind: p.kind }, [{ role: 'user', content: 'Responde solo: OK' }], () => {}); toast(`${p.models[0]} → "${r.trim().slice(0, 40)}" · ${Math.round(performance.now() - t0)} ms`); }
-    catch (err) { toast(`${p.name}: ${err.status ? `[${err.status}] ` : ''}${netHint(err)}`, true); }
+    const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
+    try { const t0 = performance.now(); const r = await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}); noteOk(t, Math.round(performance.now() - t0)); toast(`${p.models[0]} → "${r.trim().slice(0, 40)}" · ${Math.round(performance.now() - t0)} ms`); }
+    catch (err) { noteFail(t, err); toast(`${p.name}: ${err.status ? `[${err.status}] ` : ''}${netHint(err)}`, true); }
   }
   save(); renderProviders(); renderTargets(); renderLog();
+});
+$('#settings').addEventListener('change', (e) => {
+  if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }
+  const k = e.target.dataset.council;
+  if (k) { S.councilKeys = e.target.checked ? [...new Set([...S.councilKeys, k])] : S.councilKeys.filter((x) => x !== k); save(); }
+});
+$('#settings').addEventListener('click', async (e) => {
+  if (e.target.id === 'vaultOn') {
+    const pin = $('#pinNew').value;
+    if (pin.length < 4) return toast('El PIN debe tener al menos 4 caracteres', true);
+    await vaultEnable(pin); toast('PIN ACTIVADO: claves cifradas'); renderSettings();
+  }
+  if (e.target.id === 'vaultOff') {
+    if (!confirm('¿Quitar el PIN? Las claves volverán a guardarse sin cifrar.')) return;
+    S.vault = null; Object.assign(vault, { key: null, locked: false }); save(); renderSettings();
+  }
+  if (e.target.id === 'vaultUnlock') { await unlockDialog(); renderSettings(); }
 });
 
 // MCP
 $('#mcpForm').onsubmit = (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  let url = String(f.get('url')).trim();
+  const raw = String(f.get('url')).trim();
+  const p = parsePair(raw);
+  if (p) { e.target.reset(); return pairWith(p); }
+  let url = raw;
   if (new URL(url).pathname === '/') url = url.replace(/\/+$/, '') + '/mcp'; // http://ip:8787 → /mcp
   const s = { id: uid(), name: String(f.get('name')).trim().toUpperCase(), url, token: String(f.get('token')).trim(), models: [], tools: [] };
   S.mcp.push(s); e.target.reset(); save(); mcpConnect(s);
 };
-$('#mcpList').addEventListener('click', (e) => {
+$('#mcpForm input[name=url]').addEventListener('input', (e) => {
+  // Si se pega un enlace de emparejamiento, el resto de campos se rellenan solos.
+  const p = parsePair(e.target.value);
+  if (!p) return;
+  const form = $('#mcpForm');
+  form.elements.name.value = p.name; form.elements.token.value = p.token;
+});
+$('#scanBtn').hidden = !!DESK || !('BarcodeDetector' in window && navigator.mediaDevices?.getUserMedia);
+$('#scanBtn').onclick = scanQR;
+$('#scanClose').onclick = stopScan;
+$('#mcpList').addEventListener('change', async (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
+  if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
+  if (act === 'trust') { s.trustTools = e.target.checked; save(); }
+  if (act === 'lan') {
+    e.target.disabled = true;
+    await DESK.setLan(e.target.checked);
+    await mcpConnect(s, true).catch(() => {});
+    renderMcp();
+  }
+});
+$('#mcpList').addEventListener('click', async (e) => {
+  const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
+  const s = S.mcp.find((x) => x.id === card.dataset.sid);
+  if (act === 'copytoken') navigator.clipboard?.writeText(DESK.bridge().token).then(() => toast('TOKEN COPIADO'));
   if (act === 'reconnect') mcpConnect(s);
   if (act === 'del') { S.mcp = S.mcp.filter((x) => x !== s); save(); renderMcp(); renderTargets(); renderLog(); }
+  if (['addfolder', 'rmfolder', 'tson', 'tsoff'].includes(act)) {
+    e.target.disabled = true;
+    const r = act === 'addfolder' ? await DESK.addFolder() : act === 'rmfolder' ? await DESK.removeFolder(e.target.dataset.path)
+      : await DESK.tailscale(act === 'tson');
+    if (r?.error) toast(r.error, true);
+    if (act.includes('folder')) await mcpConnect(s, true).catch(() => {});
+    renderMcp();
+  }
 });
 
 // ---------- arranque ----------
-S.threads.flatMap((t) => t.messages).forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
-renderTargets(); renderLog();
-S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));
-if (!NATIVE && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+async function boot() {
+  S.threads.flatMap((t) => t.messages).forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
+  if (DESK) {
+    // El puente integrado del PC aparece siempre como primer servidor MCP.
+    const b = DESK.bridge();
+    let s = S.mcp.find((x) => x.local);
+    if (!s) S.mcp.unshift(s = { id: 'local', local: true, name: 'ESTE PC', models: [], tools: [] });
+    Object.assign(s, { url: `http://127.0.0.1:${b.port}/mcp`, token: b.token });
+  }
+  renderTargets(); renderLog();
+  if (S.vault && S.vault.data && crypto.subtle) await unlockDialog();
+  // Abierta desde el QR de un PC: se conecta sola a ese puente.
+  const p = parsePair(location.hash);
+  if (p) { window.history.replaceState(null, '', location.pathname + location.search); pairWith(p); }
+  save();
+  renderTargets(); renderLog();
+  S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));
+  setInterval(() => { if (document.visibilityState === 'visible') { syncAll(); renderTargets(); } }, 60000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncAll(); });
+  if (!NATIVE && 'serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+boot();

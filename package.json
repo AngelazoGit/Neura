@@ -17,7 +17,9 @@
     "assets": "capacitor-assets generate --ios --android --iconBackgroundColor '#07060a' --iconBackgroundColorDark '#07060a' --splashBackgroundColor '#07060a' --splashBackgroundColorDark '#07060a'",
     "apk": "cap sync android && cd android && ./gradlew assembleDebug",
     "bridge": "node bridge/server.mjs",
-    "deploy:web": "git push https://github.com/AngelazoGit/neura-web.git $(git subtree split --prefix app):refs/heads/main"
+    "deploy:web": "git push https://github.com/AngelazoGit/neura-web.git $(git subtree split --prefix app):refs/heads/main",
+    "pc": "npm --prefix desktop start",
+    "pc:instalador": "npm --prefix desktop run dist"
   },
   "dependencies": {
     "@capacitor/android": "^8.6.2",

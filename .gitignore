@@ -11,3 +11,4 @@ ios/DerivedData/
 *.aab
 *.keystore
 .DS_Store
+desktop/dist/

@@ -71,6 +71,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Neura usa el micrófono para dictar tus mensajes.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Neura usa la cámara para escanear el código QR de tu PC y conectarse a él.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Neura te deja adjuntar fotos para que la IA las analice.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Neura se conecta a los servidores MCP de tu red local para usar la IA de tus ordenadores.</string>
 	<key>UIStatusBarStyle</key>

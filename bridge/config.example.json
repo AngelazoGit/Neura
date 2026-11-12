@@ -4,6 +4,8 @@
   "token": "cambia-esto-por-un-secreto-largo",
   "timeoutMs": 300000,
   "serveApp": true,
+  "folders": [],
+  "embedModel": "nomic-embed-text",
   "backends": [
     { "id": "ollama",   "type": "ollama", "url": "http://127.0.0.1:11434" },
     { "id": "lmstudio", "type": "openai", "url": "http://127.0.0.1:1234/v1" },

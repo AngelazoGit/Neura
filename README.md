@@ -7,6 +7,8 @@ neura/
 ├── app/       La app (HTML/CSS/JS, sin build)
 ├── android/   Proyecto nativo Android (Capacitor)
 ├── ios/       Proyecto nativo iOS (Capacitor)
+├── desktop/   App para PC (Windows, macOS, Linux) con Electron y el puente integrado
+├── docs/      Guías (PC + Ollama)
 ├── assets/    Fuentes del icono y la pantalla de arranque
 └── bridge/    neura-bridge: servidor MCP sin dependencias (Node 18+)
 ```
@@ -16,6 +18,14 @@ neura/
 1. **Un solo chat con todas las IAs públicas.** En **⚙** añades Gemini, Groq, OpenRouter (modelos gratis), Cerebras, Mistral, GitHub Models, Hugging Face o Cohere con la clave gratuita de cada una. Opcionales de pago: Anthropic, OpenAI, DeepSeek. Eliges el modelo en el desplegable y la conversación continúa aunque cambies de IA.
 2. **AUTO-SALTO para tokens gratis.** Si la IA elegida agota su cuota gratuita (429), falla o rechaza la clave, Neura reenvía el mensaje a la siguiente IA conectada.
 3. **Menú MCP (⬡).** Conecta con uno o varios servidores MCP (`neura-bridge` u otro compatible). Sus modelos locales aparecen en el mismo desplegable.
+4. **Hilos (≡).** Varias conversaciones guardadas, con búsqueda y exportación (.md / copia .json). Con un puente conectado, los hilos se sincronizan entre el PC, el móvil y la web sin perder mensajes.
+5. **AUTO-SALTO inteligente.** Recuerda qué IA agotó su cuota y hasta cuándo (lee `Retry-After` y los mensajes de cada proveedor), no la vuelve a intentar antes de tiempo, ordena las demás por tasa de éxito y velocidad, y lo muestra en ⚙ y con ⏳ en el desplegable.
+6. **Memoria de contexto.** Si un hilo crece demasiado para las IAs gratuitas, lo antiguo se resume (con tu IA local si la tienes) y se envía resumen + lo reciente. Si una IA responde "contexto demasiado largo", Neura comprime y reintenta.
+7. **⚖ CONSEJO.** Varias IAs responden a la vez y una de ellas combina la mejor respuesta.
+8. **Imágenes, PDF, texto y voz.** 📎 adjunta fotos (para IAs con visión), PDF (se extrae el texto en el dispositivo) y archivos de texto o código. 🎤 dicta con Whisper de Groq (gratis) o el dictado del navegador. **LEER** lee una respuesta en voz alta.
+9. **ƒ HERRAMIENTAS.** Las IAs (públicas o locales) pueden usar las herramientas de tus servidores MCP: buscar y leer documentos de carpetas que compartas en el PC, búsqueda semántica en ellos (RAG local con Ollama). El estado del equipo (`system_info`) solo lo ve la IA local, para no enviar el nombre del PC ni IPs internas a proveedores externos.
+10. **Emparejar por QR y fuera de casa.** El PC muestra un QR que conecta el móvil en un toque, y con Tailscale funciona desde cualquier sitio.
+11. **Claves protegidas.** En el PC se cifran con el llavero del sistema; en el móvil y la web, opcionalmente con un PIN (AES-256). Las claves nunca se sincronizan.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.
 
@@ -27,15 +37,30 @@ cp config.example.json config.json   # edita backends y token
 NEURA_TOKEN=un-secreto-largo node server.mjs
 ```
 
-Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` y `system_info`. Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
+Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
 
-Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`.
+Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `NEURA_FOLDERS`), añade herramientas de **solo lectura**: `list_dir`, `search_files`, `read_file` y `search_docs` (búsqueda semántica con embeddings de Ollama: `ollama pull nomic-embed-text`; sin ese modelo busca por palabras). Nunca sale de las carpetas compartidas (bloquea `..`, rutas absolutas, carpetas ocultas y enlaces simbólicos que apunten fuera). Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
+
+Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`, `NEURA_FOLDERS`, `NEURA_EMBED_MODEL`.
 
 Si el puente escucha en la red y no defines token, genera uno aleatorio en cada arranque y lo muestra en pantalla. Fija el tuyo con `NEURA_TOKEN` para que no cambie.
 
 Tests de seguridad del puente: `node --test bridge/test.mjs`.
 
 Si alguna IA pública bloquea las llamadas desde el navegador (CORS), añádela como backend del puente (admite `url` + `apiKey`) y úsala a través de él.
+
+## App para PC (Windows, macOS, Linux)
+
+`desktop/` empaqueta `app/` con Electron. Guarda los hilos y ajustes en un archivo en disco, hace las peticiones sin CORS y arranca solo el puente MCP, que aparece en **⬡** como **ESTE PC** con los modelos de Ollama. Con **ABRIR A MI RED**, el móvil se conecta al PC y comparte sus hilos.
+
+```bash
+npm run pc              # abrir en modo desarrollo (la primera vez: cd desktop && npm install)
+npm run pc:instalador   # genera el instalador de tu sistema en desktop/dist/
+```
+
+GitHub Actions genera los instaladores de Windows (.exe), macOS (.dmg) y Linux (.AppImage/.deb) en cada push a `main` (artifacts `neura-pc-*`).
+
+**Guía completa (instalación, datos, sincronización e instalación de Ollama):** [docs/ESCRITORIO-Y-OLLAMA.md](docs/ESCRITORIO-Y-OLLAMA.md)
 
 ## App nativa (Android e iOS) con Capacitor
 
@@ -93,4 +118,6 @@ npm run deploy:web
 
 - El puente nunca arranca abierto en la red: sin `NEURA_TOKEN` genera un token aleatorio.
 - La app no hace peticiones a terceros al abrirse (fuentes incluidas en `app/fonts`, licencia OFL) y tiene una política CSP que bloquea scripts inyectados.
-- Las claves API se guardan en el almacenamiento local de la app, sin cifrar. En Android quedan fuera de las copias de seguridad.
+- Las claves API se guardan solo en el dispositivo y nunca se sincronizan. En el PC se cifran con el llavero del sistema (DPAPI en Windows, Llavero en macOS, libsecret/kwallet en Linux). En el móvil y la web puedes cifrarlas con un PIN en **⚙ → SEGURIDAD DE LAS CLAVES** (AES-256-GCM, PBKDF2). En Android quedan fuera de las copias de seguridad.
+- Las herramientas de archivos del puente son de solo lectura y no salen de las carpetas que compartes. Las herramientas de servidores MCP que no sean `neura-bridge` piden confirmación antes de cada uso.
+- La lectura de PDF se hace en el propio dispositivo con pdf.js (Apache-2.0, `app/vendor/`).
