@@ -181,7 +181,8 @@ const INTERNAL = new Set(['chat', 'list_models', 'threads_sync']);
 function toolbox() {
   const list = [], used = new Set();
   for (const s of S.mcp) if (s.status === 'on') for (const t of s.tools || []) {
-    if (INTERNAL.has(t.name)) continue;
+    // system_info revela nombre del PC e IPs internas: solo la usa la IA local (dentro del puente).
+    if (INTERNAL.has(t.name) || t.name === 'system_info') continue;
     const base = t.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 56);
     let name = base, n = 2;
     while (used.has(name)) name = `${base}_${n++}`;

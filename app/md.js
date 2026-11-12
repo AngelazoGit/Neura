@@ -88,5 +88,5 @@ window.NeuraMD = (() => {
     }
     return out.join('');
   }
-  return { render, inline, esc };
+  return { render };
 })();

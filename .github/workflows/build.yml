@@ -59,7 +59,7 @@ jobs:
         shell: bash
 
   bridge:
-    name: Tests del puente MCP
+    name: Tests del puente MCP y del Markdown
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -68,6 +68,7 @@ jobs:
         with:
           node-version: 22
       - run: node --test bridge/test.mjs
+      - run: node --test test/md.test.cjs
 
   desktop:
     name: PC (${{ matrix.os }})
