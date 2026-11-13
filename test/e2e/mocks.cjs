@@ -88,6 +88,13 @@ const ollama = http.createServer(async (req, res) => {
   const raw = await body(req);
   res.setHeader('content-type', 'application/json');
   if (req.url === '/api/tags') return res.end(JSON.stringify({ models: ollamaModels.map((name) => ({ name })) }));
+  if (req.url === '/v1/chat/completions') {
+    // API compatible con OpenAI que el Ollama real también ofrece (la usa Neura Gateway).
+    const j = JSON.parse(raw);
+    const q = textOf(j.messages[j.messages.length - 1].content);
+    calls['ollama-v1'] = (calls['ollama-v1'] || 0) + 1;
+    return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: `local dice: ${q.slice(0, 30)}` }, finish_reason: 'stop' }] }));
+  }
   if (req.url === '/api/pull') {
     // Descarga simulada: progreso por trozos y, al final, el modelo queda disponible.
     const { model } = JSON.parse(raw);
