@@ -58,6 +58,7 @@
 
   <main id="log" aria-live="polite"></main>
 
+  <div id="skillHint" class="hintbar" hidden></div>
   <div id="attachBar" class="chips" hidden></div>
   <form id="composer">
     <button type="button" class="ico tool" id="attachBtn" aria-label="Adjuntar imagen, PDF o texto" title="Adjuntar imagen, PDF o texto">📎</button>
@@ -71,6 +72,8 @@
 <section class="sheet" id="sheetThreads" aria-hidden="true">
   <div class="sheet-in">
     <header><h2>HILOS <em>// GUARDADOS</em></h2><button class="ico close">✕</button></header>
+    <select id="projectSel" class="search" aria-label="Proyecto"></select>
+    <div id="projectCard"></div>
     <button class="btn wide" id="newThread">+ NUEVO HILO</button>
     <input type="search" id="threadSearch" class="search" placeholder="BUSCAR EN LOS HILOS…" aria-label="Buscar en los hilos">
     <div id="threadList"></div>

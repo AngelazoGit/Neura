@@ -175,3 +175,14 @@ test('chat en streaming envía el texto por trozos', async () => {
   const plain = await rpc2({ jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'chat', _meta: { progressToken: 'p2' }, arguments: { model: 'ollama/mock', messages: [{ role: 'user', content: 'hola' }] } } });
   assert.equal((await plain.json()).result.structuredContent.text, 'ok');
 });
+
+test('threads_sync también sincroniza habilidades y proyectos (gana el más reciente, también al borrar)', async () => {
+  const a = await sync({ collections: { skills: [{ id: 'k1', name: 'Apuntes', version: 1, updatedAt: 10 }], projects: [{ id: 'p1', name: 'Tesis', updatedAt: 10 }], otra: [{ id: 'x', updatedAt: 1 }] } });
+  assert.equal(a.collections.skills[0].name, 'Apuntes');
+  assert.equal(a.collections.projects[0].name, 'Tesis');
+  assert.equal(a.collections.otra, undefined, 'solo colecciones conocidas');
+  const viejo = await sync({ since: a.rev, collections: { skills: [{ id: 'k1', name: 'Viejo', updatedAt: 5 }] } });
+  assert.equal(viejo.collections.skills.length, 0, 'una versión más antigua no pisa la nueva');
+  const borrado = await sync({ since: a.rev, collections: { skills: [{ id: 'k1', deleted: true, updatedAt: 20 }] } });
+  assert.equal(borrado.collections.skills[0].deleted, true);
+});
