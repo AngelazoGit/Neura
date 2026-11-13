@@ -58,7 +58,7 @@ npm run pc              # abrir en modo desarrollo (la primera vez: cd desktop &
 npm run pc:instalador   # genera el instalador de tu sistema en desktop/dist/
 ```
 
-GitHub Actions genera en cada push a `main` el instalador y la versión portable de Windows (`.exe`), macOS (`.dmg` / `.zip`) y Linux (`.deb` / `.AppImage`). Al subir una etiqueta `vX.Y.Z` se publican todos, junto con el APK de Android, en **[Releases](https://github.com/AngelazoGit/neura/releases/latest)**.
+GitHub Actions genera en cada push a `main` el instalador y la versión portable de Windows (`.exe`), macOS (`.dmg` / `.zip`) y Linux (`.deb` / `.AppImage`). Al subir una rama `version-X.Y.Z` (o una etiqueta `vX.Y.Z`) se publican todos, junto con el APK de Android, en **[Releases](https://github.com/AngelazoGit/neura/releases/latest)**.
 
 **Guía completa (instalación, datos, sincronización e instalación de Ollama):** [docs/ESCRITORIO-Y-OLLAMA.md](docs/ESCRITORIO-Y-OLLAMA.md)
 
