@@ -227,3 +227,21 @@ mark{background:rgba(255,122,0,.35);color:var(--text)}
 .card.skill-on{border-left-color:var(--green)}
 #skEditor h4{margin:0;font:700 12px var(--cond);letter-spacing:.2em;color:var(--orange2)}
 #skEditor textarea{width:100%;resize:vertical;font:13px/1.4 var(--cond)}
+.chatItem .proj{font:10px var(--mono);color:var(--purple2);margin-right:4px}
+#projectSel{width:100%}
+#projectCard textarea{width:100%;resize:vertical;font:13px/1.4 var(--cond)}
+.hintbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 12px;background:#0b0810;border-top:1px solid var(--line);font:12px var(--mono);color:var(--green)}
+.hintbar[hidden]{display:none}
+.wizard{text-align:left;max-width:420px;margin:20px auto 0;border-left-color:var(--green)}
+.wizard h4{margin:0;font:700 12px var(--cond);letter-spacing:.2em;color:var(--green)}
+.wizard select,.wizard input{width:100%}
+.msg.user .tag{justify-content:space-between}
+.msg .tag .acts button{background:none;border:1px solid var(--line);color:var(--dim);font:11px var(--mono);padding:1px 6px;cursor:pointer}
+.auto[hidden]{display:none}
+.wizard{margin:0 auto 18px}
+@media (max-width:480px){
+  .bar{gap:5px}
+  .bar .auto{padding:5px 7px;font-size:10px;letter-spacing:.06em;gap:4px}
+  .bar .auto input{width:14px;height:14px}
+  #target{flex-basis:100%}
+}

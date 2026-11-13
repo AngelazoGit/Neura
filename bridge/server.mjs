@@ -465,7 +465,7 @@ let store = null;
 function loadStore() {
   if (store) return store;
   try { store = JSON.parse(readFileSync(storeFile, 'utf8')); } catch { store = {}; }
-  store.rev ||= 0; store.threads ||= {};
+  store.rev ||= 0; store.threads ||= {}; store.collections ||= {};
   return store;
 }
 function saveStore() {
@@ -476,10 +476,23 @@ function saveStore() {
 }
 const strip = ({ rev, ...t }) => t;
 
-async function threadsSync({ threads = [], since = 0 }) {
+// Otras colecciones (habilidades, proyectos): objetos con id y updatedAt; gana el más reciente, también los borrados.
+const COLLECTIONS = new Set(['skills', 'projects']);
+async function threadsSync({ threads = [], collections = {}, since = 0 }) {
   if (!Array.isArray(threads)) throw new Error('threads debe ser una lista');
   const st = loadStore();
   let changed = false;
+  for (const [name, items] of Object.entries(collections || {})) {
+    if (!COLLECTIONS.has(name) || !Array.isArray(items)) continue;
+    const col = (st.collections[name] ||= {});
+    for (const it of items) {
+      if (typeof it?.id !== 'string' || !it.id) continue;
+      const cur = col[it.id];
+      if (cur && (cur.updatedAt || 0) >= (it.updatedAt || 0)) continue;
+      col[it.id] = { ...it, rev: ++st.rev };
+      changed = true;
+    }
+  }
   for (const t of threads) {
     if (typeof t?.id !== 'string' || !t.id) continue;
     const cur = st.threads[t.id];
@@ -490,8 +503,9 @@ async function threadsSync({ threads = [], since = 0 }) {
     }
   }
   if (changed) saveStore();
-  const out = Object.values(st.threads).filter((t) => t.rev > (Number(since) || 0)).map(strip);
-  return { rev: st.rev, threads: out };
+  const newer = (list) => Object.values(list).filter((t) => t.rev > (Number(since) || 0)).map(strip);
+  const cols = Object.fromEntries(Object.entries(st.collections).map(([k, v]) => [k, newer(v)]));
+  return { rev: st.rev, threads: newer(st.threads), collections: cols };
 }
 
 // ---------- MCP ----------
@@ -529,9 +543,11 @@ const TOOLS = [
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
     inputSchema: { type: 'object', properties: {} } },
   ...(SYNC ? [{ name: 'threads_sync', title: 'Sincronizar hilos',
-    description: 'Guarda en este equipo los hilos de chat enviados y devuelve los que cambiaron desde la revisión since.',
+    description: 'Guarda en este equipo los hilos de chat (y las colecciones skills y projects) y devuelve lo que cambió desde la revisión since.',
     inputSchema: { type: 'object', properties: {
-      threads: { type: 'array', items: { type: 'object' } }, since: { type: 'integer' } } } }] : []),
+      threads: { type: 'array', items: { type: 'object' } },
+      collections: { type: 'object', description: '{ skills: [...], projects: [...] }; cada elemento con id y updatedAt' },
+      since: { type: 'integer' } } } }] : []),
   ...FILE_TOOLS,
 ];
 const TOOL_IMPL = { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs, system_info: systemInfo };

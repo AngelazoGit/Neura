@@ -61,7 +61,7 @@ const DEFAULT_INSTRUCTIONS = 'Responde siempre en español y solo en español: n
 // ---------- estado ----------
 const S = Object.assign({
   providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
-  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [],
+  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [], projects: [], project: null,
 }, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
@@ -130,14 +130,18 @@ function parseWait(text) {
 }
 const untilMidnightUTC = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 0); return Math.ceil((d - Date.now()) / 1000); };
 // Modelo retirado o inexistente: no volverá, hay que pedir la lista actual al proveedor.
-const isGone = (e) => e.status === 404 || /not found|no longer available|not supported for|does not exist|decommissioned|has been deprecated|model_not_found/i.test(e.message || '');
+const isGone = (e) => !isNoVision(e) && (e.status === 404 || /not found|no longer available|not supported for|does not exist|decommissioned|has been deprecated|model_not_found/i.test(e.message || ''));
 // Gemini y otras devuelven 400 (no 401) con una clave inválida.
 const isKeyErr = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api.?key|unauthori[sz]ed|invalid.{0,12}(key|token|credential)/i.test(e.message || ''));
 function noteOk(t, ms) { Object.assign(H(t.key), { coolUntil: 0, reason: null, streak: 0 }); const h = H(t.key); h.ok++; h.ms = h.ms ? Math.round(h.ms * 0.7 + ms * 0.3) : ms; }
+// El modelo rechazó la imagen: sirve para texto, pero no hay que mandarle fotos.
+const isNoVision = (e) => e.status === 400 && /image|vision|multimodal|modalit/i.test(e.message || '');
+const capable = (t, needs = {}) => !(needs.vision && S.health[t.key]?.noVision);
 function noteFail(t, e) {
   if (e.name === 'AbortError') return;
   const h = H(t.key), msg = e.message || '';
   h.fail++; h.streak = (h.streak || 0) + 1;
+  if (isNoVision(e)) { Object.assign(h, { noVision: true, streak: 0 }); return; }
   if (e.status === 429 || /quota|rate.?limit|resource.?exhausted|too many requests/i.test(msg)) {
     let wait = e.retryAfter || parseWait(msg) || 60;
     if (!e.retryAfter && /per.?day|daily|\bRPD\b|\bTPD\b|por día|diari/i.test(msg)) wait = untilMidnightUTC();
@@ -170,12 +174,13 @@ const allowed = (t) => (!S.freeOnly || isFree(t)) && (!thread().private || isMin
 const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : 'es de pago o de coste desconocido y tienes SOLO GRATIS activado');
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
 // Nunca incluye destinos que la política de gasto o privacidad no permite.
-function plan(first) {
+// needs.vision: el mensaje lleva imágenes; se evitan los modelos que ya las rechazaron.
+function plan(first, needs = {}) {
   if (!first) return [];
-  const own = allowed(first) ? [first] : [];
+  const own = allowed(first) && capable(first, needs) ? [first] : [];
   if (!S.autoSkip) return own;
-  const rest = targets().filter((t) => t.key !== first.key && allowed(t));
-  const adj = (t) => score(t) - (t.pid && t.pid === first.pid ? 0.5 : 0);
+  const rest = targets().filter((t) => t.key !== first.key && allowed(t) && capable(t, needs));
+  const adj = (t) => score(t) - (t.pid && t.pid === first.pid ? 0.5 : 0) - (S.useTools && S.health[t.key]?.noTools ? 0.4 : 0);
   const ready = rest.filter((t) => !cooling(t.key)).sort((a, b) => adj(b) - adj(a));
   const cold = rest.filter((t) => cooling(t.key)).sort((a, b) => S.health[a.key].coolUntil - S.health[b.key].coolUntil);
   return [...own, ...ready, ...cold];
@@ -298,7 +303,8 @@ async function callOpenAI(p, model, messages, onDelta, signal, opt = {}) {
     if (!r.ok && body.tools && r.status === 400) {
       const t = await r.text();
       if (!/tool|function/i.test(t)) throw httpErr(400, t, r.headers);
-      tools = []; delete body.tools; // el modelo no admite herramientas: se responde sin ellas
+      tools = []; delete body.tools; // el modelo no admite herramientas: se responde sin ellas y se recuerda
+      H(`${p.id}::${model}`).noTools = true;
       r = await post(body);
     }
     if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
@@ -484,7 +490,9 @@ async function syncWith(s) {
     // Solo se envía lo cambiado desde la última vez; los mensajes a medias no salen del dispositivo.
     const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length))
       .map((t) => ({ ...t, messages: t.messages.filter((m) => !m.pending) }));
-    const r = await mcpRpc(s, 'tools/call', { name: 'threads_sync', arguments: { since: s.syncRev || 0, threads: out } });
+    const newer = (list) => list.filter((x) => (x.updatedAt || 0) > (s.pushedAt || 0));
+    const collections = { skills: newer(S.skills), projects: newer(S.projects) };
+    const r = await mcpRpc(s, 'tools/call', { name: 'threads_sync', arguments: { since: s.syncRev || 0, threads: out, collections } });
     if (r.isError) throw new Error(r.content?.[0]?.text || 'Error al sincronizar');
     const data = r.structuredContent || JSON.parse(r.content?.[0]?.text || '{}');
     let changed = false;
@@ -497,9 +505,23 @@ async function syncWith(s) {
       if (i >= 0) S.threads[i] = merged; else S.threads.push(merged);
       changed = true;
     }
+    // Habilidades y proyectos: gana la versión más reciente (también los borrados).
+    for (const [name, items] of Object.entries(data.collections || {})) {
+      const list = S[name];
+      if (!['skills', 'projects'].includes(name) || !Array.isArray(items)) continue;
+      for (const it of items) {
+        const i = list.findIndex((x) => x.id === it.id);
+        if (i < 0) list.push(it); else if ((it.updatedAt || 0) > (list[i].updatedAt || 0)) list[i] = it; else continue;
+        changed = true;
+      }
+    }
     s.syncRev = data.rev; s.pushedAt = startedAt; s.syncedAt = Date.now(); s.syncError = null;
     save();
-    if (changed && !busy) { renderLog(); if ($('#sheetThreads').classList.contains('open')) renderThreads(); }
+    if (changed && !busy) {
+      renderLog();
+      if ($('#sheetThreads').classList.contains('open')) renderThreads();
+      if ($('#sheetSkills').classList.contains('open') && !skDraft) renderSkills();
+    }
   } catch (e) { s.syncError = netHint(e); }
   finally { s.syncing = false; if ($('#sheetMcp').classList.contains('open')) renderMcp(); }
 }
@@ -509,7 +531,7 @@ const syncAll = () => S.mcp.forEach((s) => syncWith(s));
 // Las imágenes solo se reenvían en los últimos mensajes; antes quedan como una nota de texto.
 function userContent(m, withImg) {
   let text = m.content || '';
-  for (const f of m.files || []) if (f.kind === 'text') text += `\n\n[Archivo adjunto: ${f.name}]\n\`\`\`\n${f.text}\n\`\`\``;
+  for (const f of m.files || []) if (f.kind === 'text') text += `\n\n[Archivo adjunto: ${f.name}${f.pdf ? ' — al usar su contenido, cita la página así: (pág. N)' : ''}]\n\`\`\`\n${f.text}\n\`\`\``;
   const imgs = (m.files || []).filter((f) => f.kind === 'image');
   if (!imgs.length) return text;
   if (!withImg) return text + imgs.map((f) => `\n[Imagen adjunta: ${f.name}]`).join('');
@@ -584,10 +606,11 @@ async function fitContext(th, hist, budget, signal) {
 
 // ---------- envío ----------
 // Errores que merecen probar otra IA: cuota agotada, sobrecarga, sin conexión, clave inválida.
-const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e) || isGone(e));
+const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e) || isGone(e) || isNoVision(e));
 function friendly(e) {
   if (e.name === 'AbortError') return 'Cancelado';
   if (isGone(e)) return 'Este modelo ya no está disponible. Neura ha actualizado la lista de modelos.';
+  if (isNoVision(e)) return 'Este modelo no admite imágenes.';
   if (e.status === 429 || /quota|rate.?limit|exhausted/i.test(e.message || '')) return 'Cuota gratuita agotada por ahora.';
   if (isKeyErr(e)) return 'La clave API no es válida. Revísala en ⚙.';
   if (e.status === 402) return 'Sin saldo en esta cuenta.';
@@ -604,11 +627,15 @@ function failMsg(msg, e, t) {
 }
 // Algunos modelos escriben su razonamiento interno (a menudo en inglés) entre <think>…</think>.
 const noThink = (s) => String(s || '').replace(/<(think|thinking|thought)>[\s\S]*?(<\/\1>|$)/gi, '').trimStart();
-const activeSkill = () => { const id = thread().skill; return id ? S.skills.find((k) => k.id === id) : null; };
+const liveSkills = () => S.skills.filter((k) => !k.deleted);
+const activeSkill = () => { const id = thread().skill; return id ? liveSkills().find((k) => k.id === id) : null; };
+const activeProject = () => { const id = thread().project; return id ? S.projects.find((p) => p.id === id && !p.deleted) : null; };
 // Se reconstruye en cada petición desde la versión guardada: no depende de que el resumen del historial la recuerde.
 function withInstructions(hist, skill = activeSkill()) {
   const sys = [];
   if (S.instructions?.trim()) sys.push(S.instructions.trim());
+  const pr = activeProject();
+  if (pr?.memory?.trim()) sys.push(`Proyecto «${pr.name}». Información y preferencias que debes tener en cuenta:\n${pr.memory.trim()}`);
   if (skill) sys.push(`Habilidad activa: «${skill.name}» (v${skill.version}). Sigue este procedimiento:\n\n${skill.instructions}`);
   return sys.length ? [{ role: 'system', content: sys.join('\n\n---\n\n') }, ...hist] : hist;
 }
@@ -617,6 +644,8 @@ async function runTarget(t, hist, msg, signal, tools) {
   msg.tools = [];
   const sk = activeSkill();
   if (sk && !msg.synth) msg.skill = { id: sk.id, v: sk.version, name: sk.name };
+  // A un modelo sin visión, las imágenes de mensajes anteriores le llegan como una nota de texto.
+  if (S.health[t.key]?.noVision) hist = hist.map((m) => (Array.isArray(m.content) ? { ...m, content: `${textOf(m.content)}\n[imagen adjunta, no visible para este modelo]` } : m));
   const out = await callTarget(t, withInstructions(hist), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
     tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
   });
@@ -638,11 +667,14 @@ async function send(text, files = []) {
     let hist = await fitContext(th, buildHistory(th), S.ctxTokens, signal);
     renderLog();
     const first = findT(S.target);
-    const queue = plan(first);
+    // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
+    const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
+    const queue = plan(first, needs);
+    if (first && allowed(first) && !capable(first, needs)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: '📷 no admite imágenes', skipped: true, ts: Date.now() });
     if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
     if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
     else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
-    else if (S.council) await sendCouncil(th, hist, first, signal);
+    else if (S.council) await sendCouncil(th, hist, first, signal, needs);
     else {
       let attempts = 0, ctxRetried = false;
       for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
@@ -679,11 +711,11 @@ async function send(text, files = []) {
 }
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
-function councilMembers(first) {
+function councilMembers(first, needs = {}) {
   const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key) && allowed(t));
   if (chosen.length >= 2) return chosen.slice(0, 5);
   const seen = new Set(), out = [];
-  for (const t of plan(first)) {
+  for (const t of plan(first, needs)) {
     if (cooling(t.key)) continue;
     const prov = t.pid || t.sid;
     if (seen.has(prov)) continue;
@@ -692,9 +724,9 @@ function councilMembers(first) {
   }
   return out;
 }
-async function sendCouncil(th, hist, first, signal) {
+async function sendCouncil(th, hist, first, signal, needs = {}) {
   const group = uid();
-  const members = councilMembers(first);
+  const members = councilMembers(first, needs);
   const runs = members.map((t) => {
     const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, ts: Date.now() };
     th.messages.push(msg);
@@ -709,7 +741,7 @@ async function sendCouncil(th, hist, first, signal) {
   const good = runs.filter((r) => !r.msg.error);
   if (good.length < 2 || signal.aborted) { renderLog(); return; }
   const question = textOf(hist[hist.length - 1]?.content);
-  const prompt = [{ role: 'user', content: `Pregunta del usuario:\n${question}\n\nRespuestas de varias IAs:\n\n${good.map((r, i) => `### Respuesta ${i + 1} (${r.t.label})\n${r.msg.content}`).join('\n\n')}\n\nEscribe la mejor respuesta final para el usuario: combina lo correcto de cada una, corrige errores y, si discrepan en algo importante, indícalo brevemente. No hables de "las respuestas" ni de que eres un moderador; responde directamente.` }];
+  const prompt = [{ role: 'user', content: `Pregunta del usuario:\n${question}\n\nRespuestas de varias IAs:\n\n${good.map((r, i) => `### Respuesta ${i + 1} (${r.t.label})\n${r.msg.content}`).join('\n\n')}\n\nEscribe la mejor respuesta final para el usuario: combina lo correcto de cada una y corrige errores. No hables de "las respuestas" ni de que eres un moderador; responde directamente. Termina SIEMPRE con un apartado titulado "⚠️ Desacuerdos y puntos a comprobar" que liste en viñetas dónde discrepan las IAs o qué afirmaciones conviene verificar; si no hay ninguno, escribe "Sin desacuerdos relevantes".` }];
   const syn = { id: uid(), role: 'assistant', label: '⚖ SÍNTESIS', group, synth: true, content: '', pending: true, ts: Date.now() };
   th.messages.push(syn); renderLog();
   const judges = [first, ...good.map((r) => r.t)].filter((t, i, a) => !cooling(t.key) && allowed(t) && a.findIndex((x) => x.key === t.key) === i);
@@ -743,12 +775,12 @@ function replyHTML(m) {
   }
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
-    : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button>`;
+    : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
   const skill = m.skill ? `<span class="chip skill">✦ ${esc(m.skill.name)} · v${m.skill.v}</span>` : '';
   return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}<div class="txt">${md(m.content)}</div></div>`;
 }
 function msgHTML(m) {
-  if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}</div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
+  if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
   return `<div class="msg">${replyHTML(m)}</div>`;
 }
 function logHTML(th) {
@@ -777,11 +809,15 @@ function renderLog() {
   const sk = activeSkill();
   $('#btnSkills').textContent = sk ? `✦ ${sk.name.toUpperCase()} · v${sk.version}` : '✦ HABILIDADES';
   $('#btnSkills').classList.toggle('on', !!sk);
+  const pr = activeProject();
+  $('#btnThreads').textContent = pr ? '📁' : '≡';
+  $('#btnThreads').title = pr ? `Hilos · proyecto ${pr.name}` : 'Hilos guardados';
   if (!th.messages.length) {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
       <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
+      ${S.providers.length ? '' : wizardHTML()}
       <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
       <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
       <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li>
@@ -805,6 +841,41 @@ function schedule(m) {
     if (stick) log.scrollTop = log.scrollHeight;
   });
 }
+
+// ---------- configuración guiada: la primera IA en un minuto ----------
+const WIZ = ['gemini', 'groq', 'openrouter', 'mistral', 'cerebras'];
+function wizardHTML() {
+  return `<div class="card wizard">
+    <h4>CONFIGURA TU PRIMERA IA · GRATIS, 1 MINUTO</h4>
+    <label>1. ELIGE UNA IA<select id="wzPreset">${WIZ.map((k, i) => `<option value="${k}">${PRESETS[k].name}${i ? '' : ' (recomendada)'}</option>`).join('')}</select></label>
+    <div class="hint">2. <a id="wzKey" href="${esc(PRESETS.gemini.keyUrl)}" target="_blank" rel="noopener">Abre su página y crea una clave gratuita ▸</a> (inicia sesión, pulsa «Create API key» y cópiala).</div>
+    <label>3. PEGA LA CLAVE<input id="wzApiKey" type="password" autocomplete="off" placeholder="pega aquí tu clave"></label>
+    <button class="btn wide" id="wzGo">CONECTAR Y PROBAR</button>
+    <div class="hint" id="wzMsg">La clave se guarda solo en este dispositivo.</div>
+  </div>`;
+}
+$('#log').addEventListener('change', (e) => { if (e.target.id === 'wzPreset') $('#wzKey').href = PRESETS[e.target.value].keyUrl; });
+$('#log').addEventListener('click', async (e) => {
+  if (e.target.id !== 'wzGo') return;
+  const key = $('#wzApiKey').value.trim(), k = $('#wzPreset').value, msg = $('#wzMsg');
+  if (!key) return toast('Pega la clave primero', true);
+  e.target.disabled = true; msg.textContent = 'Conectando y descargando la lista de modelos…';
+  let p = S.providers.find((x) => x.wizard);
+  if (!p) S.providers.push(p = { id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), enabled: true, wizard: true });
+  Object.assign(p, { preset: k, name: PRESETS[k].name, baseUrl: PRESETS[k].baseUrl, models: [...PRESETS[k].models], apiKey: key });
+  refreshed.delete(p.id); await refreshModels(p, true);
+  const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
+  try {
+    if (!p.models[0]) throw new Error('No se encontraron modelos');
+    await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {});
+    delete p.wizard; S.target = t.key; save(); renderTargets(); renderLog();
+    toast(`✓ ${p.name} conectada. ¡Ya puedes escribir!`); $('#input').focus();
+  } catch (err) {
+    msg.textContent = `No funcionó: ${friendly(err)} Revisa la clave y vuelve a intentarlo.`;
+    S.providers = S.providers.filter((x) => x !== p); save();
+    e.target.disabled = false;
+  }
+});
 
 function renderTargets() {
   const all = targets();
@@ -834,7 +905,8 @@ function healthChips(p) {
     if (!h || (!h.ok && !h.fail && !cooling(k))) return '';
     if (cooling(k)) return `<span class="chip off" title="${esc(m)}">⏳ ${esc(m)} · ${esc(coolText(k))}</span>`;
     const pct = Math.round((h.ok / Math.max(1, h.ok + h.fail)) * 100);
-    return `<span class="chip" title="${esc(m)}">● ${esc(m)} · ${(h.ms / 1000).toFixed(1)} s · ${pct}%</span>`;
+    const caps = `${h.noVision ? ' · sin imágenes' : ''}${h.noTools ? ' · sin herramientas' : ''}`;
+    return `<span class="chip" title="${esc(m)}">● ${esc(m)} · ${(h.ms / 1000).toFixed(1)} s · ${pct}%${caps}</span>`;
   }).join('');
   return chips ? `<div class="chips">${chips}</div>` : '';
 }
@@ -936,14 +1008,25 @@ function toast(m, err) {
 
 // ---------- hilos: lista, búsqueda, exportar e importar ----------
 const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-function renderThreads() {
+function renderThreads(withCard = true) {
   const sv = S.mcp.filter(canSync);
   $('#syncInfo').innerHTML = sv.length
     ? `⇄ Sincronizado con ${sv.map((s) => `<b>${esc(s.name)}</b>`).join(', ')}: los mismos hilos en el PC, el móvil y la web.`
     : 'Se guardan en este dispositivo. Para tener los mismos hilos en el PC y el móvil, conéctalos al mismo puente en <b>⬡</b>.';
+  const projects = S.projects.filter((p) => !p.deleted);
+  if (S.project && !projects.some((p) => p.id === S.project)) S.project = null;
+  const pr = projects.find((p) => p.id === S.project);
+  $('#projectSel').innerHTML = `<option value="">TODOS LOS HILOS</option>${projects.map((p) => `<option value="${p.id}">📁 ${esc(p.name)}</option>`).join('')}<option value="__new">+ NUEVO PROYECTO…</option>`;
+  $('#projectSel').value = S.project || '';
+  if (withCard) $('#projectCard').innerHTML = pr ? `<div class="card">
+      <label>NOMBRE DEL PROYECTO<input id="prName" value="${esc(pr.name)}" maxlength="80"></label>
+      <label>MEMORIA DEL PROYECTO (la reciben todas las IAs en sus hilos)<textarea id="prMemory" rows="4" placeholder="Datos, contexto y preferencias: p. ej. «Tesis sobre energía solar, estilo académico, citar fuentes»">${esc(pr.memory || '')}</textarea></label>
+      <label>HABILIDAD POR DEFECTO EN SUS HILOS NUEVOS<select id="prSkill"><option value="">— ninguna —</option>${liveSkills().map((k) => `<option value="${k.id}" ${pr.skill === k.id ? 'selected' : ''}>✦ ${esc(k.name)}</option>`).join('')}</select></label>
+      <div class="row wrap">${thread().project !== pr.id ? '<button class="btn sm" id="prAdd">AÑADIR EL HILO ACTUAL</button>' : ''}<button class="btn sm red" id="prDel">BORRAR PROYECTO</button></div>
+    </div>` : '';
   const q = norm($('#threadSearch').value.trim());
   const rows = [];
-  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active)).sort((a, b) => b.ts - a.ts)) {
+  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active) && (!S.project || x.project === S.project)).sort((a, b) => b.ts - a.ts)) {
     let snip = '';
     if (q) {
       if (!norm(t.title).includes(q)) {
@@ -953,7 +1036,8 @@ function renderThreads() {
         snip = `<em class="snip">…${esc(c.slice(Math.max(0, k - 40), k))}<mark>${esc(c.slice(k, k + q.length))}</mark>${esc(c.slice(k + q.length, k + q.length + 60))}…</em>`;
       }
     }
-    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${esc(t.title)}${snip}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
+    const tp = !S.project && t.project && projects.find((p) => p.id === t.project);
+    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${tp ? `<small class="proj">📁 ${esc(tp.name)}</small> ` : ''}${esc(t.title)}${snip}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
   }
   $('#threadList').innerHTML = rows.join('') || `<p class="hint">${q ? 'Nada coincide con la búsqueda.' : ''}</p>`;
 }
@@ -1003,23 +1087,45 @@ async function shrink(file, max = 1280) {
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   return c.toDataURL('image/jpeg', 0.85);
 }
-async function pdfText(file) {
+// Texto con marcas de página (para citar «pág. N»). Si es escaneado (sin texto), devuelve las primeras
+// páginas como imágenes para que las lea una IA con visión.
+const PDF_SCAN_PAGES = 5;
+async function readPdf(file) {
   const pdfjs = await import('./vendor/pdf.min.js');
   pdfjs.GlobalWorkerOptions.workerSrc = new URL('vendor/pdf.worker.min.js', location.href).href;
   const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
-  let out = '';
+  let out = '', chars = 0;
   for (let i = 1; i <= Math.min(doc.numPages, 100) && out.length < 60000; i++) {
     const c = await (await doc.getPage(i)).getTextContent();
-    out += c.items.map((x) => x.str + (x.hasEOL ? '\n' : ' ')).join('') + '\n\n';
+    const t = c.items.map((x) => x.str + (x.hasEOL ? '\n' : ' ')).join('').trim();
+    chars += t.length;
+    out += `--- pág. ${i} ---\n${t}\n\n`;
   }
-  if (!out.trim()) throw new Error('el PDF no tiene texto (¿es escaneado?)');
-  return out.slice(0, 60000);
+  if (chars) return { text: out.slice(0, 60000), pages: doc.numPages };
+  const images = [];
+  for (let i = 1; i <= Math.min(doc.numPages, PDF_SCAN_PAGES); i++) {
+    const page = await doc.getPage(i);
+    const vp0 = page.getViewport({ scale: 1 }), vp = page.getViewport({ scale: Math.min(2, 1400 / Math.max(vp0.width, vp0.height)) });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    images.push(c.toDataURL('image/jpeg', 0.8));
+  }
+  return { images, pages: doc.numPages };
 }
 async function addFiles(list) {
   for (const f of list) {
     try {
       if (f.type.startsWith('image/')) attach.push({ kind: 'image', name: f.name, data: await shrink(f) });
-      else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) { toast('Leyendo PDF…'); attach.push({ kind: 'text', name: f.name, text: await pdfText(f) }); }
+      else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+        toast('Leyendo PDF…');
+        const r = await readPdf(f);
+        if (r.text) attach.push({ kind: 'text', name: f.name, text: r.text, pdf: true });
+        else {
+          r.images.forEach((data, i) => attach.push({ kind: 'image', name: `${f.name} · pág. ${i + 1}`, data }));
+          toast(`PDF escaneado: se enviarán ${r.images.length} página(s) como imagen${r.pages > r.images.length ? ` (de ${r.pages})` : ''}. Usa una IA con visión (p. ej. Gemini).`);
+        }
+      }
       else {
         if (f.size > 5e6) throw new Error('demasiado grande (máx. 5 MB)');
         const t = await f.text();
@@ -1162,7 +1268,7 @@ const skillMd = (k) => `---\nname: ${slug(k.name)}\ndescription: ${String(k.desc
 let skDraft = null; // { id?, name, description, instructions, mode: 'goal' | 'edit' }
 function renderSkills() {
   const act = activeSkill();
-  $('#skillList').innerHTML = S.skills.map((k) => `
+  $('#skillList').innerHTML = liveSkills().map((k) => `
     <div class="card ${act?.id === k.id ? 'skill-on' : ''}" data-kid="${k.id}">
       <div class="head"><b class="srv">✦ ${esc(k.name)}</b><span class="badge local">v${k.version}</span>${act?.id === k.id ? '<span class="badge on">ACTIVA EN ESTE HILO</span>' : ''}</div>
       <div class="hint">${esc(k.description)}</div>
@@ -1214,6 +1320,35 @@ function skillFromReply(id) {
   skDraft = { mode: 'goal' }; renderSkills();
   draftSkill(`Esta conversación salió bien. Extrae el procedimiento reutilizable como una habilidad para repetirlo con otros datos. Sustituye los datos particulares (nombres, rutas, cifras, claves) por descripciones genéricas; no copies el contenido concreto.\n\n${convo}\n\n${SK_FORMAT}`, $('#skGen'));
 }
+// Sugerencia mientras escribes: si el mensaje encaja con una habilidad, se propone; nunca se activa en silencio.
+const STOP = new Set('para como cuando este esta esto estos estas sobre desde hasta entre pero porque donde quiero puedes hacer hace usar usarla texto cosas'.split(' '));
+const words = (t) => new Set(norm(t).split(/[^a-z0-9ñ]+/).filter((x) => x.length > 3 && !STOP.has(x)));
+function suggestSkill(text) {
+  const th = thread();
+  if (th.skill || text.trim().length < 8) return null;
+  const w = [...words(text)];
+  let best = null, bestN = 0;
+  for (const k of liveSkills()) {
+    if ((th.noSuggest || []).includes(k.id)) continue;
+    // Coincidencia por raíz (5 letras) para que "apunte" encaje con "apuntes" y "resumir" con "resumen".
+    const n = [...words(`${k.name} ${k.description}`)].filter((x) => w.some((y) => y.slice(0, 5) === x.slice(0, 5))).length;
+    if (n > bestN) { bestN = n; best = k; }
+  }
+  return bestN >= 2 ? best : null;
+}
+let hintT;
+function renderSkillHint() {
+  const k = suggestSkill($('#input').value), el = $('#skillHint');
+  el.hidden = !k;
+  if (k) { el.dataset.kid = k.id; el.innerHTML = `✦ ¿Usar la habilidad <b>${esc(k.name)}</b> en este hilo? <button type="button" class="btn sm" data-hint="use">USAR</button><button type="button" class="btn sm ghost" data-hint="no">NO</button>`; }
+}
+$('#input').addEventListener('input', () => { clearTimeout(hintT); hintT = setTimeout(renderSkillHint, 300); });
+$('#skillHint').addEventListener('click', (e) => {
+  const act = e.target.dataset.hint; if (!act) return;
+  const th = thread(), id = $('#skillHint').dataset.kid;
+  if (act === 'use') th.skill = id; else th.noSuggest = [...(th.noSuggest || []), id];
+  th.ts = Date.now(); save(); renderLog(); renderSkillHint(); input.focus();
+});
 $('#btnSkills').onclick = () => { renderSkills(); openSheet('#sheetSkills'); };
 $('#skNew').onclick = () => { skDraft = { mode: 'goal' }; renderSkills(); $('#skGoal').focus(); };
 $('#skBlank').onclick = () => { skDraft = { mode: 'edit', name: '', description: '', instructions: '' }; renderSkills(); $('#skName').focus(); };
@@ -1255,7 +1390,7 @@ $('#skEditor').addEventListener('click', async (e) => {
       const changed = k.name !== d.name || k.description !== d.description || k.instructions !== d.instructions;
       Object.assign(k, { name: d.name, description: d.description, instructions: d.instructions, version: k.version + (changed ? 1 : 0), updatedAt: Date.now() });
     } else S.skills.push({ id: uid() + uid(), name: d.name, description: d.description, instructions: d.instructions, version: 1, updatedAt: Date.now() });
-    skDraft = null; save(); renderSkills(); renderLog(); toast('HABILIDAD GUARDADA');
+    skDraft = null; save(); renderSkills(); renderLog(); syncAll(); toast('HABILIDAD GUARDADA');
   }
 });
 $('#skillList').addEventListener('click', (e) => {
@@ -1266,9 +1401,9 @@ $('#skillList').addEventListener('click', (e) => {
   if (act === 'export') download(`SKILL-${slug(k.name)}.md`, skillMd(k), 'text/markdown');
   if (act === 'del') {
     if (!confirm(`¿Borrar la habilidad «${k.name}»?`)) return;
-    S.skills = S.skills.filter((x) => x !== k);
-    S.threads.forEach((t) => { if (t.skill === k.id) t.skill = null; });
-    save(); renderLog();
+    // Se marca como borrada (no se quita) para que el borrado llegue a los demás dispositivos.
+    Object.assign(k, { deleted: true, instructions: '', updatedAt: Date.now() });
+    save(); renderLog(); syncAll();
   }
   renderSkills();
 });
@@ -1339,8 +1474,39 @@ $('#threadSearch').oninput = () => renderThreads();
 $('#newThread').onclick = () => {
   if (busy) return toast('Espera a que termine la respuesta');
   if (thread().messages.length) S.active = null;
-  thread(); save(); renderLog(); closeSheets();
+  // Si el hilo actual está vacío se reutiliza, pero empieza limpio: solo hereda lo del proyecto.
+  const th = thread(), pr = S.projects.find((p) => p.id === S.project && !p.deleted);
+  Object.assign(th, { project: pr?.id || null, skill: pr?.skill || null, private: false, noSuggest: [] });
+  save(); renderLog(); closeSheets();
 };
+$('#projectSel').onchange = (e) => {
+  if (e.target.value === '__new') {
+    // Sin prompt(): no existe en la app de PC. Se crea y se escribe el nombre en su tarjeta.
+    const p = { id: uid() + uid(), name: 'Proyecto nuevo', memory: '', skill: null, updatedAt: Date.now() };
+    S.projects.push(p); S.project = p.id; syncAll();
+  } else S.project = e.target.value || null;
+  save(); renderThreads();
+  if (e.target.value === '__new') { $('#prName').select(); $('#prName').focus(); }
+};
+$('#projectCard').addEventListener('change', (e) => {
+  const pr = S.projects.find((p) => p.id === S.project); if (!pr) return;
+  if (e.target.id === 'prName' && e.target.value.trim()) pr.name = e.target.value.trim();
+  if (e.target.id === 'prMemory') pr.memory = e.target.value;
+  if (e.target.id === 'prSkill') pr.skill = e.target.value || null;
+  // Sin redibujar la tarjeta: el campo que se está editando sigue en su sitio.
+  pr.updatedAt = Date.now(); save(); renderThreads(false); renderLog(); syncAll();
+  toast('PROYECTO GUARDADO');
+});
+$('#projectCard').addEventListener('click', (e) => {
+  const pr = S.projects.find((p) => p.id === S.project); if (!pr) return;
+  if (e.target.id === 'prAdd') { const th = thread(); Object.assign(th, { project: pr.id, ts: Date.now() }); if (!th.skill && pr.skill) th.skill = pr.skill; }
+  if (e.target.id === 'prDel') {
+    if (!confirm(`¿Borrar el proyecto «${pr.name}»? Sus hilos se conservan, sin proyecto.`)) return;
+    Object.assign(pr, { deleted: true, memory: '', updatedAt: Date.now() });
+    S.project = null;
+  }
+  save(); renderThreads(); renderLog(); syncAll();
+});
 $('#threadList').addEventListener('click', (e) => {
   if (busy) return toast('Espera a que termine la respuesta');
   const del = e.target.dataset.del;
@@ -1387,7 +1553,7 @@ $('#composer').onsubmit = (e) => {
   if (busy) { abortCtl?.abort(); return; }
   const text = input.value.trim();
   if (!text && !attach.length) return;
-  const files = attach; attach = []; renderAttach();
+  const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
   input.value = ''; input.style.height = 'auto';
   send(text, files);
 };
@@ -1402,6 +1568,20 @@ $('#log').addEventListener('click', (e) => {
   const { copy, speak: sp, skillify } = e.target.dataset || {};
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);
+  const { branch: br, edit } = e.target.dataset || {};
+  if (br || edit) {
+    if (busy) return toast('Espera a que termine la respuesta', true);
+    const src = thread(), i = src.messages.findIndex((m) => m.id === (br || edit));
+    if (i < 0) return;
+    const orig = src.messages[i];
+    // La rama copia el hilo hasta ese mensaje (incluido en ⑂, excluido en ✎) con ids nuevos; el original no cambia.
+    const copy = src.messages.slice(0, edit ? i : i + 1).map((m) => ({ ...JSON.parse(JSON.stringify(m)), id: uid() + uid() }));
+    const th = { id: uid(), title: `⑂ ${src.title}`.slice(0, 60), messages: copy, ts: Date.now(), project: src.project || null, skill: src.skill || null, private: !!src.private };
+    S.threads.unshift(th); S.active = th.id;
+    if (edit) { input.value = orig.content || ''; input.dispatchEvent(new Event('input')); attach = (orig.files || []).map((f) => ({ ...f })); renderAttach(); input.focus(); }
+    save(); renderLog(); syncAll();
+    toast(edit ? '✎ Rama creada: edita el mensaje y envíalo' : '⑂ Rama creada a partir de ese mensaje');
+  }
   if (!copy) return;
   const m = thread().messages.find((x) => x.id === copy);
   navigator.clipboard?.writeText(m?.content || '').then(() => toast('COPIADO'), () => toast('No se pudo copiar', true));

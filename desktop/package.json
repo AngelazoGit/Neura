@@ -1,7 +1,7 @@
 {
   "name": "neura-desktop",
   "productName": "Neura",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "description": "Neura para PC (Windows, macOS, Linux): chat multi-IA, hilos guardados en disco y puente MCP integrado",
   "author": "AngelazoGit (https://github.com/AngelazoGit)",
