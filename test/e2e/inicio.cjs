@@ -34,11 +34,13 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   const ram = Math.round(os.totalmem() / 2 ** 30);
   const rec = ram < 7 ? 'llama3.2:3b' : ram < 15 ? 'qwen3:4b' : 'qwen3:8b';
   ok(txt.includes(`${ram} GB`) && txt.includes(rec), `con Ollama: muestra la memoria (${ram} GB) y recomienda ${rec}`);
+  ok(/Espacio libre: \d+ GB/.test(txt) && /orientación/.test(txt), 'muestra el espacio libre en disco y aclara que la recomendación es orientativa');
   ok(/Ya tienes: .*qwen3:4b/.test(txt) || rec === 'qwen3:4b', 'ofrece usar los modelos que ya tienes');
   await w.click('[data-lai=pull]');
   await w.waitForSelector('#lpBar', { timeout: 5000 }).then(() => ok(true, 'descarga con barra de progreso'), () => ok(false, 'barra de progreso'));
   await w.waitForFunction((rec) => S.target === `mcp:local::ollama/${rec}`, rec, { timeout: 20000 })
     .then(() => ok(true, `al terminar, ${rec} queda elegido (ESTE PC)`), () => ok(false, 'modelo elegido tras descargar'));
+  ok(/respondió en \d/.test(await w.textContent('#toast')), 'tras instalarlo, Neura lo prueba y dice cuánto ha tardado en este equipo');
   ok(!(await w.$('.wizard')), 'el asistente desaparece cuando ya hay una IA lista');
   await w.fill('#input', 'hola'); await w.click('#send');
   await w.waitForFunction(() => document.querySelector('#send').textContent.includes('ENVIAR') && !document.querySelector('.reply.pending'));

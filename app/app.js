@@ -111,7 +111,7 @@ function gatewayPayload() {
   const ordered = [first, ...[...cloud, ...mine].sort((a, b) => score(b) - score(a))]
     .filter((t, i, a) => t && usable.has(t.key) && a.findIndex((x) => x?.key === t.key) === i);
   return {
-    enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly,
+    enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly, unknownAsAuto: !!g.unknownAsAuto,
     providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model }; }),
     order: ordered.map((t) => (t.pid ? name(t) : t.model)),
   };
@@ -995,9 +995,9 @@ const renderWizard = () => { const b = document.getElementById('wzBody'); if (b)
 const OLLAMA = 'http://127.0.0.1:11434';
 const local = { status: 'unknown', models: [], progress: null, err: '', ctl: null };
 function recommendedModel(ram) {
-  if (ram && ram < 7) return { model: 'llama3.2:3b', size: '2 GB' };
-  if (ram && ram < 15) return { model: 'qwen3:4b', size: '2,5 GB' };
-  return { model: 'qwen3:8b', size: '5 GB' };
+  if (ram && ram < 7) return { model: 'llama3.2:3b', size: '2 GB', gb: 2 };
+  if (ram && ram < 15) return { model: 'qwen3:4b', size: '2,5 GB', gb: 2.5 };
+  return { model: 'qwen3:8b', size: '5 GB', gb: 5.2 };
 }
 async function checkLocal() {
   if (!DESK) return;
@@ -1033,7 +1033,10 @@ function localAIInner() {
   const have = local.models;
   return `<div class="hint">✓ Ollama está funcionando. Tu equipo tiene <b>${b.ram || '?'} GB</b> de memoria.</div>
     ${have.length ? `<div class="hint">Ya tienes: ${have.map((m) => `<button type="button" class="btn sm" data-lai="use" data-m="${esc(m)}">USAR ${esc(m)}</button>`).join(' ')}</div>` : ''}
-    <div class="hint">Te recomendamos <b>${rec.model}</b> (descarga de unos ${rec.size}): ${have.includes(rec.model) ? 'ya lo tienes.' : ''}</div>
+    <div class="hint">Te recomendamos <b>${rec.model}</b> (descarga de unos ${rec.size}): ${have.includes(rec.model) ? 'ya lo tienes.' : ''}
+      ${b.freeDisk != null ? `Espacio libre: <b>${b.freeDisk} GB</b>.` : ''} Es una orientación según tu memoria: tras instalarlo, Neura lo prueba y te dice cuánto tarda en tu equipo.</div>
+    ${b.freeDisk != null && b.freeDisk < rec.gb + 2 && !have.includes(rec.model) ? `<div class="hint red">⚠️ Poco espacio en disco para ${rec.model} (necesita unos ${rec.size} y conviene dejar margen). Libera espacio antes de descargarlo.</div>` : ''}
+    ${local.test ? `<div class="hint ${local.test.ok ? '' : 'red'}">${local.test.ok ? `✓ Prueba de ${esc(local.test.model)}: respondió en ${(local.test.ms / 1000).toFixed(1)} s${local.test.ms > 20000 ? ' (lento en este equipo: prueba un modelo más pequeño si se te hace pesado)' : ''}.` : `✕ La prueba de ${esc(local.test.model)} falló: ${esc(local.test.err)}`}</div>` : ''}
     ${have.includes(rec.model) ? '' : `<button type="button" class="btn wide" data-lai="pull" data-m="${rec.model}">DESCARGAR Y USAR ${rec.model}</button>`}
     ${local.err ? `<div class="hint red">${esc(local.err)}</div>` : ''}
     <div class="hint">Funciona sin internet y lo que escribes no sale de tu equipo. Es más lenta y sabe menos que las IAs grandes de internet.</div>`;
@@ -1047,9 +1050,20 @@ async function useLocalModel(model) {
   await mcpConnect(s, true).catch(() => {});
   const key = `mcp:${s.id}::ollama/${model}`;
   if (!findT(key)) { local.err = 'El puente no ve el modelo todavía: pulsa RECONECTAR en ⬡ → ESTE PC.'; return renderLocalAI(); }
+  // Prueba real antes de dar la instalación por buena: la recomendación por memoria es solo orientativa.
+  local.err = ''; local.test = null; renderLocalAI(); toast(`Probando ${model} en tu equipo…`);
+  const t0 = performance.now();
+  try {
+    const r = await callTarget(findT(key), [{ role: 'user', content: 'Responde solo: OK' }], () => {});
+    if (!String(r || '').trim()) throw new Error('respuesta vacía');
+    local.test = { model, ok: true, ms: Math.round(performance.now() - t0) };
+  } catch (e) {
+    local.test = { model, ok: false, err: netHint(e) };
+    return renderLocalAI();
+  }
   S.target = key; S.wizardDone = true;
-  save(); renderTargets(); renderLog();
-  toast(`✓ ${model} en tu equipo está lista. ¡Escribe tu primera pregunta!`); $('#input').focus();
+  save(); renderTargets(); renderLog(); renderLocalAI();
+  toast(`✓ ${model} lista: respondió en ${(local.test.ms / 1000).toFixed(1)} s. ¡Escribe tu primera pregunta!`); $('#input').focus();
 }
 async function pullModel(model) {
   Object.assign(local, { status: 'pulling', pulling: model, progress: null, err: '', ctl: new AbortController() });
@@ -1091,8 +1105,8 @@ const STARTERS = [
     instructions: '# Mejorar mi pregunta\n\nAyudas a la persona a aprender a usar bien las IAs.\n\n1. Lee su petición y detecta lo que falta: objetivo, contexto, formato de la respuesta, nivel de detalle y límites.\n2. Si falta algo esencial, haz como máximo 3 preguntas breves.\n3. Escribe una versión mejorada de la petición, lista para copiar, entre comillas.\n4. Explica en 2-4 viñetas qué cambiaste y por qué, para que aprenda a hacerlo por su cuenta.\n\nNo respondas todavía a la petición original salvo que te lo pida.' },
   { name: 'Aprender paso a paso', description: 'Profesor paciente: explica un tema por partes, con ejemplos, y comprueba que lo entiendes. Usar para aprender o estudiar algo nuevo.',
     instructions: '# Aprender paso a paso\n\nActúas como profesor paciente.\n\n1. Si no está claro, pregunta qué sabe ya del tema y adapta el nivel.\n2. Explica en bloques cortos, con un ejemplo cotidiano en cada uno.\n3. Tras cada bloque, haz una pregunta sencilla para comprobar que lo ha entendido y espera su respuesta.\n4. Si se equivoca, corrige con amabilidad y explícalo de otra forma.\n5. Al final, resume lo aprendido en 3-5 viñetas y propón el siguiente paso.' },
-  { name: 'Comprobar una respuesta', description: 'Revisa críticamente una respuesta de una IA u otra fuente: señala lo dudoso y cómo verificarlo. Usar antes de fiarte de un dato importante.',
-    instructions: '# Comprobar una respuesta\n\nRevisas críticamente una respuesta que la persona pega (de una IA o de otra fuente).\n\n1. Separa los hechos comprobables de las opiniones.\n2. Señala las afirmaciones dudosas, sin fuente o que podrían estar desactualizadas, y explica por qué.\n3. Indica cómo verificar cada punto importante: qué buscar y en qué tipo de fuente fiable.\n4. Termina con una valoración: fiable, revisar o no fiable.\n\nNo inventes fuentes ni enlaces.' },
+  { name: 'Comprobar una respuesta', description: 'Revisa críticamente una respuesta de una IA u otra fuente: señala lo dudoso y cómo verificarlo. Es una evaluación orientativa, no una verificación con fuentes. Usar antes de fiarte de un dato importante.',
+    instructions: '# Comprobar una respuesta\n\nRevisas críticamente una respuesta que la persona pega (de una IA o de otra fuente).\n\n1. Separa los hechos comprobables de las opiniones.\n2. Señala las afirmaciones dudosas, sin fuente o que podrían estar desactualizadas, y explica por qué.\n3. Indica cómo verificar cada punto importante: qué buscar y en qué tipo de fuente fiable.\n4. Termina con una valoración orientativa: «parece sólida», «conviene revisar» o «dudosa».\n5. Si no has consultado fuentes en esta conversación, empieza la valoración con «Evaluación orientativa: no he consultado fuentes; los hechos no están verificados». Si las has consultado, cítalas.\n\nNo presentes tu valoración como una certificación. No inventes fuentes ni enlaces.' },
 ];
 function installStarters() {
   let n = 0;
@@ -1253,34 +1267,41 @@ function renderMcp() {
 
 // Configuración lista para copiar en otras herramientas. La clave es el token del puente.
 function gatewayHTML(b) {
-  const g = S.gateway || {}, base = `http://127.0.0.1:${b.port}`, t = b.token;
+  const g = S.gateway || {}, base = `http://127.0.0.1:${b.port}`, t = b.gatewayToken;
   const snip = (title, text, note = '') => `<details><summary>${title}</summary><pre class="snip">${esc(text)}</pre>${note ? `<div class="hint">${note}</div>` : ''}<button type="button" class="btn sm ghost" data-act="copysnip">COPIAR</button></details>`;
   return `<h4>🔌 NEURA GATEWAY · CONECTAR OTRAS HERRAMIENTAS</h4>
     <div class="hint">Usa Neura (tus IAs, AUTO-SALTO y SOLO GRATIS) como proveedor en otras aplicaciones: Continue, Cline, Aider, Open WebUI…</div>
     <label class="auto"><input type="checkbox" data-act="gw" ${g.enabled ? 'checked' : ''}> ACTIVAR GATEWAY</label>
     ${!g.enabled ? '' : `<label class="auto"><input type="checkbox" data-act="gwlocal" ${g.localOnly ? 'checked' : ''}> SOLO MODELOS DE ESTE EQUIPO</label>
-    <div class="mono">Compatible con OpenAI: ${esc(base)}/v1 · con Anthropic: ${esc(base)} · clave: el TOKEN · modelo: <b>auto</b> (o uno concreto de /v1/models)</div>
-    ${snip('Continue (config.yaml)', `models:
+    <label class="auto"><input type="checkbox" data-act="gwunknown" ${g.unknownAsAuto ? 'checked' : ''}> USAR «auto» PARA NOMBRES DE MODELO DESCONOCIDOS</label>
+    <div class="hint">Sin esta opción, un nombre que Neura no conoce (por ejemplo, una errata) da error y no se envía a ninguna IA.</div>
+    <div class="mono">TOKEN DEL GATEWAY: <span class="secret">${esc(t)}</span> <button class="btn sm red" data-act="regengw" title="Si se filtra">REGENERAR</button></div>
+    <div class="hint">Es distinto del token del puente: solo sirve para pedir respuestas y ver los modelos, no da acceso a tus hilos, archivos ni ajustes.</div>
+    <div class="mono">Compatible con OpenAI: ${esc(base)}/v1 · con Anthropic: ${esc(base)} · clave: el token del Gateway · modelo: <b>auto</b> (o uno concreto de /v1/models)</div>
+    <div class="hint">Configuraciones de ejemplo: la API se ha comprobado con los SDK oficiales de OpenAI y Anthropic, pero aún no con cada herramienta.</div>
+    ${snip('Continue (config.yaml) · ejemplo', `models:
   - name: Neura (auto)
     provider: openai
     model: auto
     apiBase: ${base}/v1
     apiKey: ${t}`)}
-    ${snip('Cline / Roo Code', `Proveedor: OpenAI Compatible
+    ${snip('Cline / Roo Code · ejemplo', `Proveedor: OpenAI Compatible
 Base URL: ${base}/v1
 API Key: ${t}
 Model ID: auto`)}
-    ${snip('Aider', `aider --openai-api-base ${base}/v1 --openai-api-key ${t} --model openai/auto`)}
-    ${snip('Open WebUI', `Ajustes → Conexiones → API de OpenAI
+    ${snip('Aider · ejemplo', `aider --openai-api-base ${base}/v1 --openai-api-key ${t} --model openai/auto`)}
+    ${snip('Open WebUI · ejemplo', `Ajustes → Conexiones → API de OpenAI
 URL: ${base}/v1
 Clave: ${t}`, 'Si Open WebUI corre en Docker, usa http://host.docker.internal:' + b.port + '/v1.')}
-    ${snip('Claude Code', `# macOS / Linux
+    ${snip('Claude Code · ejemplo', `# macOS / Linux
 export ANTHROPIC_BASE_URL=${base}
 export ANTHROPIC_AUTH_TOKEN=${t}
+export ANTHROPIC_MODEL=auto
 
 # Windows (PowerShell)
 $env:ANTHROPIC_BASE_URL="${base}"
-$env:ANTHROPIC_AUTH_TOKEN="${t}"`,
+$env:ANTHROPIC_AUTH_TOKEN="${t}"
+$env:ANTHROPIC_MODEL="auto"`,
       'Revisa sus condiciones de uso antes de usarlo con modelos de otros proveedores. Los modelos gratuitos rinden peor en tareas largas de programación.')}
     <div class="hint warn">⚠️ Cualquier programa de este PC con el token (y otros equipos, si abres el puente a tu red) usará tus claves y tus cuotas gratuitas. Si se filtra, pulsa REGENERAR.</div>`}`;
 }
@@ -2010,8 +2031,8 @@ $('#mcpList').addEventListener('change', async (e) => {
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
   if (act === 'trust') { s.trustTools = e.target.checked; save(); }
-  if (act === 'gw' || act === 'gwlocal') {
-    S.gateway = { ...S.gateway, [act === 'gw' ? 'enabled' : 'localOnly']: e.target.checked };
+  if (act === 'gw' || act === 'gwlocal' || act === 'gwunknown') {
+    S.gateway = { ...S.gateway, [{ gw: 'enabled', gwlocal: 'localOnly', gwunknown: 'unknownAsAuto' }[act]]: e.target.checked };
     save(); renderMcp();
     if (act === 'gw') toast(e.target.checked ? '🔌 Gateway activo: copia la configuración de tu herramienta' : 'Gateway desactivado');
   }
@@ -2027,6 +2048,12 @@ $('#mcpList').addEventListener('click', async (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'copytoken') navigator.clipboard?.writeText(DESK.bridge().token).then(() => toast('TOKEN COPIADO'));
+  if (act === 'regengw') {
+    if (!confirm('¿Generar un token nuevo para el Gateway? Las herramientas configuradas con el anterior dejarán de funcionar hasta que copies el nuevo.')) return;
+    await DESK.regenGatewayToken();
+    await mcpConnect(s, true).catch(() => {});
+    gwSent = ''; pushGatewaySoon(); renderMcp(); toast('TOKEN DEL GATEWAY NUEVO: actualízalo en tus herramientas');
+  }
   if (act === 'copysnip') navigator.clipboard?.writeText(e.target.parentElement.querySelector('.snip').textContent).then(() => toast('COPIADO'));
   if (act === 'regentoken') {
     if (!confirm('¿Generar un token nuevo? Los móviles y equipos conectados a este PC tendrán que volver a emparejarse con el QR.')) return;
