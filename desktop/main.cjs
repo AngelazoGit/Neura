@@ -12,6 +12,10 @@ const os = require('node:os');
 const path = require('node:path');
 const QRCode = require('qrcode');
 
+// Versión portable de Windows: los datos viajan junto al .exe (p. ej. en un USB), en la carpeta Neura-datos.
+const PORTABLE = process.env.PORTABLE_EXECUTABLE_DIR;
+if (PORTABLE) app.setPath('userData', path.join(PORTABLE, 'Neura-datos'));
+
 if (!app.requestSingleInstanceLock()) app.quit();
 
 const RES = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
@@ -37,7 +41,8 @@ saveCfg();
 // ---------- claves cifradas con el llavero del sistema ----------
 // En Linux sin llavero (backend "basic_text") el cifrado no protege nada: se guardan tal cual.
 function keyring() {
-  if (!safeStorage.isEncryptionAvailable()) return null;
+  // En portable no: el llavero va ligado a este PC y las claves no se podrían leer en otro (se usa el PIN).
+  if (PORTABLE || !safeStorage.isEncryptionAvailable()) return null;
   const backend = process.platform === 'linux' ? safeStorage.getSelectedStorageBackend?.() : null;
   if (backend === 'basic_text') return null;
   return { win32: 'Windows DPAPI', darwin: 'Llavero de macOS' }[process.platform] || `llavero (${backend})`;

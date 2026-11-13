@@ -23,23 +23,38 @@ Al abrir Neura en el PC se arranca solo el puente MCP (`bridge/server.mjs`). En 
 
 ## 2. Instalar Neura en el PC
 
-### Opción A: descargar el instalador (recomendada)
+### Opción A: descargar Neura (recomendada)
 
-1. En GitHub, abre el repositorio → **Actions** → la última ejecución verde de **Compilar app**.
-2. En **Artifacts**, descarga el de tu sistema:
-   - `neura-pc-Windows` → `Neura-1.0.0-win-x64.exe`
-   - `neura-pc-macOS` → `Neura-1.0.0-mac-arm64.dmg` (Mac con Apple Silicon)
-   - `neura-pc-Linux` → `Neura-1.0.0-linux-x86_64.AppImage` o `.deb`
-3. Instálalo:
-   - **Windows:** ejecuta el `.exe`. Como el instalador no está firmado, Windows SmartScreen avisará: pulsa **Más información → Ejecutar de todas formas**.
-   - **macOS:** abre el `.dmg` y arrastra Neura a Aplicaciones. La primera vez, haz **clic derecho → Abrir**. Si dice que "está dañada", ejecuta en Terminal:
-     ```bash
-     xattr -cr /Applications/Neura.app
-     ```
-   - **Linux:** `chmod +x Neura-*.AppImage` y ábrelo, o instala el `.deb`:
-     ```bash
-     sudo apt install ./Neura-1.0.0-linux-amd64.deb
-     ```
+Abre **https://github.com/AngelazoGit/neura/releases/latest** y descarga el archivo de tu sistema:
+
+| Sistema | Instalable | Portable (sin instalar) |
+|---|---|---|
+| Windows | `Neura-X.Y.Z-Windows-instalador.exe` | `Neura-X.Y.Z-Windows-portable.exe` |
+| macOS (Apple Silicon) | `Neura-X.Y.Z-mac-arm64.dmg` | `Neura-X.Y.Z-mac-arm64.zip` |
+| Linux | `Neura-X.Y.Z-linux-amd64.deb` | `Neura-X.Y.Z-linux-x86_64.AppImage` |
+| Android | `Neura-X.Y.Z-Android.apk` | — |
+
+**Instalable**
+- **Windows:** ejecuta el instalador. Crea acceso directo en el menú Inicio y se desinstala desde *Configuración → Aplicaciones*. Como no está firmado, SmartScreen avisará: **Más información → Ejecutar de todas formas**.
+- **macOS:** abre el `.dmg` y arrastra Neura a Aplicaciones. La primera vez, **clic derecho → Abrir**. Si dice que "está dañada":
+  ```bash
+  xattr -cr /Applications/Neura.app
+  ```
+- **Linux:**
+  ```bash
+  sudo apt install ./Neura-*-linux-amd64.deb
+  ```
+
+**Portable** (no instala nada; puedes llevarlo en un USB)
+- **Windows:** copia `Neura-…-Windows-portable.exe` donde quieras y ábrelo. Tus hilos y ajustes se guardan **junto al .exe**, en la carpeta `Neura-datos`. Al llevarlo a otro PC te llevas los hilos.
+  - En modo portable las claves API no se cifran con el llavero del PC, porque no podrían leerse en otro equipo. Activa **⚙ → SEGURIDAD → ACTIVAR PIN** para que viajen cifradas.
+- **macOS:** descomprime el `.zip` y abre `Neura.app`. Los datos se guardan en tu usuario, como la versión instalable.
+- **Linux:** el `.AppImage` ya es portable:
+  ```bash
+  chmod +x Neura-*.AppImage
+  ```
+
+Las versiones también están en **Actions → Compilar app → Artifacts** (14 días, solo con sesión iniciada en GitHub).
 
 > Para que Windows y macOS no muestren avisos hay que firmar los instaladores (certificado de firma de código de Windows y cuenta de Apple Developer).
 
@@ -63,7 +78,7 @@ Todo queda en la carpeta de usuario de Neura:
 
 | Sistema | Carpeta |
 |---|---|
-| Windows | `%APPDATA%\Neura\` |
+| Windows | `%APPDATA%\Neura\` (portable: carpeta `Neura-datos` junto al .exe) |
 | macOS | `~/Library/Application Support/Neura/` |
 | Linux | `~/.config/Neura/` |
 
