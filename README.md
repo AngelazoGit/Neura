@@ -46,7 +46,7 @@ Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `N
 
 Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`, `NEURA_FOLDERS`, `NEURA_EMBED_MODEL`.
 
-Si el puente escucha en la red y no defines token, genera uno aleatorio en cada arranque y lo muestra en pantalla. Fija el tuyo con `NEURA_TOKEN` para que no cambie.
+El puente siempre exige token, también en `127.0.0.1` (si no, cualquier web abierta en ese equipo podría leer tus hilos). Si no defines uno, genera uno aleatorio en cada arranque y lo muestra en pantalla. Fija el tuyo con `NEURA_TOKEN` para que no cambie.
 
 Tests de seguridad del puente: `node --test bridge/test.mjs`.
 
@@ -119,7 +119,8 @@ npm run deploy:web
 
 ## Seguridad
 
-- El puente nunca arranca abierto en la red: sin `NEURA_TOKEN` genera un token aleatorio.
+- El puente nunca arranca sin token, ni siquiera en `127.0.0.1`: sin `NEURA_TOKEN` genera uno aleatorio. En la app de PC, **⬡ → ESTE PC → REGENERAR** crea uno nuevo si pierdes el móvil o se filtra el QR.
+- Los adjuntos (imágenes y textos de PDF) se guardan aparte, en IndexedDB, con sus bytes originales; el estado de la app solo guarda referencias. Si el almacenamiento se llena, aparece un aviso fijo con **EXPORTAR COPIA**.
 - La app no hace peticiones a terceros al abrirse (fuentes incluidas en `app/fonts`, licencia OFL) y tiene una política CSP que bloquea scripts inyectados.
 - Las claves API se guardan solo en el dispositivo y nunca se sincronizan. En el PC se cifran con el llavero del sistema (DPAPI en Windows, Llavero en macOS, libsecret/kwallet en Linux). En el móvil y la web puedes cifrarlas con un PIN en **⚙ → SEGURIDAD DE LAS CLAVES** (AES-256-GCM, PBKDF2). En Android quedan fuera de las copias de seguridad.
 - Las herramientas de archivos del puente son de solo lectura y no salen de las carpetas que compartes. Solo se usan sin preguntar las herramientas del puente de tu PC, de los equipos emparejados por QR y de los servidores que autorices en ⬡; el nombre que declare un servidor no cuenta.

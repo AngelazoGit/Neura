@@ -154,6 +154,8 @@ ipcMain.handle('store-save', (_e, text) => {
 });
 ipcMain.on('keyring', (e) => { e.returnValue = keyring(); });
 ipcMain.on('bridge-info', (e) => { e.returnValue = bridgeInfo(); });
+// Si pierdes el móvil o se filtra el QR: token nuevo; los dispositivos con el anterior dejan de entrar.
+ipcMain.handle('regen-token', async () => { cfg.token = randomBytes(18).toString('base64url'); saveCfg(); await startBridge(); return bridgeInfo(); });
 ipcMain.handle('set-lan', async (_e, lan) => { cfg.lan = !!lan; saveCfg(); await startBridge(); return bridgeInfo(); });
 ipcMain.handle('add-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Carpeta que la IA podrá leer', properties: ['openDirectory'] });

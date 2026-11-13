@@ -120,12 +120,6 @@ h3{font:700 13px var(--cond);letter-spacing:.24em;color:var(--orange2);margin:24
 .chip{font:11px var(--mono);border:1px solid var(--line);padding:1px 6px;color:var(--green)}
 .chip.tool{color:var(--purple2)}
 .mono{font:12px var(--mono);color:var(--dim);word-break:break-all}
-.dep{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--line);font:12px var(--mono)}
-.dep span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dep .ord{color:var(--orange);width:24px}
-.dep button{background:var(--panel);border:1px solid var(--line);color:var(--orange2);width:28px;height:26px;cursor:pointer}
-.dep input{accent-color:var(--orange);width:18px;height:18px}
-#sysPrompt{width:100%}
 .term{white-space:pre-wrap}
 .chatItem{display:flex;gap:8px;align-items:center;padding:10px;border-bottom:1px solid var(--line);cursor:pointer}
 .chatItem.on{background:rgba(255,122,0,.1);border-left:3px solid var(--orange)}
@@ -245,3 +239,4 @@ mark{background:rgba(255,122,0,.35);color:var(--text)}
   .bar .auto input{width:14px;height:14px}
   #target{flex-basis:100%}
 }
+.hintbar.warn{color:#ffb3b3;border-top:0;border-bottom:1px solid var(--red);background:rgba(255,45,45,.1)}
