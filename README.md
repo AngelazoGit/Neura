@@ -119,5 +119,6 @@ npm run deploy:web
 - El puente nunca arranca abierto en la red: sin `NEURA_TOKEN` genera un token aleatorio.
 - La app no hace peticiones a terceros al abrirse (fuentes incluidas en `app/fonts`, licencia OFL) y tiene una política CSP que bloquea scripts inyectados.
 - Las claves API se guardan solo en el dispositivo y nunca se sincronizan. En el PC se cifran con el llavero del sistema (DPAPI en Windows, Llavero en macOS, libsecret/kwallet en Linux). En el móvil y la web puedes cifrarlas con un PIN en **⚙ → SEGURIDAD DE LAS CLAVES** (AES-256-GCM, PBKDF2). En Android quedan fuera de las copias de seguridad.
-- Las herramientas de archivos del puente son de solo lectura y no salen de las carpetas que compartes. Las herramientas de servidores MCP que no sean `neura-bridge` piden confirmación antes de cada uso.
+- Las herramientas de archivos del puente son de solo lectura y no salen de las carpetas que compartes. Solo se usan sin preguntar las herramientas del puente de tu PC, de los equipos emparejados por QR y de los servidores que autorices en ⬡; el nombre que declare un servidor no cuenta.
+- **SOLO GRATIS** (⚙) impide usar IAs de pago o de coste desconocido, y **🔒 PRIVADO** (por hilo) limita las respuestas a tus propios equipos.
 - La lectura de PDF se hace en el propio dispositivo con pdf.js (Apache-2.0, `app/vendor/`).

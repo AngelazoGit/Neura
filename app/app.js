@@ -68,6 +68,13 @@ if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(
 // Gemini retiró los 2.5: se pasa a los alias que siempre apuntan al modelo vigente.
 const GEMINI_OLD = { 'gemini-2.5-flash': 'gemini-flash-latest', 'gemini-2.5-flash-lite': 'gemini-flash-lite-latest' };
 S.providers.filter((p) => p.preset === 'gemini').forEach((p) => { p.models = [...new Set(p.models.map((m) => GEMINI_OLD[m] || m))]; });
+if (!S.v111) {
+  for (const p of S.providers.filter((x) => x.preset === 'gemini')) p.models.sort((a, b) => modelRank(a) - modelRank(b));
+  const [pid, model] = String(S.target || '').split('::');
+  const gp = S.providers.find((x) => x.id === pid && x.preset === 'gemini');
+  if (gp && modelRank(model) >= 4) S.target = `${gp.id}::${gp.models[0]}`;
+  S.v111 = true;
+}
 // Los mensajes necesitan id para fusionar hilos entre dispositivos sin duplicarlos.
 S.threads.forEach((t) => t.messages.forEach((m) => { m.id ||= uid() + uid(); }));
 function thread() {
@@ -142,22 +149,36 @@ function noteFail(t, e) {
     // Una clave rechazada afecta a todos los modelos del proveedor hasta que la cambies.
     for (const x of targets()) if (x.pid === t.pid) Object.assign(H(x.key), { coolUntil: Date.now() + 365 * 864e5, reason: 'CLAVE' });
   } else if (e.status === 402) Object.assign(h, { coolUntil: Date.now() + 3600e3, reason: 'SALDO' });
-  else if (h.streak >= 2) Object.assign(h, { coolUntil: Date.now() + 30e3 * Math.min(h.streak, 10), reason: 'FALLA' });
+  // Un modelo caído o saturado se pausa desde el primer fallo, para no hacer esperar en cada mensaje.
+  else Object.assign(h, { coolUntil: Date.now() + 60e3 * Math.min(h.streak, 10), reason: 'FALLA' });
 }
 function score(t) {
   const h = S.health[t.key] || {};
   const rate = ((h.ok || 0) + 1) / ((h.ok || 0) + (h.fail || 0) + 2);
   return rate - 0.3 * (h.ms ? Math.min(h.ms, 60000) / 60000 : 0.3);
 }
+// ---------- política de destinos: gasto y privacidad ----------
+// "Gratis" solo si es comprobable: proveedor del nivel gratuito (en OpenRouter, variantes :free) o un equipo tuyo.
+function isFree(t) {
+  if (t.kind === 'mcp') return true;
+  const p = S.providers.find((x) => x.id === t.pid);
+  return p?.tier === 'free' && (!p.freeOnly || /:free$/.test(t.model));
+}
+// "Privado": solo el puente de este PC o servidores que hayas marcado como equipo tuyo.
+const isMine = (t) => t.kind === 'mcp' && S.mcp.some((s) => s.id === t.sid && (s.local || s.mine));
+const allowed = (t) => (!S.freeOnly || isFree(t)) && (!thread().private || isMine(t));
+const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : 'es de pago o de coste desconocido y tienes SOLO GRATIS activado');
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
+// Nunca incluye destinos que la política de gasto o privacidad no permite.
 function plan(first) {
   if (!first) return [];
-  if (!S.autoSkip) return [first];
-  const rest = targets().filter((t) => t.key !== first.key);
+  const own = allowed(first) ? [first] : [];
+  if (!S.autoSkip) return own;
+  const rest = targets().filter((t) => t.key !== first.key && allowed(t));
   const adj = (t) => score(t) - (t.pid && t.pid === first.pid ? 0.5 : 0);
   const ready = rest.filter((t) => !cooling(t.key)).sort((a, b) => adj(b) - adj(a));
   const cold = rest.filter((t) => cooling(t.key)).sort((a, b) => S.health[a.key].coolUntil - S.health[b.key].coolUntil);
-  return [first, ...ready, ...cold];
+  return [...own, ...ready, ...cold];
 }
 function coolText(k) {
   const h = S.health[k];
@@ -201,7 +222,8 @@ function toolbox() {
   }
   return list;
 }
-const trusted = (s) => s.local || s.serverInfo?.name === 'neura-bridge' || s.trustTools;
+// Solo se confía en el puente de este PC o en servidores que autorizaste tú (el nombre que declara un servidor no cuenta).
+const trusted = (s) => s.local || s.trustTools;
 async function runTool(tb, name, rawArgs, signal, onTool) {
   const x = tb.find((y) => y.name === name);
   let args = rawArgs;
@@ -361,6 +383,12 @@ async function fetchModels(p) {
   return list.map((m) => (typeof m === 'string' ? m : m.id || m.name).replace(/^models\//, ''))
     .filter((id) => id && !/embed|imagen|veo|tts|whisper|transcri|dall-e|moderation|rerank|guard|audio|live|image-generation|robotics|computer-use|aqa/i.test(id));
 }
+// Orden recomendado: Flash vigente primero (cuota gratuita amplia), Pro después (poca cuota gratis)
+// y al final los experimentales o de vista previa, que fallan a menudo.
+function modelRank(m) {
+  return /preview|-exp(-|$)|experimental|alpha|beta|hydrogen/i.test(m) ? 5 : /\bpro\b/i.test(m) ? 4
+    : /flash(-lite)?-latest$/.test(m) ? (/lite/.test(m) ? 1 : 0) : /-latest$/.test(m) ? 2 : 3;
+}
 // Una vez por sesión y proveedor: si un modelo ya no existe, se trae la lista vigente.
 const refreshed = new Set();
 async function refreshModels(p, quiet = false) {
@@ -369,8 +397,7 @@ async function refreshModels(p, quiet = false) {
   try {
     const list = await fetchModels(p);
     if (!list.length) return;
-    // Los alias "-latest" de Gemini primero: siempre apuntan al modelo vigente.
-    p.models = [...list.filter((m) => /-latest$/.test(m)), ...list.filter((m) => !/-latest$/.test(m))];
+    p.models = list.sort((a, b) => modelRank(a) - modelRank(b));
     save(); renderTargets();
     if ($('#sheetAis').classList.contains('open')) renderProviders();
     if (!quiet) toast(`${p.name}: lista de modelos actualizada (${list.length})`);
@@ -518,7 +545,8 @@ function trimTo(h, budget) {
 // Para resumir se prefiere la IA local (gratis y sin límites), luego la elegida y luego las demás disponibles.
 async function summarize(messages, signal) {
   const all = targets().filter((t) => !cooling(t.key));
-  const order = [...all.filter((t) => t.kind === 'mcp'), findT(S.target), ...plan(findT(S.target)).slice(1)].filter((t, i, a) => t && !cooling(t.key) && a.findIndex((x) => x?.key === t.key) === i);
+  const order = [...all.filter(isMine), ...all.filter((t) => t.kind === 'mcp'), findT(S.target), ...plan(findT(S.target))]
+    .filter((t, i, a) => t && !cooling(t.key) && allowed(t) && a.findIndex((x) => x?.key === t.key) === i);
   let last;
   for (const t of order.slice(0, 3)) {
     try { const r = await callTarget(t, messages, () => {}, signal); if (r?.trim()) return r.trim(); }
@@ -598,10 +626,12 @@ async function send(text, files = []) {
     let hist = await fitContext(th, buildHistory(th), S.ctxTokens, signal);
     renderLog();
     const first = findT(S.target);
+    const queue = plan(first);
+    if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
     if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
+    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
     else if (S.council) await sendCouncil(th, hist, first, signal);
     else {
-      const queue = plan(first);
       let attempts = 0, ctxRetried = false;
       for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
         const t = queue[qi];
@@ -638,7 +668,7 @@ async function send(text, files = []) {
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
 function councilMembers(first) {
-  const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key));
+  const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key) && allowed(t));
   if (chosen.length >= 2) return chosen.slice(0, 5);
   const seen = new Set(), out = [];
   for (const t of plan(first)) {
@@ -670,7 +700,7 @@ async function sendCouncil(th, hist, first, signal) {
   const prompt = [{ role: 'user', content: `Pregunta del usuario:\n${question}\n\nRespuestas de varias IAs:\n\n${good.map((r, i) => `### Respuesta ${i + 1} (${r.t.label})\n${r.msg.content}`).join('\n\n')}\n\nEscribe la mejor respuesta final para el usuario: combina lo correcto de cada una, corrige errores y, si discrepan en algo importante, indícalo brevemente. No hables de "las respuestas" ni de que eres un moderador; responde directamente.` }];
   const syn = { id: uid(), role: 'assistant', label: '⚖ SÍNTESIS', group, synth: true, content: '', pending: true, ts: Date.now() };
   th.messages.push(syn); renderLog();
-  const judges = [first, ...good.map((r) => r.t)].filter((t, i, a) => !cooling(t.key) && a.findIndex((x) => x.key === t.key) === i);
+  const judges = [first, ...good.map((r) => r.t)].filter((t, i, a) => !cooling(t.key) && allowed(t) && a.findIndex((x) => x.key === t.key) === i);
   for (const t of judges.slice(0, 3)) {
     syn.label = `⚖ SÍNTESIS · ${t.label}`; syn.error = null; syn.pending = true;
     try { await runTarget(t, prompt, syn, signal, false); break; }
@@ -730,6 +760,7 @@ function renderLog() {
   const log = $('#log');
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   const th = thread();
+  $('#private').checked = !!th.private;
   if (!th.messages.length) {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
@@ -761,13 +792,17 @@ function schedule(m) {
 
 function renderTargets() {
   const all = targets();
-  if (!all.some((t) => t.key === S.target)) S.target = all[0]?.key || null;
+  if (!all.some((t) => t.key === S.target)) {
+    const pid = String(S.target || '').split('::')[0];
+    S.target = (all.find((t) => t.pid === pid && allowed(t)) || all.find(allowed) || all[0])?.key || null;
+  }
   const sel = $('#target');
-  sel.innerHTML = all.length ? all.map((t) => `<option value="${esc(t.key)}">${cooling(t.key) ? '⏳ ' : ''}${esc(t.label)}</option>`).join('') : '<option value="">— SIN IAs CONECTADAS —</option>';
+  sel.innerHTML = all.length ? all.map((t) => `<option value="${esc(t.key)}">${!allowed(t) ? '⛔ ' : cooling(t.key) ? '⏳ ' : ''}${esc(t.label)}</option>`).join('') : '<option value="">— SIN IAs CONECTADAS —</option>';
   sel.value = S.target || '';
   $('#autoSkip').checked = S.autoSkip;
   $('#council').checked = S.council;
   $('#useTools').checked = S.useTools;
+  $('#private').checked = !!thread().private;
   const hasTools = toolbox().length > 0;
   $('#toolsLbl').hidden = !hasTools;
   if (!hasTools && S.useTools) $('#useTools').checked = false;
@@ -810,6 +845,9 @@ function renderSettings() {
     <h3>INSTRUCCIONES PARA TODAS LAS IAs</h3>
     <textarea id="instructions" rows="3" class="wide-input" placeholder="Ej.: responde solo en español y de forma breve">${esc(S.instructions ?? '')}</textarea>
     <p class="hint">Se envían a todas las IAs en cada mensaje (idioma, tono, longitud…). Déjalo vacío para no enviar nada.</p>
+    <h3>GASTO</h3>
+    <label class="auto"><input type="checkbox" id="freeOnly" ${S.freeOnly ? 'checked' : ''}> SOLO GRATIS</label>
+    <p class="hint">Neura solo usará IAs del nivel gratuito (en OpenRouter, modelos <b>:free</b>) y tus equipos. Las de pago o de coste desconocido (⛔) no se usan ni en AUTO-SALTO, ni en CONSEJO, ni para resumir.</p>
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
@@ -839,7 +877,8 @@ function renderMcp() {
       ${(s.tools || []).length ? `<div class="chips">${s.tools.map((t) => `<span class="chip tool" title="${esc(t.description || '')}">ƒ ${esc(t.name)}</span>`).join('')}</div>` : ''}
       ${(s.tools || []).some((t) => t.name === 'threads_sync') ? `<label class="auto"><input type="checkbox" data-act="sync" ${s.sync !== false ? 'checked' : ''}> SINCRONIZAR HILOS
         <span class="mono">${s.syncError ? `<span class="red">${esc(s.syncError)}</span>` : s.syncedAt ? '· ' + hhmm(s.syncedAt) : ''}</span></label>` : ''}
-      ${!trusted(s) && (s.tools || []).some((t) => !INTERNAL.has(t.name)) ? `<label class="auto"><input type="checkbox" data-act="trust" ${s.trustTools ? 'checked' : ''}> USAR SUS HERRAMIENTAS SIN PREGUNTAR</label>` : ''}
+      ${!s.local && (s.tools || []).some((t) => !INTERNAL.has(t.name)) ? `<label class="auto"><input type="checkbox" data-act="trust" ${s.trustTools ? 'checked' : ''}> USAR SUS HERRAMIENTAS SIN PREGUNTAR</label>` : ''}
+      ${!s.local ? `<label class="auto"><input type="checkbox" data-act="mine" ${s.mine ? 'checked' : ''}> ES UN EQUIPO MÍO (sirve para hilos 🔒 PRIVADOS)</label>` : ''}
       ${s.local && DESK ? localBridgeHTML() : ''}
       <div class="row"><button class="btn sm" data-act="reconnect">RECONECTAR</button>${s.local ? '' : '<button class="btn sm red" data-act="del">ELIMINAR</button>'}</div>
     </div>`;
@@ -1066,8 +1105,9 @@ function parsePair(text) {
 }
 function pairWith(p) {
   let s = S.mcp.find((x) => x.url === p.url);
-  if (s) Object.assign(s, { token: p.token });
-  else S.mcp.push(s = { id: uid(), name: p.name, url: p.url, token: p.token, models: [], tools: [] });
+  // Lo emparejaste tú con el QR de tu PC: es un equipo tuyo y de confianza.
+  if (s) Object.assign(s, { token: p.token, mine: true, trustTools: true });
+  else S.mcp.push(s = { id: uid(), name: p.name, url: p.url, token: p.token, models: [], tools: [], mine: true, trustTools: true });
   save(); mcpConnect(s);
   toast(`Emparejando con ${s.name}…`);
 }
@@ -1182,6 +1222,12 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeShe
 $('#target').onchange = (e) => { S.target = e.target.value; save(); };
 $('#autoSkip').onchange = (e) => { S.autoSkip = e.target.checked; save(); };
 $('#council').onchange = (e) => { S.council = e.target.checked; save(); if (S.council) toast(`⚖ CONSEJO: ${councilMembers(findT(S.target)).length} IAs responderán a la vez`); };
+$('#private').onchange = (e) => {
+  const th = thread();
+  th.private = e.target.checked; th.ts = Date.now();
+  save(); renderTargets(); syncAll();
+  if (th.private) toast('🔒 HILO PRIVADO: solo responderán tus equipos (⬡)');
+};
 $('#useTools').onchange = (e) => { S.useTools = e.target.checked; save(); if (S.useTools) toast(`ƒ ${toolbox().length} herramientas disponibles para la IA`); };
 
 const input = $('#input');
@@ -1255,6 +1301,7 @@ $('#provList').addEventListener('click', async (e) => {
 });
 $('#settings').addEventListener('change', (e) => {
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }
+  if (e.target.id === 'freeOnly') { S.freeOnly = e.target.checked; save(); renderTargets(); }
   if (e.target.id === 'instructions') { S.instructions = e.target.value; save(); toast('INSTRUCCIONES GUARDADAS'); }
   const k = e.target.dataset.council;
   if (k) { S.councilKeys = e.target.checked ? [...new Set([...S.councilKeys, k])] : S.councilKeys.filter((x) => x !== k); save(); }
@@ -1299,6 +1346,7 @@ $('#mcpList').addEventListener('change', async (e) => {
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
   if (act === 'trust') { s.trustTools = e.target.checked; save(); }
+  if (act === 'mine') { s.mine = e.target.checked; save(); renderTargets(); }
   if (act === 'lan') {
     e.target.disabled = true;
     await DESK.setLan(e.target.checked);
