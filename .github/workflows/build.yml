@@ -123,5 +123,8 @@ jobs:
           ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
+          name: Neura ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
+          # La nueva queda como principal ("Latest"); las anteriores siguen debajo como versiones desfasadas.
+          make_latest: true
