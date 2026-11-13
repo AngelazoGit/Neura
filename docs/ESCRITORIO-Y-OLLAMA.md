@@ -290,6 +290,8 @@ En `config.json` del puente, apunta el backend a esa máquina: `{ "id": "ollama"
 | No aparece ningún modelo de Ollama | No hay modelos descargados: `ollama pull qwen3:4b` |
 | La respuesta tarda mucho | Modelo demasiado grande para tu equipo: prueba `llama3.2:3b` |
 | Aviso "Puertos 8787-8796 ocupados" | Hay otro puente abierto: ciérralo o cambia `port` en `escritorio.json` |
+| Perdí el móvil o se filtró el QR | ⬡ → ESTE PC → **REGENERAR** token: los dispositivos con el antiguo dejan de entrar; vuelve a emparejar los tuyos con el QR nuevo |
+| Aviso «No se ha podido guardar» | El almacenamiento del navegador está lleno: pulsa **EXPORTAR COPIA** para no perder nada y borra hilos antiguos con imágenes |
 | El móvil no conecta con el PC | Mismo Wi-Fi, **ABRIR A MI RED** activado, permite Neura en el firewall y revisa el token |
 | En iPhone no conecta | Acepta el permiso de **red local** que pide iOS la primera vez |
 | La búsqueda en documentos dice "keyword" | Falta el modelo de embeddings: `ollama pull nomic-embed-text` |

@@ -45,6 +45,18 @@ test('no sirve archivos fuera de la app', async () => {
   assert.equal((await fetch(`${BASE}/..%2f..%2fbridge%2fserver.mjs`)).status, 404);
 });
 
+test('también en 127.0.0.1 exige token (una web cualquiera no puede leer los hilos)', async () => {
+  const p = spawn(process.execPath, [fileURLToPath(new URL('server.mjs', import.meta.url))], {
+    env: { ...process.env, PORT: '18789', HOST: '127.0.0.1', NEURA_TOKEN: '', NEURA_CONFIG: '/nonexistent.json', NEURA_DATA: mkdtempSync(join(tmpdir(), 'neura-')) },
+  });
+  let o = '';
+  await new Promise((r) => p.stdout.on('data', (d) => { o += d; if (o.includes('Backends')) r(); }));
+  try {
+    const r = await fetch('http://127.0.0.1:18789/mcp', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://web-cualquiera.example' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
+    assert.equal(r.status, 401);
+    assert.match(o, /TOKEN: \S{20,}/);
+  } finally { p.kill(); }
+});
 const sync = async (args) => (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'threads_sync', arguments: args } })).json()).result.structuredContent;
 test('threads_sync fusiona hilos de dos dispositivos sin perder mensajes', async () => {
   const pc = await sync({ threads: [{ id: 't1', title: 'Hola', ts: 10, messages: [{ id: 'a', role: 'user', content: 'uno', ts: 1 }] }] });

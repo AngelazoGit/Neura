@@ -91,10 +91,78 @@ function save() {
     st.mcp = st.mcp.map((m) => (m.local ? m : (({ token, ...x }) => x)(m)));
     if (vault.key) sealSoon();
   }
-  const data = JSON.stringify(st);
-  try { if (DESK) DESK.save(data); else localStorage.setItem(LS, data); }
-  catch (e) { toast('No se pudo guardar: ' + e.message, true); }
+  // Los adjuntos ya guardados en IndexedDB se quedan fuera: el hilo solo conserva su referencia.
+  const data = JSON.stringify(st, (k, v) => (v && v.ref && (v.kind === 'image' || v.kind === 'text') ? { ...v, data: undefined, text: undefined } : v));
+  try { if (DESK) DESK.save(data); else localStorage.setItem(LS, data); storageWarn(null); }
+  catch (e) { storageWarn(e); }
 }
+// Aviso fijo (no un mensaje que desaparece) mientras lo último no esté guardado.
+function storageWarn(e) {
+  const el = document.getElementById('saveWarn');
+  if (!el) return;
+  el.hidden = !e;
+  if (e) el.innerHTML = `⚠️ No se ha podido guardar (${esc(/quota/i.test(e.name + e.message) ? 'almacenamiento lleno' : e.message)}). Lo último sigue en pantalla: <button type="button" class="btn sm" id="saveWarnExport">EXPORTAR COPIA</button>`;
+}
+
+// ---------- adjuntos en IndexedDB ----------
+// Imágenes (binario) y textos de PDF fuera del estado: el almacenamiento del navegador (~5 MB) no da para ellos.
+// Orden seguro: primero se guarda el archivo y después la referencia; si algo se corta, el hilo conserva el contenido.
+const blobs = (() => {
+  let dbp;
+  const open = () => (dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open('neura-adjuntos', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const run = async (mode, fn) => {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('files', mode), q = fn(t.objectStore('files'));
+      t.oncomplete = () => res(q.result); t.onerror = t.onabort = () => rej(t.error || new Error('IndexedDB'));
+    });
+  };
+  return { put: (id, v) => run('readwrite', (st) => st.put(v, id)), get: (id) => run('readonly', (st) => st.get(id)),
+    del: (id) => run('readwrite', (st) => st.delete(id)), keys: () => run('readonly', (st) => st.getAllKeys()) };
+})();
+const field = (f) => (f.kind === 'image' ? 'data' : 'text');
+const allFiles = () => S.threads.flatMap((t) => t.messages.flatMap((m) => m.files || []));
+function toBlob(dataUrl) {
+  const [, type, b64] = dataUrl.match(/^data:([^;]+);base64,(.*)$/) || [];
+  if (!b64) return dataUrl;
+  return new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type });
+}
+const toDataUrl = (b) => (typeof b === 'string' ? Promise.resolve(b) : new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(b); }));
+async function storeFile(f) {
+  const id = uid() + uid();
+  await blobs.put(id, f.kind === 'image' ? toBlob(f.data) : f.text);
+  f.ref = id; // la referencia solo existe cuando el archivo ya está guardado
+}
+// Guarda en IndexedDB los adjuntos que aún van dentro del estado (versiones antiguas, sincronizados o importados).
+let persisting = null;
+function persistFiles() {
+  return (persisting ||= (async () => {
+    let n = 0;
+    for (const f of allFiles()) {
+      if (f.ref || f[field(f)] == null) continue;
+      try { await storeFile(f); n++; } catch (e) { storageWarn(e); break; }
+    }
+    if (n) save();
+  })().finally(() => { persisting = null; }));
+}
+// Al abrir: recupera el contenido de cada referencia y borra los archivos que ya no usa ningún hilo.
+async function hydrateFiles() {
+  const used = new Set();
+  for (const f of allFiles()) {
+    if (!f.ref) continue;
+    used.add(f.ref);
+    if (f[field(f)] != null) continue;
+    try { const v = await blobs.get(f.ref); if (v == null) f.missing = true; else f[field(f)] = f.kind === 'image' ? await toDataUrl(v) : v; }
+    catch { f.missing = true; }
+  }
+  try { for (const k of await blobs.keys()) if (!used.has(k)) await blobs.del(k); } catch {}
+}
+// Las referencias son de este dispositivo: al exportar o sincronizar viaja el contenido original.
+const portable = (list) => JSON.parse(JSON.stringify(list, (k, v) => (k === 'ref' || k === 'missing' ? undefined : v)));
 // Fusión de un hilo de dos dispositivos: mensajes unidos por id, el resto lo gana el ts más reciente.
 // Mantener igual que mergeThread() en bridge/server.mjs.
 function mergeThread(a, b) {
@@ -495,7 +563,7 @@ async function syncWith(s) {
     // Solo se envía lo cambiado desde la última vez; los mensajes a medias no salen del dispositivo.
     // Los hilos privados solo se copian a tus equipos.
     const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length) && (!t.private || s.local || s.mine))
-      .map((t) => ({ ...t, messages: t.messages.filter((m) => !m.pending) }));
+      .map((t) => portable({ ...t, messages: t.messages.filter((m) => !m.pending) }));
     const newer = (list) => list.filter((x) => (x.updatedAt || 0) > (s.pushedAt || 0));
     const collections = { skills: newer(S.skills), projects: newer(S.projects) };
     const r = await mcpRpc(s, 'tools/call', { name: 'threads_sync', arguments: { since: s.syncRev || 0, threads: out, collections } });
@@ -521,6 +589,7 @@ async function syncWith(s) {
         changed = true;
       }
     }
+    if (changed) persistFiles();
     s.syncRev = data.rev; s.pushedAt = startedAt; s.syncedAt = Date.now(); s.syncError = null;
     save();
     if (changed && !busy) {
@@ -538,7 +607,7 @@ const syncAll = () => S.mcp.forEach((s) => syncWith(s));
 function userContent(m, withImg) {
   let text = m.content || '';
   for (const f of m.files || []) if (f.kind === 'text') text += `\n\n[Archivo adjunto: ${f.name}${f.pdf ? ' — al usar su contenido, cita la página así: (pág. N)' : ''}]\n\`\`\`\n${f.text}\n\`\`\``;
-  const imgs = (m.files || []).filter((f) => f.kind === 'image');
+  const imgs = (m.files || []).filter((f) => f.kind === 'image' && f.data);
   if (!imgs.length) return text;
   if (!withImg) return text + imgs.map((f) => `\n[Imagen adjunta: ${f.name}]`).join('');
   return [{ type: 'text', text: text || 'Describe la imagen.' }, ...imgs.map((f) => ({ type: 'image_url', image_url: { url: f.data } }))];
@@ -773,8 +842,8 @@ function setBusy(b) {
 // ---------- render ----------
 const CAN_SPEAK = 'speechSynthesis' in window;
 function filesHTML(m) {
-  return (m.files || []).map((f) => (f.kind === 'image'
-    ? `<img class="thumb" src="${esc(f.data)}" alt="${esc(f.name)}">`
+  return (m.files || []).map((f) => (f.missing || f[field(f)] == null ? `<span class="chip off">⚠️ ${esc(f.name)} (no disponible)</span>`
+    : f.kind === 'image' ? `<img class="thumb" src="${esc(f.data)}" alt="${esc(f.name)}">`
     : `<span class="chip">📄 ${esc(f.name)}</span>`)).join('');
 }
 function replyHTML(m) {
@@ -993,7 +1062,7 @@ function localBridgeHTML() {
     <label class="auto"><input type="checkbox" data-act="lan" ${b.lan ? 'checked' : ''}> ABRIR A MI RED</label>
     ${b.lan ? `${b.qr ? `<div class="qr"><img src="${esc(b.qr)}" alt="Código QR de emparejamiento"><span class="hint">Escanéalo con la cámara del móvil: se abre Neura ya conectada a este PC. En la app instalada: ⬡ → 📷 ESCANEAR QR.</span></div>` : ''}
       <div class="mono">URL: ${urls.map(esc).join(' · ') || 'sin red'}</div>
-      <div class="mono">TOKEN: <span class="secret">${esc(b.token)}</span> <button class="btn sm ghost" data-act="copytoken">COPIAR</button></div>`
+      <div class="mono">TOKEN: <span class="secret">${esc(b.token)}</span> <button class="btn sm ghost" data-act="copytoken">COPIAR</button> <button class="btn sm red" data-act="regentoken" title="Si pierdes el móvil o se filtra el QR">REGENERAR</button></div>`
       : '<div class="mono">Solo accesible desde este PC.</div>'}
     <h4>🌍 FUERA DE CASA (Tailscale)</h4>
     ${!ts.installed ? '<div class="hint">Instala Tailscale (gratis) en el PC y el móvil para usar Neura y tu IA local desde cualquier sitio. <a href="https://tailscale.com/download" target="_blank" rel="noopener">▸ descargar</a></div>'
@@ -1076,14 +1145,14 @@ async function importThreads(file) {
     const list = Array.isArray(data) ? data : data.threads;
     if (!Array.isArray(list)) throw new Error('No es una copia de Neura');
     let n = 0;
-    for (const t of list) {
+    for (const t of portable(list)) {
       if (!t?.id || !Array.isArray(t.messages)) continue;
       t.messages.forEach((m) => { m.id ||= uid() + uid(); });
       const i = S.threads.findIndex((x) => x.id === t.id);
       if (i >= 0) S.threads[i] = mergeThread(S.threads[i], t); else S.threads.push(t);
       n++;
     }
-    save(); renderThreads(); syncAll();
+    save(); await persistFiles(); renderThreads(); renderLog(); syncAll();
     toast(`${n} hilos importados`);
   } catch (e) { toast('Importar: ' + e.message, true); }
 }
@@ -1124,6 +1193,11 @@ async function readPdf(file) {
   return { images, pages: doc.numPages };
 }
 async function addFiles(list) {
+  const before = attach.length;
+  try { await addFilesRaw(list); }
+  finally { for (const f of attach.slice(before)) { try { await storeFile(f); } catch (e) { storageWarn(e); } } }
+}
+async function addFilesRaw(list) {
   for (const f of list) {
     try {
       if (f.type.startsWith('image/')) attach.push({ kind: 'image', name: f.name, data: await shrink(f) });
@@ -1541,8 +1615,9 @@ $('#threadList').addEventListener('click', (e) => {
   S.active = it.dataset.tid; save(); renderLog(); closeSheets();
 });
 $('#exportMd').onclick = () => { const th = thread(); if (!th.messages.length) return toast('El hilo está vacío', true); download(`${safeName(th.title)}.md`, threadMd(th), 'text/markdown'); };
+document.addEventListener('click', (e) => { if (e.target.id === 'saveWarnExport') $('#exportAll').click(); });
 $('#exportAll').onclick = () => download(`neura-hilos-${new Date().toISOString().slice(0, 10)}.json`,
-  JSON.stringify({ app: 'neura', version: 2, exported: new Date().toISOString(), threads: S.threads.filter((t) => !t.deleted && t.messages.length) }, null, 1), 'application/json');
+  JSON.stringify({ app: 'neura', version: 2, exported: new Date().toISOString(), threads: portable(S.threads.filter((t) => !t.deleted && t.messages.length)) }, null, 1), 'application/json');
 $('#importBtn').onclick = () => $('#importFile').click();
 $('#importFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importThreads(f); };
 document.querySelectorAll('.sheet').forEach((s) => s.addEventListener('click', (e) => { if (e.target === s || e.target.closest('.close')) closeSheets(); }));
@@ -1702,6 +1777,13 @@ $('#mcpList').addEventListener('click', async (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'copytoken') navigator.clipboard?.writeText(DESK.bridge().token).then(() => toast('TOKEN COPIADO'));
+  if (act === 'regentoken') {
+    if (!confirm('¿Generar un token nuevo? Los móviles y equipos conectados a este PC tendrán que volver a emparejarse con el QR.')) return;
+    const b = await DESK.regenToken();
+    Object.assign(s, { token: b.token, url: `http://127.0.0.1:${b.port}/mcp` });
+    await mcpConnect(s, true).catch(() => {});
+    save(); renderMcp(); toast('TOKEN NUEVO: vuelve a emparejar tus dispositivos');
+  }
   if (act === 'reconnect') mcpConnect(s);
   if (act === 'del') { S.mcp = S.mcp.filter((x) => x !== s); save(); renderMcp(); renderTargets(); renderLog(); }
   if (['addfolder', 'rmfolder', 'tson', 'tsoff'].includes(act)) {
@@ -1717,6 +1799,15 @@ $('#mcpList').addEventListener('click', async (e) => {
 // ---------- arranque ----------
 async function boot() {
   S.threads.flatMap((t) => t.messages).forEach((m) => { if (m.pending) { m.pending = false; m.error = m.error || 'Interrumpido'; } });
+  await hydrateFiles();
+  persistFiles(); // migra a IndexedDB los adjuntos que aún iban dentro del estado
+  if (!DESK) navigator.storage?.persist?.().catch(() => {}); // que el navegador no los borre si falta espacio
+  // Estadísticas solo de proveedores que existen y modelos que siguen en su lista (la lista solo cambia con datos confirmados).
+  for (const k of Object.keys(S.health)) {
+    const [id, model] = k.split('::');
+    const p = S.providers.find((x) => x.id === id);
+    if (k.startsWith('mcp:') ? !S.mcp.some((x) => `mcp:${x.id}` === id) : !p || !p.models.includes(model)) delete S.health[k];
+  }
   if (DESK) {
     // El puente integrado del PC aparece siempre como primer servidor MCP.
     const b = DESK.bridge();

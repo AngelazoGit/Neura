@@ -18,7 +18,9 @@ const PORT = Number(process.env.PORT || cfg.port || 8787);
 const HOST = process.env.HOST || cfg.host || '0.0.0.0';
 const LOOPBACK = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
 // Seguro por defecto: si escucha en la red sin token, se genera uno aleatorio en cada arranque.
-const TOKEN = process.env.NEURA_TOKEN || cfg.token || (LOOPBACK ? '' : randomBytes(18).toString('base64url'));
+// Siempre con token, también en 127.0.0.1: el puente responde a cualquier web (CORS) y sin token
+// cualquier página abierta en este PC podría leer los hilos y las carpetas compartidas.
+const TOKEN = process.env.NEURA_TOKEN || cfg.token || randomBytes(18).toString('base64url');
 const TOKEN_GENERATED = !process.env.NEURA_TOKEN && !cfg.token && !!TOKEN;
 const TIMEOUT = Number(cfg.timeoutMs || 300000);
 const APP_DIR = cfg.appDir || join(HERE, '..', 'app');
