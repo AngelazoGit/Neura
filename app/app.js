@@ -61,7 +61,7 @@ const DEFAULT_INSTRUCTIONS = 'Responde siempre en español y solo en español: n
 // ---------- estado ----------
 const S = Object.assign({
   providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
-  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [], projects: [], project: null,
+  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [], projects: [], project: null, gateway: { enabled: false, localOnly: false },
 }, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
@@ -95,8 +95,32 @@ function save() {
   }
   // Los adjuntos ya guardados en IndexedDB se quedan fuera: el hilo solo conserva su referencia.
   const data = JSON.stringify(st, (k, v) => (v && v.ref && (v.kind === 'image' || v.kind === 'text') ? { ...v, data: undefined, text: undefined } : v));
-  try { if (DESK) DESK.save(data); else localStorage.setItem(LS, data); storageWarn(null); }
+  try { if (DESK) { DESK.save(data); pushGatewaySoon(); } else localStorage.setItem(LS, data); storageWarn(null); }
   catch (e) { storageWarn(e); }
+}
+// ---------- Neura Gateway (PC): otras herramientas usan Neura como proveedor ----------
+// Orden como AUTO-SALTO: la IA elegida y después por calidad. Respeta SOLO GRATIS. Solo IAs compatibles con OpenAI.
+function gatewayPayload() {
+  const g = S.gateway || {};
+  const name = (t) => `${slug(S.providers.find((p) => p.id === t.pid).name)}/${t.model}`;
+  const cloud = targets().filter((t) => t.pid && t.kind === 'openai' && (!S.freeOnly || isFree(t)));
+  const mine = targets().filter((t) => t.kind === 'mcp' && S.mcp.find((s) => s.id === t.sid)?.local);
+  const first = findT(S.target);
+  // Por clave: targets() crea objetos nuevos en cada llamada.
+  const usable = new Set([...cloud, ...mine].map((t) => t.key));
+  const ordered = [first, ...[...cloud, ...mine].sort((a, b) => score(b) - score(a))]
+    .filter((t, i, a) => t && usable.has(t.key) && a.findIndex((x) => x?.key === t.key) === i);
+  return {
+    enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly,
+    providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model }; }),
+    order: ordered.map((t) => (t.pid ? name(t) : t.model)),
+  };
+}
+let gwSent = '', gwTimer;
+function pushGatewaySoon() {
+  if (!DESK?.gateway) return;
+  clearTimeout(gwTimer);
+  gwTimer = setTimeout(() => { const c = JSON.stringify(gatewayPayload()); if (c !== gwSent) { gwSent = c; DESK.gateway(JSON.parse(c)); } }, 300);
 }
 // Aviso fijo (no un mensaje que desaparece) mientras lo último no esté guardado.
 function storageWarn(e) {
@@ -1227,6 +1251,39 @@ function renderMcp() {
   }).join('');
 }
 
+// Configuración lista para copiar en otras herramientas. La clave es el token del puente.
+function gatewayHTML(b) {
+  const g = S.gateway || {}, base = `http://127.0.0.1:${b.port}`, t = b.token;
+  const snip = (title, text, note = '') => `<details><summary>${title}</summary><pre class="snip">${esc(text)}</pre>${note ? `<div class="hint">${note}</div>` : ''}<button type="button" class="btn sm ghost" data-act="copysnip">COPIAR</button></details>`;
+  return `<h4>🔌 NEURA GATEWAY · CONECTAR OTRAS HERRAMIENTAS</h4>
+    <div class="hint">Usa Neura (tus IAs, AUTO-SALTO y SOLO GRATIS) como proveedor en otras aplicaciones: Continue, Cline, Aider, Open WebUI…</div>
+    <label class="auto"><input type="checkbox" data-act="gw" ${g.enabled ? 'checked' : ''}> ACTIVAR GATEWAY</label>
+    ${!g.enabled ? '' : `<label class="auto"><input type="checkbox" data-act="gwlocal" ${g.localOnly ? 'checked' : ''}> SOLO MODELOS DE ESTE EQUIPO</label>
+    <div class="mono">Compatible con OpenAI: ${esc(base)}/v1 · con Anthropic: ${esc(base)} · clave: el TOKEN · modelo: <b>auto</b> (o uno concreto de /v1/models)</div>
+    ${snip('Continue (config.yaml)', `models:
+  - name: Neura (auto)
+    provider: openai
+    model: auto
+    apiBase: ${base}/v1
+    apiKey: ${t}`)}
+    ${snip('Cline / Roo Code', `Proveedor: OpenAI Compatible
+Base URL: ${base}/v1
+API Key: ${t}
+Model ID: auto`)}
+    ${snip('Aider', `aider --openai-api-base ${base}/v1 --openai-api-key ${t} --model openai/auto`)}
+    ${snip('Open WebUI', `Ajustes → Conexiones → API de OpenAI
+URL: ${base}/v1
+Clave: ${t}`, 'Si Open WebUI corre en Docker, usa http://host.docker.internal:' + b.port + '/v1.')}
+    ${snip('Claude Code', `# macOS / Linux
+export ANTHROPIC_BASE_URL=${base}
+export ANTHROPIC_AUTH_TOKEN=${t}
+
+# Windows (PowerShell)
+$env:ANTHROPIC_BASE_URL="${base}"
+$env:ANTHROPIC_AUTH_TOKEN="${t}"`,
+      'Revisa sus condiciones de uso antes de usarlo con modelos de otros proveedores. Los modelos gratuitos rinden peor en tareas largas de programación.')}
+    <div class="hint warn">⚠️ Cualquier programa de este PC con el token (y otros equipos, si abres el puente a tu red) usará tus claves y tus cuotas gratuitas. Si se filtra, pulsa REGENERAR.</div>`}`;
+}
 // Puente integrado en Neura Desktop: emparejar el móvil, carpetas para la IA y acceso fuera de casa.
 function localBridgeHTML() {
   const b = DESK.bridge();
@@ -1246,6 +1303,7 @@ function localBridgeHTML() {
         ${ts.https ? `<div class="mono">Web (https): https://${esc(ts.dns)}/ · MCP: https://${esc(ts.dns)}/mcp</div>${b.qrTs ? `<div class="qr"><img src="${esc(b.qrTs)}" alt="QR para fuera de casa"><span class="hint">QR para conectarte desde fuera (con Tailscale activo en el móvil).</span></div>` : ''}<button class="btn sm ghost" data-act="tsoff">DESACTIVAR HTTPS</button>`
         : `<button class="btn sm" data-act="tson">ACTIVAR HTTPS CON TAILSCALE</button>`}
         ${ts.error ? `<div class="mono red">${esc(ts.error)}</div>` : ''}`}
+    ${S.level === 'basic' ? '' : gatewayHTML(b)}
     <h4>📁 CARPETAS PARA LA IA</h4>
     <div class="hint">La IA podrá buscar y leer (nunca modificar) estos documentos con ƒ HERRAMIENTAS. Cualquiera con el token puede leerlos.</div>
     ${(b.folders || []).map((f) => `<div class="mono folder">${esc(f)} <button class="btn sm red" data-act="rmfolder" data-path="${esc(f)}">✕</button></div>`).join('')}
@@ -1952,6 +2010,11 @@ $('#mcpList').addEventListener('change', async (e) => {
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
   if (act === 'trust') { s.trustTools = e.target.checked; save(); }
+  if (act === 'gw' || act === 'gwlocal') {
+    S.gateway = { ...S.gateway, [act === 'gw' ? 'enabled' : 'localOnly']: e.target.checked };
+    save(); renderMcp();
+    if (act === 'gw') toast(e.target.checked ? '🔌 Gateway activo: copia la configuración de tu herramienta' : 'Gateway desactivado');
+  }
   if (act === 'mine') { s.mine = e.target.checked; save(); renderTargets(); }
   if (act === 'lan') {
     e.target.disabled = true;
@@ -1964,6 +2027,7 @@ $('#mcpList').addEventListener('click', async (e) => {
   const act = e.target.dataset.act, card = e.target.closest('[data-sid]'); if (!act || !card) return;
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'copytoken') navigator.clipboard?.writeText(DESK.bridge().token).then(() => toast('TOKEN COPIADO'));
+  if (act === 'copysnip') navigator.clipboard?.writeText(e.target.parentElement.querySelector('.snip').textContent).then(() => toast('COPIADO'));
   if (act === 'regentoken') {
     if (!confirm('¿Generar un token nuevo? Los móviles y equipos conectados a este PC tendrán que volver a emparejarse con el QR.')) return;
     const b = await DESK.regenToken();
@@ -2001,6 +2065,7 @@ async function boot() {
     let s = S.mcp.find((x) => x.local);
     if (!s) S.mcp.unshift(s = { id: 'local', local: true, name: 'ESTE PC', models: [], tools: [] });
     Object.assign(s, { url: `http://127.0.0.1:${b.port}/mcp`, token: b.token });
+    pushGatewaySoon();
   }
   applyLevel();
   renderTargets(); renderLog();

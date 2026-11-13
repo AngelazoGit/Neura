@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('neuraDesktop', {
   bridge: () => ipcRenderer.sendSync('bridge-info'),
   setLan: (on) => ipcRenderer.invoke('set-lan', on),
   regenToken: () => ipcRenderer.invoke('regen-token'),
+  gateway: (c) => ipcRenderer.invoke('gateway', c),
   addFolder: () => ipcRenderer.invoke('add-folder'),
   removeFolder: (dir) => ipcRenderer.invoke('remove-folder', dir),
   tailscale: (on) => ipcRenderer.invoke('tailscale', on),

@@ -29,7 +29,8 @@ neura/
 12. **📁 Proyectos.** Hilos agrupados con una memoria editable que reciben todas las IAs y una habilidad por defecto. Habilidades y proyectos se sincronizan por el puente.
 13. **Configuración guiada, ramas y más.** Asistente para conectar la primera IA gratis; ⑂ RAMA y ✎ EDITAR desde cualquier mensaje; sugerencias de habilidades al escribir; PDF citados por página y escaneados leídos con visión; CONSEJO con desacuerdos señalados; SOLO GRATIS y hilos 🔒 PRIVADOS.
 14. **Para principiantes y profesionales.** Al empezar, eliges entre IA en tu equipo (en el PC, sin cuentas: Neura guía la instalación de Ollama y descarga el modelo adecuado a tu memoria) o IA en internet (guía por proveedor para crear la clave gratis). El modo **Principiante** muestra lo esencial, consejos de uso correcto y habilidades que enseñan; el **Profesional**, todo.
-15. **Claves protegidas.** En el PC se cifran con el llavero del sistema; en el móvil y la web, opcionalmente con un PIN (AES-256). Las claves nunca se sincronizan.
+15. **🔌 Neura Gateway (PC).** Otras herramientas (Continue, Cline, Aider, Open WebUI…) pueden usar Neura como proveedor: API compatible con OpenAI (`/v1/chat/completions`, `/v1/models`) y con Anthropic (`/v1/messages`), con streaming y herramientas. Con el modelo `auto` aplica AUTO-SALTO entre tus IAs y respeta SOLO GRATIS. Usa siempre las claves del propio usuario en su equipo; se activa en ⬡ → ESTE PC.
+16. **Claves protegidas.** En el PC se cifran con el llavero del sistema; en el móvil y la web, opcionalmente con un PIN (AES-256). Las claves nunca se sincronizan.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.
 
@@ -44,6 +45,8 @@ NEURA_TOKEN=un-secreto-largo node server.mjs
 Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
 
 Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `NEURA_FOLDERS`), añade herramientas de **solo lectura**: `list_dir`, `search_files`, `read_file` y `search_docs` (búsqueda semántica con embeddings de Ollama: `ollama pull nomic-embed-text`; sin ese modelo busca por palabras). Nunca sale de las carpetas compartidas (bloquea `..`, rutas absolutas, carpetas ocultas y enlaces simbólicos que apunten fuera). Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
+
+**Neura Gateway:** el puente también atiende `/v1/models`, `/v1/chat/completions` (OpenAI) y `/v1/messages` (Anthropic) con el mismo token (`Authorization: Bearer` o `x-api-key`). Está desactivado hasta que la app de PC lo activa y le pasa, solo en memoria y solo desde el propio equipo (`POST /neura/gateway`), las IAs del usuario. El modelo `auto` (o uno desconocido) prueba las IAs en orden y pausa las que fallan.
 
 Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`, `NEURA_FOLDERS`, `NEURA_EMBED_MODEL`.
 

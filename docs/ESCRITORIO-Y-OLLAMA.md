@@ -245,6 +245,22 @@ La IA puede listar, buscar por nombre o contenido, leer archivos de texto y hace
 
 ---
 
+## 5.6 Neura Gateway: usar Neura desde otras herramientas
+
+Con el **Gateway**, programas como Continue, Cline, Aider u Open WebUI usan Neura como si fuera un proveedor de IA: por detrás van tus IAs gratuitas, tus modelos locales, AUTO-SALTO y SOLO GRATIS.
+
+1. En Neura para PC (modo Profesional): **⬡ → ESTE PC → 🔌 NEURA GATEWAY → ACTIVAR GATEWAY**.
+2. Despliega tu herramienta y pulsa **COPIAR**: la configuración ya lleva la URL y el token.
+   - Compatible con OpenAI: `http://127.0.0.1:8787/v1`, clave = token, modelo `auto`.
+   - Compatible con Anthropic: `http://127.0.0.1:8787`, clave = token.
+3. **SOLO MODELOS DE ESTE EQUIPO** limita el Gateway a los modelos del PC.
+
+Con `auto`, si la IA elegida en Neura agota su cuota o falla, el Gateway prueba la siguiente y deja la otra en pausa. Si pides un modelo concreto (por ejemplo `ollama/qwen3:4b`), usa solo ese.
+
+> Cualquier programa del PC que tenga el token, y otros equipos si abres el puente a tu red, usará tus claves y tus cuotas gratuitas. Si el token se filtra, pulsa **REGENERAR**. Los modelos gratuitos rinden peor que los grandes en tareas largas de programación con herramientas.
+
+---
+
 ## 6. IA en otro ordenador o servidor (opcional)
 
 Para usar la IA de otra máquina (p. ej. un PC con buena gráfica), instala allí Ollama y el puente sin la app:
