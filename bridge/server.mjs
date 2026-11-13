@@ -606,18 +606,194 @@ async function rpc(msg, session) {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Accept',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Accept, x-api-key, anthropic-version, anthropic-beta',
   'Access-Control-Expose-Headers': 'Mcp-Session-Id',
   'Access-Control-Max-Age': '86400',
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
+const same = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+// Token como «Authorization: Bearer» (MCP y clientes OpenAI) o «x-api-key» (clientes Anthropic).
 function authorized(req) {
   if (!TOKEN) return true;
-  const got = Buffer.from(String(req.headers.authorization || ''));
-  const want = Buffer.from(`Bearer ${TOKEN}`);
-  return got.length === want.length && timingSafeEqual(got, want);
+  return same(req.headers.authorization || '', `Bearer ${TOKEN}`) || same(req.headers['x-api-key'] || '', TOKEN);
+}
+
+// ---------- Neura Gateway: API compatible con OpenAI y Anthropic ----------
+// Otras herramientas (Continue, Cline, Aider, Open WebUI…) usan Neura como proveedor: por detrás van los
+// backends de este puente y las IAs que la app de PC le pasa con las claves del propio usuario (solo en memoria).
+// Con el modelo «auto» (o uno desconocido) se aplica AUTO-SALTO: si una IA falla o agota su cuota, se prueba la siguiente.
+const gateway = { enabled: false, localOnly: false, freeOnly: false, providers: [], order: [] };
+const gwCool = new Map(); // id → hasta cuándo no se usa
+const backendCache = { at: 0, list: [] };
+async function gwTargets() {
+  if (Date.now() - backendCache.at > 30000) {
+    const out = [];
+    for (const b of BACKENDS) {
+      try {
+        for (const name of await backendModels(b)) {
+          // Ollama ofrece también una API compatible con OpenAI en /v1.
+          out.push({ id: `${b.id}/${name}`, url: b.type === 'ollama' ? `${trim(b.url)}/v1` : trim(b.url), apiKey: b.apiKey, model: name, local: isLocalBackend(b) });
+        }
+      } catch {}
+    }
+    Object.assign(backendCache, { at: Date.now(), list: out });
+  }
+  const cloud = gateway.localOnly ? [] : gateway.providers.map((p) => ({ ...p, local: false }));
+  // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
+  const all = [...backendCache.list.filter((t) => t.local || (!gateway.localOnly && !gateway.freeOnly)), ...cloud];
+  const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };
+  return all.sort((a, b) => rank(a) - rank(b));
+}
+async function gwPlan(model) {
+  const all = await gwTargets();
+  const exact = all.find((t) => t.id === model);
+  if (exact) return [exact];
+  const ready = all.filter((t) => (gwCool.get(t.id) || 0) <= Date.now());
+  return ready.length ? ready : all;
+}
+function gwFail(t, status, headers) {
+  const ra = Number(headers?.get?.('retry-after'));
+  const wait = status === 429 ? (ra > 0 ? ra : 60) : status === 401 || status === 403 || status === 404 ? 3600 : 60;
+  gwCool.set(t.id, Date.now() + wait * 1000);
+}
+// Llama al primer destino que responda bien; devuelve la respuesta todavía sin leer (para poder reenviar el streaming).
+async function gwCall(model, body, signal) {
+  const plan = await gwPlan(model);
+  if (!plan.length) throw Object.assign(new Error('No hay modelos disponibles en Neura Gateway'), { status: 503 });
+  let last;
+  for (const t of plan.slice(0, 6)) {
+    try {
+      const r = await fetch(`${t.url}/chat/completions`, {
+        method: 'POST', signal: signalFor(TIMEOUT, signal),
+        headers: { 'Content-Type': 'application/json', ...(t.apiKey ? { Authorization: `Bearer ${t.apiKey}` } : {}) },
+        body: JSON.stringify({ ...body, model: t.model }),
+      });
+      if (r.ok) { gwCool.delete(t.id); return { r, t }; }
+      gwFail(t, r.status, r.headers);
+      last = Object.assign(new Error(`${t.id}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
+      if (r.status === 400) break; // petición mal formada: otra IA no lo arreglará
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      gwFail(t, 0); last = e;
+    }
+  }
+  throw last || new Error('Sin respuesta');
+}
+const gwError = (res, e, anthropic) => send(res, e.status && e.status < 500 ? e.status : 502, anthropic
+  ? { type: 'error', error: { type: 'api_error', message: e.message } }
+  : { error: { message: e.message, type: 'neura_gateway_error' } });
+
+async function gwModels(res) {
+  const all = await gwTargets();
+  send(res, 200, { object: 'list', data: [{ id: 'auto', object: 'model', owned_by: 'neura' }, ...all.map((t) => ({ id: t.id, object: 'model', owned_by: t.local ? 'local' : 'neura' }))] });
+}
+
+async function gwOpenAI(req, res, body) {
+  const ctl = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
+  let r, t;
+  try { ({ r, t } = await gwCall(body.model, body, ctl.signal)); } catch (e) { return gwError(res, e); }
+  if (!body.stream) {
+    const d = await r.json();
+    return send(res, 200, { ...d, model: body.model || t.id });
+  }
+  res.writeHead(200, { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  try { for await (const chunk of r.body) res.write(chunk); } catch {}
+  res.end();
+}
+
+// Anthropic Messages → OpenAI chat
+const blockText = (c) => (typeof c === 'string' ? c : (c || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n'));
+function anthropicToOpenAI(body) {
+  const messages = [];
+  const sys = blockText(body.system);
+  if (sys) messages.push({ role: 'system', content: sys });
+  for (const m of body.messages || []) {
+    const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content || [];
+    if (m.role === 'assistant') {
+      const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+      const calls = blocks.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
+      messages.push({ role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
+      continue;
+    }
+    // Los resultados de herramientas van primero, como mensajes «tool», justo después de la llamada.
+    for (const b of blocks.filter((x) => x.type === 'tool_result')) {
+      messages.push({ role: 'tool', tool_call_id: b.tool_use_id, content: (b.is_error ? 'Error: ' : '') + blockText(b.content) });
+    }
+    const parts = blocks.flatMap((b) => (b.type === 'text' ? [{ type: 'text', text: b.text }]
+      : b.type === 'image' && b.source?.type === 'base64' ? [{ type: 'image_url', image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }]
+      : b.type === 'image' && b.source?.type === 'url' ? [{ type: 'image_url', image_url: { url: b.source.url } }] : []));
+    if (parts.length) messages.push({ role: 'user', content: parts.every((x) => x.type === 'text') ? parts.map((x) => x.text).join('\n') : parts });
+  }
+  const out = { messages, stream: !!body.stream };
+  if (body.max_tokens) out.max_tokens = body.max_tokens;
+  if (body.temperature != null) out.temperature = body.temperature;
+  if (body.stop_sequences?.length) out.stop = body.stop_sequences;
+  if (body.tools?.length) {
+    out.tools = body.tools.filter((x) => x.input_schema).map((x) => ({ type: 'function', function: { name: x.name, description: x.description || '', parameters: x.input_schema } }));
+    const tc = body.tool_choice;
+    if (tc?.type === 'any') out.tool_choice = 'required';
+    else if (tc?.type === 'tool') out.tool_choice = { type: 'function', function: { name: tc.name } };
+    else if (tc?.type === 'none') out.tool_choice = 'none';
+  }
+  return out;
+}
+const stopReason = (f) => (f === 'tool_calls' ? 'tool_use' : f === 'length' ? 'max_tokens' : 'end_turn');
+const parseArgs = (a) => { try { return typeof a === 'string' ? JSON.parse(a || '{}') : a || {}; } catch { return {}; } };
+const msgId = () => 'msg_' + randomBytes(12).toString('hex');
+
+async function gwAnthropic(req, res, body) {
+  const ctl = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
+  let r;
+  try { ({ r } = await gwCall(body.model, anthropicToOpenAI(body), ctl.signal)); } catch (e) { return gwError(res, e, true); }
+  if (!body.stream) {
+    const d = await r.json();
+    const m = d.choices?.[0]?.message || {};
+    const content = [
+      ...(asText(m.content) ? [{ type: 'text', text: asText(m.content) }] : []),
+      ...(m.tool_calls || []).map((c) => ({ type: 'tool_use', id: c.id || 'toolu_' + randomBytes(8).toString('hex'), name: c.function?.name, input: parseArgs(c.function?.arguments) })),
+    ];
+    return send(res, 200, { id: msgId(), type: 'message', role: 'assistant', model: body.model, content, stop_reason: stopReason(d.choices?.[0]?.finish_reason), stop_sequence: null,
+      usage: { input_tokens: d.usage?.prompt_tokens ?? 0, output_tokens: d.usage?.completion_tokens ?? 0 } });
+  }
+  // Streaming: los trozos de OpenAI se convierten en los eventos de Anthropic.
+  res.writeHead(200, { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+  ev('message_start', { message: { id: msgId(), type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+  let idx = -1, open = null, finish = null, outTok = 0;
+  const tools = new Map(); // índice OpenAI → índice de bloque
+  const close = () => { if (open) { ev('content_block_stop', { index: idx }); open = null; } };
+  try {
+    for await (const l of lines(r)) {
+      if (!l.startsWith('data:')) continue;
+      const raw = l.slice(5).trim();
+      if (raw === '[DONE]') break;
+      let d; try { d = JSON.parse(raw); } catch { continue; }
+      if (d.usage?.completion_tokens) outTok = d.usage.completion_tokens;
+      const ch = d.choices?.[0]; if (!ch) continue;
+      const delta = ch.delta || {};
+      if (delta.content) {
+        if (open !== 'text') { close(); idx++; open = 'text'; ev('content_block_start', { index: idx, content_block: { type: 'text', text: '' } }); }
+        ev('content_block_delta', { index: idx, delta: { type: 'text_delta', text: delta.content } });
+      }
+      for (const tc of delta.tool_calls || []) {
+        const k = tc.index ?? 0;
+        if (!tools.has(k)) {
+          close(); idx++; open = 'tool'; tools.set(k, idx);
+          ev('content_block_start', { index: idx, content_block: { type: 'tool_use', id: tc.id || 'toolu_' + randomBytes(8).toString('hex'), name: tc.function?.name || '', input: {} } });
+        }
+        if (tc.function?.arguments) ev('content_block_delta', { index: tools.get(k), delta: { type: 'input_json_delta', partial_json: tc.function.arguments } });
+      }
+      if (ch.finish_reason) finish = ch.finish_reason;
+    }
+  } catch {}
+  close();
+  ev('message_delta', { delta: { stop_reason: stopReason(finish), stop_sequence: null }, usage: { output_tokens: outTok } });
+  ev('message_stop', {});
+  res.end();
 }
 
 function readBody(req, limit = 25 * 2 ** 20) {
@@ -676,6 +852,30 @@ async function handle(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, null);
   if (path === '/health') return send(res, 200, { ok: true });
 
+  // Configuración del Gateway: solo la app de este mismo equipo (con token) puede pasarle las IAs y claves.
+  if (path === '/neura/gateway' && req.method === 'POST') {
+    const ip = req.socket.remoteAddress || '';
+    if (!authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
+    let c; try { c = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
+    const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model) });
+    Object.assign(gateway, { enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly,
+      providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
+      order: Array.isArray(c.order) ? c.order.map(String) : [] });
+    backendCache.at = 0;
+    return send(res, 200, { ok: true, enabled: gateway.enabled, providers: gateway.providers.length });
+  }
+  if (path.startsWith('/v1/')) {
+    const anthropic = path.startsWith('/v1/messages');
+    if (!authorized(req)) return send(res, 401, anthropic ? { type: 'error', error: { type: 'authentication_error', message: 'Token inválido' } } : { error: { message: 'Token inválido', type: 'invalid_api_key' } });
+    if (!gateway.enabled) return send(res, 404, { error: { message: 'Neura Gateway está desactivado: actívalo en Neura → ⬡ → ESTE PC.' } });
+    if (path === '/v1/models' && req.method === 'GET') return gwModels(res);
+    if (req.method !== 'POST') return send(res, 405, null, { Allow: 'POST, OPTIONS' });
+    let body; try { body = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: { message: 'JSON inválido' } }); }
+    if (path === '/v1/chat/completions') return gwOpenAI(req, res, body);
+    if (path === '/v1/messages') return gwAnthropic(req, res, body);
+    if (path === '/v1/messages/count_tokens') return send(res, 200, { input_tokens: Math.ceil(JSON.stringify(body.messages || []).length / 4) });
+    return send(res, 404, { error: { message: 'Ruta no disponible en Neura Gateway' } });
+  }
   if (path === '/mcp') {
     if (!authorized(req)) return send(res, 401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Token inválido' } });
     if (req.method === 'DELETE') return send(res, 200, null);

@@ -203,3 +203,82 @@ test('backends: local si están en este equipo o en la red privada; local_only r
   const r = await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).json();
   for (const b of r.result.structuredContent.backends) assert.equal(b.local, /127\.0\.0\.1|localhost/.test(b.url), b.url);
 });
+
+// ---------- Neura Gateway ----------
+const gwSeen = [];
+const gwMock = http.createServer((req, res) => {
+  let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+    const j = JSON.parse(b || '{}'); gwSeen.push({ url: req.url, auth: req.headers.authorization, body: j });
+    if (j.model === 'agotado') { res.writeHead(429, { 'retry-after': '120', 'content-type': 'application/json' }); return res.end('{"error":{"message":"quota"}}'); }
+    const tool = j.tools?.length && !j.messages.some((m) => m.role === 'tool');
+    if (j.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta, finish = null) => res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
+      if (tool) { chunk({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'leer', arguments: '' } }] }); chunk({ tool_calls: [{ index: 0, function: { arguments: '{"ruta":' } }] }); chunk({ tool_calls: [{ index: 0, function: { arguments: '"a.txt"}' } }] }, 'tool_calls'); }
+      else { chunk({ content: 'Hola ' }); chunk({ content: 'mundo' }, 'stop'); }
+      return res.end('data: [DONE]\n\n');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(tool
+      ? { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'leer', arguments: '{"ruta":"a.txt"}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 3 } }
+      : { choices: [{ message: { role: 'assistant', content: `respuesta de ${j.model}` }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 3 } }));
+  });
+});
+await new Promise((r) => gwMock.listen(0, '127.0.0.1', r));
+after(() => gwMock.close());
+const MOCK = `http://127.0.0.1:${gwMock.address().port}/v1`;
+const gw = (p, body, h = {}) => fetch(`${BASE}${p}`, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...h }, body: body && JSON.stringify(body) });
+const configure = (c) => gw('/neura/gateway', c);
+
+test('Gateway: desactivado por defecto y siempre con token', async () => {
+  assert.equal((await gw('/v1/models')).status, 404);
+  assert.equal((await fetch(`${BASE}/v1/models`)).status, 401);
+});
+test('Gateway: AUTO-SALTO entre proveedores con las claves del usuario', async () => {
+  assert.equal((await configure({ enabled: true, providers: [
+    { id: 'gratis/agotado', url: MOCK, apiKey: 'clave-1', model: 'agotado' },
+    { id: 'gratis/bueno', url: MOCK, apiKey: 'clave-2', model: 'bueno' },
+  ], order: ['gratis/agotado', 'gratis/bueno'] })).status, 200);
+  const models = await (await gw('/v1/models')).json();
+  assert.deepEqual(models.data.map((m) => m.id).slice(0, 3), ['auto', 'gratis/agotado', 'gratis/bueno']);
+  const r = await (await gw('/v1/chat/completions', { model: 'auto', messages: [{ role: 'user', content: 'hola' }] })).json();
+  assert.equal(r.choices[0].message.content, 'respuesta de bueno');
+  assert.equal(gwSeen.find((x) => x.body.model === 'bueno').auth, 'Bearer clave-2', 'cada proveedor recibe su propia clave');
+  const n = gwSeen.filter((x) => x.body.model === 'agotado').length;
+  await gw('/v1/chat/completions', { model: 'gpt-4o', messages: [{ role: 'user', content: 'otra' }] }); // nombre desconocido = auto
+  assert.equal(gwSeen.filter((x) => x.body.model === 'agotado').length, n, 'el agotado (429) queda en pausa');
+});
+test('Gateway: streaming compatible con OpenAI', async () => {
+  const t = await (await gw('/v1/chat/completions', { model: 'gratis/bueno', stream: true, messages: [{ role: 'user', content: 'hola' }] })).text();
+  assert.match(t, /"content":"Hola "/); assert.match(t, /\[DONE\]/);
+});
+test('Gateway: /v1/messages traduce Anthropic ⇄ OpenAI (sistema, herramientas y resultados)', async () => {
+  const body = { model: 'claude-sonnet', max_tokens: 100, system: [{ type: 'text', text: 'Eres útil' }],
+    tools: [{ name: 'leer', description: 'Lee un archivo', input_schema: { type: 'object', properties: { ruta: { type: 'string' } } } }],
+    messages: [{ role: 'user', content: 'lee a.txt' }] };
+  const r = await (await gw('/v1/messages', body, { Authorization: '', 'x-api-key': token })).json();
+  assert.equal(r.type, 'message'); assert.equal(r.stop_reason, 'tool_use');
+  assert.deepEqual(r.content[0], { type: 'tool_use', id: 'call_1', name: 'leer', input: { ruta: 'a.txt' } });
+  const sent = gwSeen.at(-1).body;
+  assert.equal(sent.messages[0].role, 'system'); assert.equal(sent.tools[0].function.name, 'leer');
+  const r2 = await (await gw('/v1/messages', { ...body, messages: [...body.messages, { role: 'assistant', content: r.content },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'contenido de a' }] }] })).json();
+  const sent2 = gwSeen.at(-1).body.messages;
+  assert.deepEqual(sent2.at(-2).tool_calls[0].function, { name: 'leer', arguments: '{"ruta":"a.txt"}' });
+  assert.deepEqual(sent2.at(-1), { role: 'tool', tool_call_id: 'call_1', content: 'contenido de a' });
+  assert.equal(r2.content[0].text, 'respuesta de bueno'); assert.equal(r2.stop_reason, 'end_turn');
+});
+test('Gateway: /v1/messages en streaming emite los eventos de Anthropic', async () => {
+  const t = await (await gw('/v1/messages', { model: 'x', max_tokens: 50, stream: true, tools: [{ name: 'leer', input_schema: { type: 'object' } }], messages: [{ role: 'user', content: 'lee' }] })).text();
+  const events = [...t.matchAll(/^event: (\w+)/gm)].map((m) => m[1]);
+  assert.deepEqual([events[0], events[1], events.at(-2), events.at(-1)], ['message_start', 'content_block_start', 'message_delta', 'message_stop']);
+  assert.match(t, /"type":"tool_use","id":"call_1","name":"leer"/);
+  assert.match(t, /"partial_json":"\\"a.txt\\"}"/);
+  assert.match(t, /"stop_reason":"tool_use"/);
+});
+test('Gateway: SOLO LOCAL no usa los proveedores de internet', async () => {
+  await configure({ enabled: true, localOnly: true, providers: [{ id: 'gratis/bueno', url: MOCK, model: 'bueno' }] });
+  const ids = (await (await gw('/v1/models')).json()).data.map((m) => m.id);
+  assert.ok(!ids.includes('gratis/bueno'));
+  await configure({ enabled: false });
+});

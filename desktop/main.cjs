@@ -88,7 +88,7 @@ async function startBridge() {
   stopBridge();
   for (let port = cfg.port; port < cfg.port + 10; port++) {
     const r = await launch(port);
-    if (typeof r !== 'string') { bridge = r; Object.assign(state, { port, error: null }); return refreshPairing(); }
+    if (typeof r !== 'string') { bridge = r; Object.assign(state, { port, error: null }); pushGateway(); return refreshPairing(); }
     if (!r.includes('EADDRINUSE')) { state.error = 'El puente no arrancó: ' + r.trim().split('\n').pop(); return; }
   }
   state.error = `Puertos ${cfg.port}-${cfg.port + 9} ocupados`;
@@ -144,6 +144,18 @@ async function tailscaleStatus() {
   const https = !!(srv.out && dns && srv.out.includes(`127.0.0.1:${state.port}`));
   return { installed: true, running, dns, ip, https, error: running ? null : r.error || null };
 }
+
+// ---------- Neura Gateway ----------
+// La app le pasa al puente local sus IAs (con las claves del usuario): solo en memoria, nunca a disco.
+let gatewayCfg = null;
+async function pushGateway() {
+  if (!gatewayCfg || !bridge) return;
+  try {
+    await fetch(`http://127.0.0.1:${state.port}/neura/gateway`, { method: 'POST', body: JSON.stringify(gatewayCfg),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.token}` } });
+  } catch {}
+}
+ipcMain.handle('gateway', async (_e, c) => { gatewayCfg = c; await pushGateway(); });
 
 // ---------- IPC ----------
 let backedUp = false;
