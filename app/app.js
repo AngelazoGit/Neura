@@ -43,7 +43,7 @@ function deskFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
 // IAs públicas con API. Los nombres de modelo cambian: usa ESCANEAR para actualizarlos.
 // stt: modelo de dictado por voz (API /audio/transcriptions compatible con OpenAI).
 const PRESETS = {
-  gemini:     { name: 'Google Gemini', kind: 'openai', tier: 'free', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-flash', 'gemini-2.5-flash-lite'], keyUrl: 'https://aistudio.google.com/apikey' },
+  gemini:     { name: 'Google Gemini', kind: 'openai', tier: 'free', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-flash-latest', 'gemini-flash-lite-latest'], keyUrl: 'https://aistudio.google.com/apikey' },
   groq:       { name: 'Groq', kind: 'openai', tier: 'free', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'], keyUrl: 'https://console.groq.com/keys', stt: 'whisper-large-v3-turbo' },
   openrouter: { name: 'OpenRouter', kind: 'openai', tier: 'free', baseUrl: 'https://openrouter.ai/api/v1', models: [], freeOnly: true, keyUrl: 'https://openrouter.ai/keys' },
   cerebras:   { name: 'Cerebras', kind: 'openai', tier: 'free', baseUrl: 'https://api.cerebras.ai/v1', models: ['llama-3.3-70b', 'gpt-oss-120b'], keyUrl: 'https://cloud.cerebras.ai' },
@@ -57,13 +57,17 @@ const PRESETS = {
   custom:     { name: 'Otra (compatible OpenAI)', kind: 'openai', tier: 'other', baseUrl: '', models: [] },
 };
 
+const DEFAULT_INSTRUCTIONS = 'Responde siempre en español y solo en español: nunca repitas ni traduzcas la respuesta a otro idioma. Sé claro y conciso; da más detalle solo si te lo pido.';
 // ---------- estado ----------
 const S = Object.assign({
   providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
-  health: {}, ctxTokens: 6000, council: false, councilKeys: [], useTools: false, vault: null,
+  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null,
 }, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
+// Gemini retiró los 2.5: se pasa a los alias que siempre apuntan al modelo vigente.
+const GEMINI_OLD = { 'gemini-2.5-flash': 'gemini-flash-latest', 'gemini-2.5-flash-lite': 'gemini-flash-lite-latest' };
+S.providers.filter((p) => p.preset === 'gemini').forEach((p) => { p.models = [...new Set(p.models.map((m) => GEMINI_OLD[m] || m))]; });
 // Los mensajes necesitan id para fusionar hilos entre dispositivos sin duplicarlos.
 S.threads.forEach((t) => t.messages.forEach((m) => { m.id ||= uid() + uid(); }));
 function thread() {
@@ -118,6 +122,8 @@ function parseWait(text) {
   return Math.ceil(s);
 }
 const untilMidnightUTC = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 0); return Math.ceil((d - Date.now()) / 1000); };
+// Modelo retirado o inexistente: no volverá, hay que pedir la lista actual al proveedor.
+const isGone = (e) => e.status === 404 || /not found|no longer available|not supported for|does not exist|decommissioned|has been deprecated|model_not_found/i.test(e.message || '');
 // Gemini y otras devuelven 400 (no 401) con una clave inválida.
 const isKeyErr = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api.?key|unauthori[sz]ed|invalid.{0,12}(key|token|credential)/i.test(e.message || ''));
 function noteOk(t, ms) { Object.assign(H(t.key), { coolUntil: 0, reason: null, streak: 0 }); const h = H(t.key); h.ok++; h.ms = h.ms ? Math.round(h.ms * 0.7 + ms * 0.3) : ms; }
@@ -129,6 +135,9 @@ function noteFail(t, e) {
     let wait = e.retryAfter || parseWait(msg) || 60;
     if (!e.retryAfter && /per.?day|daily|\bRPD\b|\bTPD\b|por día|diari/i.test(msg)) wait = untilMidnightUTC();
     Object.assign(h, { coolUntil: Date.now() + wait * 1000, reason: 'CUOTA' });
+  } else if (isGone(e) && t.pid) {
+    Object.assign(h, { coolUntil: Date.now() + 365 * 864e5, reason: 'RETIRADO' });
+    refreshModels(S.providers.find((p) => p.id === t.pid));
   } else if (isKeyErr(e) && t.pid) {
     // Una clave rechazada afecta a todos los modelos del proveedor hasta que la cambies.
     for (const x of targets()) if (x.pid === t.pid) Object.assign(H(x.key), { coolUntil: Date.now() + 365 * 864e5, reason: 'CLAVE' });
@@ -153,6 +162,7 @@ function plan(first) {
 function coolText(k) {
   const h = S.health[k];
   if (h.reason === 'CLAVE') return 'CLAVE RECHAZADA';
+  if (h.reason === 'RETIRADO') return 'YA NO DISPONIBLE';
   const until = new Date(h.coolUntil);
   return `${h.reason} · hasta ${until.toDateString() === new Date().toDateString() ? hhmm(h.coolUntil) : until.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
 }
@@ -348,7 +358,23 @@ async function fetchModels(p) {
   const j = await r.json();
   let list = j.data || j.models || [];
   if (p.freeOnly) list = list.filter((m) => String(m.id).endsWith(':free') || (m.pricing && +m.pricing.prompt === 0 && +m.pricing.completion === 0));
-  return list.map((m) => (typeof m === 'string' ? m : m.id || m.name).replace(/^models\//, '')).filter(Boolean);
+  return list.map((m) => (typeof m === 'string' ? m : m.id || m.name).replace(/^models\//, ''))
+    .filter((id) => id && !/embed|imagen|veo|tts|whisper|transcri|dall-e|moderation|rerank|guard|audio|live|image-generation|robotics|computer-use|aqa/i.test(id));
+}
+// Una vez por sesión y proveedor: si un modelo ya no existe, se trae la lista vigente.
+const refreshed = new Set();
+async function refreshModels(p, quiet = false) {
+  if (!p?.apiKey || refreshed.has(p.id)) return;
+  refreshed.add(p.id);
+  try {
+    const list = await fetchModels(p);
+    if (!list.length) return;
+    // Los alias "-latest" de Gemini primero: siempre apuntan al modelo vigente.
+    p.models = [...list.filter((m) => /-latest$/.test(m)), ...list.filter((m) => !/-latest$/.test(m))];
+    save(); renderTargets();
+    if ($('#sheetAis').classList.contains('open')) renderProviders();
+    if (!quiet) toast(`${p.name}: lista de modelos actualizada (${list.length})`);
+  } catch {}
 }
 
 // ---------- cliente MCP (Streamable HTTP) ----------
@@ -527,19 +553,34 @@ async function fitContext(th, hist, budget, signal) {
 
 // ---------- envío ----------
 // Errores que merecen probar otra IA: cuota agotada, sobrecarga, sin conexión, clave inválida.
-const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e));
+const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e) || isGone(e));
+function friendly(e) {
+  if (e.name === 'AbortError') return 'Cancelado';
+  if (isGone(e)) return 'Este modelo ya no está disponible. Neura ha actualizado la lista de modelos.';
+  if (e.status === 429 || /quota|rate.?limit|exhausted/i.test(e.message || '')) return 'Cuota gratuita agotada por ahora.';
+  if (isKeyErr(e)) return 'La clave API no es válida. Revísala en ⚙.';
+  if (e.status === 402) return 'Sin saldo en esta cuenta.';
+  if (e.status >= 500) return 'El servicio falló o está saturado.';
+  if (isCtxErr(e)) return 'La conversación es demasiado larga para este modelo.';
+  if (!e.status) return netHint(e);
+  return 'La IA devolvió un error.';
+}
 function failMsg(msg, e, t) {
   msg.pending = false; msg.content = '';
-  msg.error = (e.status ? `[${e.status}] ` : '') + netHint(e);
+  msg.error = friendly(e);
+  msg.detail = (e.status ? `[${e.status}] ` : '') + netHint(e);
   noteFail(t, e);
 }
+// Algunos modelos escriben su razonamiento interno (a menudo en inglés) entre <think>…</think>.
+const noThink = (s) => String(s || '').replace(/<(think|thinking|thought)>[\s\S]*?(<\/\1>|$)/gi, '').trimStart();
+const withInstructions = (hist) => (S.instructions?.trim() ? [{ role: 'system', content: S.instructions.trim() }, ...hist] : hist);
 async function runTarget(t, hist, msg, signal, tools) {
   const t0 = performance.now();
   msg.tools = [];
-  const out = await callTarget(t, hist, (x) => { msg.content = x; schedule(msg); }, signal, {
+  const out = await callTarget(t, withInstructions(hist), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
     tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
   });
-  msg.content = out || msg.content || '(respuesta vacía)';
+  msg.content = noThink(out) || msg.content || '(respuesta vacía)';
   msg.ms = Math.round(performance.now() - t0);
   msg.pending = false;
   noteOk(t, msg.ms);
@@ -653,7 +694,11 @@ function filesHTML(m) {
     : `<span class="chip">📄 ${esc(f.name)}</span>`)).join('');
 }
 function replyHTML(m) {
-  if (m.error) return `<div class="reply err ${m.skipped ? 'skip' : ''}"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}${m.skipped ? ' → SALTANDO A OTRA IA' : ''}</span></div><div class="txt">${esc(m.error)}</div></div>`;
+  if (m.error) {
+    const detail = m.detail ? `<details><summary>detalle técnico</summary>${esc(m.detail)}</details>` : '';
+    if (m.skipped) return `<div class="reply err skip"><div class="txt">✕ ${esc(m.label || 'NEURA')}: ${esc(m.error)} → probando otra IA${detail}</div></div>`;
+    return `<div class="reply err"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}</span></div><div class="txt">${esc(m.error)}${detail}</div></div>`;
+  }
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
     : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button>`;
@@ -762,6 +807,9 @@ function renderSettings() {
   const all = targets();
   const sec = DESK?.secure?.();
   $('#settings').innerHTML = `
+    <h3>INSTRUCCIONES PARA TODAS LAS IAs</h3>
+    <textarea id="instructions" rows="3" class="wide-input" placeholder="Ej.: responde solo en español y de forma breve">${esc(S.instructions ?? '')}</textarea>
+    <p class="hint">Se envían a todas las IAs en cada mensaje (idioma, tono, longitud…). Déjalo vacío para no enviar nada.</p>
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
@@ -1181,7 +1229,7 @@ $('#provList').addEventListener('change', (e) => {
   const card = e.target.closest('[data-pid]'), f = e.target.dataset.f; if (!card || !f) return;
   const p = S.providers.find((x) => x.id === card.dataset.pid);
   p[f] = f === 'models' ? e.target.value.split(',').map((s) => s.trim()).filter(Boolean) : e.target.value.trim();
-  if (f === 'apiKey' || f === 'baseUrl') resetHealth(p);
+  if (f === 'apiKey' || f === 'baseUrl') { resetHealth(p); refreshed.delete(p.id); refreshModels(p); }
   if (f === 'apiKey' && vault.locked) toast('Las claves están bloqueadas con PIN: desbloquéalas para guardar cambios', true);
   save(); renderTargets();
 });
@@ -1207,6 +1255,7 @@ $('#provList').addEventListener('click', async (e) => {
 });
 $('#settings').addEventListener('change', (e) => {
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }
+  if (e.target.id === 'instructions') { S.instructions = e.target.value; save(); toast('INSTRUCCIONES GUARDADAS'); }
   const k = e.target.dataset.council;
   if (k) { S.councilKeys = e.target.checked ? [...new Set([...S.councilKeys, k])] : S.councilKeys.filter((x) => x !== k); save(); }
 });

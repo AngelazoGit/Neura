@@ -215,3 +215,7 @@ mark{background:rgba(255,122,0,.35);color:var(--text)}
 .overlay video{width:min(90vw,420px);aspect-ratio:1;object-fit:cover;border:2px solid var(--orange)}
 .overlay .card{width:min(92vw,360px);text-align:left}
 .overlay h2{font-size:18px}
+
+.reply.err details{margin-top:4px;color:var(--dim)}
+.reply.err summary{cursor:pointer;font-size:11px}
+.wide-input{width:100%;resize:vertical;font:13px/1.4 var(--cond)}
