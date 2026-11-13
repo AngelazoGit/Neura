@@ -22,6 +22,8 @@ const LOOPBACK = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
 // cualquier página abierta en este PC podría leer los hilos y las carpetas compartidas.
 const TOKEN = process.env.NEURA_TOKEN || cfg.token || randomBytes(18).toString('base64url');
 const TOKEN_GENERATED = !process.env.NEURA_TOKEN && !cfg.token && !!TOKEN;
+// Token propio del Gateway: solo vale para /v1/* (modelos e inferencia). No da acceso a hilos, archivos ni configuración.
+const GW_TOKEN = process.env.NEURA_GATEWAY_TOKEN || cfg.gatewayToken || randomBytes(18).toString('base64url');
 const TIMEOUT = Number(cfg.timeoutMs || 300000);
 const APP_DIR = cfg.appDir || join(HERE, '..', 'app');
 const SERVE_APP = cfg.serveApp !== false && existsSync(join(APP_DIR, 'index.html'));
@@ -90,6 +92,12 @@ function isLocalBackend(b) {
   const ip = h.split('.').map(Number);
   if (ip.length !== 4 || ip.some((n) => !(n >= 0 && n <= 255))) return false;
   return ip[0] === 127 || ip[0] === 10 || (ip[0] === 192 && ip[1] === 168) || (ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31) || (ip[0] === 100 && ip[1] >= 64 && ip[1] <= 127);
+}
+// Este mismo equipo (no otro ordenador de la red): lo que exige «solo modelos de este equipo».
+function isThisMachine(b) {
+  let h;
+  try { h = new URL(b.url).hostname.replace(/^\[|\]$/g, ''); } catch { return false; }
+  return h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
 async function listModels() {
   const backends = await Promise.all(BACKENDS.map(async (b) => {
@@ -614,17 +622,18 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
   '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 const same = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
-// Token como «Authorization: Bearer» (MCP y clientes OpenAI) o «x-api-key» (clientes Anthropic).
 function authorized(req) {
   if (!TOKEN) return true;
-  return same(req.headers.authorization || '', `Bearer ${TOKEN}`) || same(req.headers['x-api-key'] || '', TOKEN);
+  return same(req.headers.authorization || '', `Bearer ${TOKEN}`);
 }
+// Gateway: su token como «Authorization: Bearer» (clientes OpenAI) o «x-api-key» (clientes Anthropic).
+const authorizedGw = (req) => same(req.headers.authorization || '', `Bearer ${GW_TOKEN}`) || same(req.headers['x-api-key'] || '', GW_TOKEN);
 
 // ---------- Neura Gateway: API compatible con OpenAI y Anthropic ----------
 // Otras herramientas (Continue, Cline, Aider, Open WebUI…) usan Neura como proveedor: por detrás van los
 // backends de este puente y las IAs que la app de PC le pasa con las claves del propio usuario (solo en memoria).
 // Con el modelo «auto» (o uno desconocido) se aplica AUTO-SALTO: si una IA falla o agota su cuota, se prueba la siguiente.
-const gateway = { enabled: false, localOnly: false, freeOnly: false, providers: [], order: [] };
+const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, providers: [], order: [] };
 const gwCool = new Map(); // id → hasta cuándo no se usa
 const backendCache = { at: 0, list: [] };
 async function gwTargets() {
@@ -634,7 +643,7 @@ async function gwTargets() {
       try {
         for (const name of await backendModels(b)) {
           // Ollama ofrece también una API compatible con OpenAI en /v1.
-          out.push({ id: `${b.id}/${name}`, url: b.type === 'ollama' ? `${trim(b.url)}/v1` : trim(b.url), apiKey: b.apiKey, model: name, local: isLocalBackend(b) });
+          out.push({ id: `${b.id}/${name}`, url: b.type === 'ollama' ? `${trim(b.url)}/v1` : trim(b.url), apiKey: b.apiKey, model: name, local: isLocalBackend(b), here: isThisMachine(b) });
         }
       } catch {}
     }
@@ -642,7 +651,7 @@ async function gwTargets() {
   }
   const cloud = gateway.localOnly ? [] : gateway.providers.map((p) => ({ ...p, local: false }));
   // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
-  const all = [...backendCache.list.filter((t) => t.local || (!gateway.localOnly && !gateway.freeOnly)), ...cloud];
+  const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !gateway.freeOnly)), ...cloud];
   const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };
   return all.sort((a, b) => rank(a) - rank(b));
 }
@@ -650,20 +659,33 @@ async function gwPlan(model) {
   const all = await gwTargets();
   const exact = all.find((t) => t.id === model);
   if (exact) return [exact];
+  if (model && model !== 'auto' && !gateway.unknownAsAuto) {
+    throw Object.assign(new Error(`El modelo «${model}» no está en Neura Gateway. Usa «auto» o uno de los que lista GET /v1/models (o activa en Neura «usar auto para nombres desconocidos»).`), { status: 404, code: 'model_not_found' });
+  }
   const ready = all.filter((t) => (gwCool.get(t.id) || 0) <= Date.now());
   return ready.length ? ready : all;
 }
+// Clave inválida: se pausa todo el proveedor (misma URL y clave). Modelo inexistente: solo ese modelo.
+// Cuota: lo que diga Retry-After (o 60 s). Caída o red: 60 s.
 function gwFail(t, status, headers) {
+  const until = (s) => Date.now() + s * 1000;
+  if (status === 401 || status === 403) {
+    for (const x of [...backendCache.list, ...gateway.providers]) if (x.url === t.url && (x.apiKey || '') === (t.apiKey || '')) gwCool.set(x.id, until(3600));
+    return;
+  }
   const ra = Number(headers?.get?.('retry-after'));
-  const wait = status === 429 ? (ra > 0 ? ra : 60) : status === 401 || status === 403 || status === 404 ? 3600 : 60;
-  gwCool.set(t.id, Date.now() + wait * 1000);
+  gwCool.set(t.id, until(status === 429 ? (ra > 0 ? ra : 60) : status === 404 ? 3600 : 60));
 }
 // Llama al primer destino que responda bien; devuelve la respuesta todavía sin leer (para poder reenviar el streaming).
 async function gwCall(model, body, signal) {
   const plan = await gwPlan(model);
   if (!plan.length) throw Object.assign(new Error('No hay modelos disponibles en Neura Gateway'), { status: 503 });
   let last;
+  const pausedBefore = new Map(gwCool);
   for (const t of plan.slice(0, 6)) {
+    // Saltar lo que un fallo de esta misma petición acaba de pausar (p. ej. misma clave inválida);
+    // si todo estaba ya en pausa al empezar, se prueba igualmente como último recurso.
+    if (plan.length > 1 && gwCool.get(t.id) !== pausedBefore.get(t.id)) continue;
     try {
       const r = await fetch(`${t.url}/chat/completions`, {
         method: 'POST', signal: signalFor(TIMEOUT, signal),
@@ -682,8 +704,8 @@ async function gwCall(model, body, signal) {
   throw last || new Error('Sin respuesta');
 }
 const gwError = (res, e, anthropic) => send(res, e.status && e.status < 500 ? e.status : 502, anthropic
-  ? { type: 'error', error: { type: 'api_error', message: e.message } }
-  : { error: { message: e.message, type: 'neura_gateway_error' } });
+  ? { type: 'error', error: { type: e.code === 'model_not_found' ? 'not_found_error' : 'api_error', message: e.message } }
+  : { error: { message: e.message, type: 'neura_gateway_error', ...(e.code ? { code: e.code } : {}) } });
 
 async function gwModels(res) {
   const all = await gwTargets();
@@ -700,7 +722,17 @@ async function gwOpenAI(req, res, body) {
     return send(res, 200, { ...d, model: body.model || t.id });
   }
   res.writeHead(200, { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-  try { for await (const chunk of r.body) res.write(chunk); } catch {}
+  // Si el proveedor se corta antes de terminar, se avisa con un error en lugar de dar la respuesta por buena.
+  const dec = new TextDecoder();
+  let tail = '', ended = false;
+  try {
+    for await (const chunk of r.body) {
+      res.write(chunk);
+      tail = (tail + dec.decode(chunk, { stream: true })).slice(-600);
+      if (/data:\s*\[DONE\]|"finish_reason":\s*"[a-z_]+"/.test(tail)) ended = true;
+    }
+  } catch {}
+  if (!ended && !res.destroyed) res.write(`data: ${JSON.stringify({ error: { message: 'La respuesta del proveedor se interrumpió antes de terminar.', type: 'upstream_interrupted' } })}\n\n`);
   res.end();
 }
 
@@ -763,14 +795,14 @@ async function gwAnthropic(req, res, body) {
   res.writeHead(200, { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
   ev('message_start', { message: { id: msgId(), type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
-  let idx = -1, open = null, finish = null, outTok = 0;
+  let idx = -1, open = null, finish = null, outTok = 0, sawDone = false, broken = false;
   const tools = new Map(); // índice OpenAI → índice de bloque
   const close = () => { if (open) { ev('content_block_stop', { index: idx }); open = null; } };
   try {
     for await (const l of lines(r)) {
       if (!l.startsWith('data:')) continue;
       const raw = l.slice(5).trim();
-      if (raw === '[DONE]') break;
+      if (raw === '[DONE]') { sawDone = true; break; }
       let d; try { d = JSON.parse(raw); } catch { continue; }
       if (d.usage?.completion_tokens) outTok = d.usage.completion_tokens;
       const ch = d.choices?.[0]; if (!ch) continue;
@@ -789,7 +821,12 @@ async function gwAnthropic(req, res, body) {
       }
       if (ch.finish_reason) finish = ch.finish_reason;
     }
-  } catch {}
+  } catch { broken = true; }
+  if (broken || (!finish && !sawDone)) {
+    // Corte a mitad: evento de error de Anthropic, sin message_stop (no es una respuesta completa).
+    if (!res.destroyed) ev('error', { error: { type: 'api_error', message: 'La respuesta del proveedor se interrumpió antes de terminar.' } });
+    return res.end();
+  }
   close();
   ev('message_delta', { delta: { stop_reason: stopReason(finish), stop_sequence: null }, usage: { output_tokens: outTok } });
   ev('message_stop', {});
@@ -858,15 +895,19 @@ async function handle(req, res) {
     if (!authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
     let c; try { c = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
     const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model) });
-    Object.assign(gateway, { enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly,
+    // Si cambió la configuración de un destino (p. ej. la clave), se puede reintentar ya: se quita su pausa.
+    const sig = (p) => `${p.url} ${p.apiKey} ${p.model}`;
+    const before = new Map(gateway.providers.map((p) => [p.id, sig(p)]));
+    Object.assign(gateway, { enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto,
       providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
       order: Array.isArray(c.order) ? c.order.map(String) : [] });
+    for (const p of gateway.providers) if (before.get(p.id) !== sig(p)) gwCool.delete(p.id);
     backendCache.at = 0;
     return send(res, 200, { ok: true, enabled: gateway.enabled, providers: gateway.providers.length });
   }
   if (path.startsWith('/v1/')) {
     const anthropic = path.startsWith('/v1/messages');
-    if (!authorized(req)) return send(res, 401, anthropic ? { type: 'error', error: { type: 'authentication_error', message: 'Token inválido' } } : { error: { message: 'Token inválido', type: 'invalid_api_key' } });
+    if (!authorizedGw(req)) return send(res, 401, anthropic ? { type: 'error', error: { type: 'authentication_error', message: 'Token inválido' } } : { error: { message: 'Token inválido', type: 'invalid_api_key' } });
     if (!gateway.enabled) return send(res, 404, { error: { message: 'Neura Gateway está desactivado: actívalo en Neura → ⬡ → ESTE PC.' } });
     if (path === '/v1/models' && req.method === 'GET') return gwModels(res);
     if (req.method !== 'POST') return send(res, 405, null, { Allow: 'POST, OPTIONS' });
@@ -905,5 +946,6 @@ server.listen(PORT, HOST, () => {
   for (const f of FOLDERS) console.log(`  Carpeta compartida (solo lectura): ${f.name} → ${f.root}`);
   console.log(`  Backends: ${BACKENDS.map((b) => `${b.id}→${b.url}`).join(', ')}`);
   if (TOKEN_GENERATED) console.log(`  TOKEN: ${TOKEN}\n         (generado al azar; fija uno propio con NEURA_TOKEN para que no cambie)`);
+  if (!process.env.NEURA_GATEWAY_TOKEN && !cfg.gatewayToken) console.log(`  TOKEN GATEWAY: ${GW_TOKEN}  (solo para /v1/*; fíjalo con NEURA_GATEWAY_TOKEN)`);
   console.log('');
 });

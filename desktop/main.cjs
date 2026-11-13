@@ -35,6 +35,8 @@ function readJSON(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8'))
 // Token fijo por instalación para que el móvil no tenga que volver a pegarlo.
 const cfg = { port: 8787, lan: false, folders: [], ...readJSON(CFG) };
 if (!cfg.token) cfg.token = randomBytes(18).toString('base64url');
+// Token aparte para el Gateway: lo reciben otras herramientas y no debe dar acceso a hilos ni archivos.
+if (!cfg.gatewayToken) cfg.gatewayToken = randomBytes(18).toString('base64url');
 const saveCfg = () => writeAtomic(CFG, JSON.stringify(cfg, null, 2));
 saveCfg();
 
@@ -71,7 +73,7 @@ function launch(port) {
       env: {
         ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port),
         HOST: cfg.lan ? '0.0.0.0' : '127.0.0.1', NEURA_TOKEN: cfg.token,
-        NEURA_DATA: DATA, NEURA_CONFIG: path.join(DATA, 'puente.json'),
+        NEURA_DATA: DATA, NEURA_CONFIG: path.join(DATA, 'puente.json'), NEURA_GATEWAY_TOKEN: cfg.gatewayToken,
         NEURA_FOLDERS: JSON.stringify(cfg.folders.filter((f) => fs.existsSync(f))),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -111,10 +113,15 @@ async function refreshPairing() {
   state.qr = cfg.lan && ip ? await qr(pairLink(`http://${ip}:${state.port}`)) : null;
   state.qrTs = state.tailscale.https ? await qr(pairLink(`https://${state.tailscale.dns}`)) : null;
 }
+// Espacio libre donde Ollama guarda los modelos (por defecto, en la carpeta del usuario).
+function freeDiskGB() {
+  try { const s = fs.statfsSync(process.env.OLLAMA_MODELS || os.homedir()); return Math.floor((s.bavail * s.bsize) / 2 ** 30); } catch { return null; }
+}
 const bridgeInfo = () => ({
   port: state.port, token: cfg.token, lan: cfg.lan, ips: lanIPs(), error: state.error,
   qr: state.qr, qrTs: state.qrTs, tailscale: state.tailscale, folders: cfg.folders,
   ram: Math.round(os.totalmem() / 2 ** 30), platform: process.platform, // para recomendar modelo local e instalador
+  freeDisk: freeDiskGB(), gatewayToken: cfg.gatewayToken,
 });
 
 // ---------- Tailscale (fuera de casa) ----------
@@ -168,6 +175,7 @@ ipcMain.handle('store-save', (_e, text) => {
 ipcMain.on('keyring', (e) => { e.returnValue = keyring(); });
 ipcMain.on('bridge-info', (e) => { e.returnValue = bridgeInfo(); });
 // Si pierdes el móvil o se filtra el QR: token nuevo; los dispositivos con el anterior dejan de entrar.
+ipcMain.handle('regen-gw-token', async () => { cfg.gatewayToken = randomBytes(18).toString('base64url'); saveCfg(); await startBridge(); return bridgeInfo(); });
 ipcMain.handle('regen-token', async () => { cfg.token = randomBytes(18).toString('base64url'); saveCfg(); await startBridge(); return bridgeInfo(); });
 ipcMain.handle('set-lan', async (_e, lan) => { cfg.lan = !!lan; saveCfg(); await startBridge(); return bridgeInfo(); });
 ipcMain.handle('add-folder', async () => {
