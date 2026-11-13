@@ -50,6 +50,7 @@
     <label class="auto" title="Hilo privado: solo responden tus equipos (el puente de tu PC o los que marques en ⬡). Ningún dato sale a IAs externas.">
       <input type="checkbox" id="private"> 🔒 PRIVADO
     </label>
+    <button type="button" class="auto skillbtn" id="btnSkills" title="Habilidades: procedimientos reutilizables que se aplican a este hilo con cualquier IA">✦ HABILIDADES</button>
     <label class="auto" id="toolsLbl" hidden title="Deja que la IA use las herramientas de tus servidores MCP (buscar y leer tus documentos, estado del PC…)">
       <input type="checkbox" id="useTools"> ƒ HERRAMIENTAS
     </label>
@@ -80,6 +81,21 @@
       <button class="btn sm ghost" id="importBtn">IMPORTAR (.json)</button>
       <input type="file" id="importFile" accept=".json,application/json" hidden>
     </div>
+  </div>
+</section>
+
+<section class="sheet" id="sheetSkills" aria-hidden="true">
+  <div class="sheet-in">
+    <header><h2>HABILIDADES <em>// SKILLS</em></h2><button class="ico close">✕</button></header>
+    <p class="hint">Una habilidad es un procedimiento que repites a menudo (resumir apuntes, redactar con tu estilo…). Actívala en un hilo y se aplicará con cualquier IA, también si AUTO-SALTO cambia de modelo. Es solo texto: no da permisos ni ejecuta nada.</p>
+    <div id="skillList"></div>
+    <div class="row wrap">
+      <button class="btn sm" id="skNew">+ CREAR CON IA</button>
+      <button class="btn sm ghost" id="skBlank">+ EN BLANCO</button>
+      <button class="btn sm ghost" id="skImport">IMPORTAR SKILL.md</button>
+      <input type="file" id="skFile" accept=".md,text/markdown,text/plain" hidden>
+    </div>
+    <div id="skEditor"></div>
   </div>
 </section>
 

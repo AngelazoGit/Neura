@@ -25,6 +25,7 @@ neura/
 8. **Imágenes, PDF, texto y voz.** 📎 adjunta fotos (para IAs con visión), PDF (se extrae el texto en el dispositivo) y archivos de texto o código. 🎤 dicta con Whisper de Groq (gratis) o el dictado del navegador. **LEER** lee una respuesta en voz alta.
 9. **ƒ HERRAMIENTAS.** Las IAs (públicas o locales) pueden usar las herramientas de tus servidores MCP: buscar y leer documentos de carpetas que compartas en el PC, búsqueda semántica en ellos (RAG local con Ollama). El estado del equipo (`system_info`) solo lo ve la IA local, para no enviar el nombre del PC ni IPs internas a proveedores externos.
 10. **Emparejar por QR y fuera de casa.** El PC muestra un QR que conecta el móvil en un toque, y con Tailscale funciona desde cualquier sitio.
+12. **✦ Habilidades (skills).** Crea con IA procedimientos reutilizables, pruébalos, guárdalos con versión y actívalos en un hilo: se aplican con cualquier IA, también tras un AUTO-SALTO. Importación y exportación en formato `SKILL.md` (Agent Skills).
 11. **Claves protegidas.** En el PC se cifran con el llavero del sistema; en el móvil y la web, opcionalmente con un PIN (AES-256). Las claves nunca se sincronizan.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.

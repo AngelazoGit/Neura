@@ -61,7 +61,7 @@ const DEFAULT_INSTRUCTIONS = 'Responde siempre en español y solo en español: n
 // ---------- estado ----------
 const S = Object.assign({
   providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
-  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null,
+  health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [],
 }, load());
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
@@ -542,18 +542,21 @@ function trimTo(h, budget) {
   while (out.length > 2 && tokens(out) > budget) out.splice(out[0].role === 'system' ? 1 : 0, 1);
   return out;
 }
-// Para resumir se prefiere la IA local (gratis y sin límites), luego la elegida y luego las demás disponibles.
-async function summarize(messages, signal) {
+// Petición auxiliar (resúmenes, crear habilidades…) a la primera IA disponible y permitida; con preferMine, antes tus equipos.
+async function ask(messages, signal, preferMine = false) {
   const all = targets().filter((t) => !cooling(t.key));
-  const order = [...all.filter(isMine), ...all.filter((t) => t.kind === 'mcp'), findT(S.target), ...plan(findT(S.target))]
+  const mine = preferMine ? [...all.filter(isMine), ...all.filter((t) => t.kind === 'mcp')] : [];
+  const order = [...mine, ...plan(findT(S.target))]
     .filter((t, i, a) => t && !cooling(t.key) && allowed(t) && a.findIndex((x) => x?.key === t.key) === i);
   let last;
   for (const t of order.slice(0, 3)) {
-    try { const r = await callTarget(t, messages, () => {}, signal); if (r?.trim()) return r.trim(); }
+    try { const r = noThink(await callTarget(t, messages, () => {}, signal)); if (r.trim()) return { text: r.trim(), t }; }
     catch (e) { if (e.name === 'AbortError') throw e; noteFail(t, e); last = e; }
   }
-  throw last || new Error('Sin IA para resumir');
+  throw last || new Error('No hay ninguna IA disponible');
 }
+// Para resumir se prefiere la IA local (gratis y sin límites), luego la elegida y luego las demás disponibles.
+const summarize = async (messages, signal) => (await ask(messages, signal, true)).text;
 // Si el historial no cabe, lo antiguo se resume (y se guarda en el hilo) y se envía resumen + lo reciente.
 async function fitContext(th, hist, budget, signal) {
   if (tokens(hist) <= budget) return hist;
@@ -601,10 +604,19 @@ function failMsg(msg, e, t) {
 }
 // Algunos modelos escriben su razonamiento interno (a menudo en inglés) entre <think>…</think>.
 const noThink = (s) => String(s || '').replace(/<(think|thinking|thought)>[\s\S]*?(<\/\1>|$)/gi, '').trimStart();
-const withInstructions = (hist) => (S.instructions?.trim() ? [{ role: 'system', content: S.instructions.trim() }, ...hist] : hist);
+const activeSkill = () => { const id = thread().skill; return id ? S.skills.find((k) => k.id === id) : null; };
+// Se reconstruye en cada petición desde la versión guardada: no depende de que el resumen del historial la recuerde.
+function withInstructions(hist, skill = activeSkill()) {
+  const sys = [];
+  if (S.instructions?.trim()) sys.push(S.instructions.trim());
+  if (skill) sys.push(`Habilidad activa: «${skill.name}» (v${skill.version}). Sigue este procedimiento:\n\n${skill.instructions}`);
+  return sys.length ? [{ role: 'system', content: sys.join('\n\n---\n\n') }, ...hist] : hist;
+}
 async function runTarget(t, hist, msg, signal, tools) {
   const t0 = performance.now();
   msg.tools = [];
+  const sk = activeSkill();
+  if (sk && !msg.synth) msg.skill = { id: sk.id, v: sk.version, name: sk.name };
   const out = await callTarget(t, withInstructions(hist), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
     tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
   });
@@ -731,8 +743,9 @@ function replyHTML(m) {
   }
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
-    : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button>`;
-  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)}</span><span class="acts">${acts}</span></div>${tools}<div class="txt">${md(m.content)}</div></div>`;
+    : `${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button>`;
+  const skill = m.skill ? `<span class="chip skill">✦ ${esc(m.skill.name)} · v${m.skill.v}</span>` : '';
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}<div class="txt">${md(m.content)}</div></div>`;
 }
 function msgHTML(m) {
   if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}</div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
@@ -761,6 +774,9 @@ function renderLog() {
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   const th = thread();
   $('#private').checked = !!th.private;
+  const sk = activeSkill();
+  $('#btnSkills').textContent = sk ? `✦ ${sk.name.toUpperCase()} · v${sk.version}` : '✦ HABILIDADES';
+  $('#btnSkills').classList.toggle('on', !!sk);
   if (!th.messages.length) {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
@@ -1130,6 +1146,133 @@ async function scanQR() {
 }
 function stopScan() { scanStream?.getTracks().forEach((t) => t.stop()); scanStream = null; $('#scan').hidden = true; }
 
+// ---------- habilidades (skills): procedimientos reutilizables con cualquier IA ----------
+// Formato de intercambio: SKILL.md de Agent Skills (frontmatter name/description + instrucciones).
+// Solo texto: una habilidad no concede permisos ni ejecuta nada; importarla tampoco.
+const slug = (s) => norm(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'habilidad';
+function parseSkillMd(text) {
+  const t = String(text).replace(/^\uFEFF/, '').trim().replace(/^```[\w-]*\n([\s\S]*?)\n```$/, '$1').trim();
+  const m = t.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  if (!m) return { name: '', description: '', instructions: t };
+  const fm = {};
+  for (const l of m[1].split('\n')) { const kv = l.match(/^([\w-]+):\s*(.*)$/); if (kv) fm[kv[1]] = kv[2].replace(/^["']|["']$/g, '').trim(); }
+  return { name: fm.name || '', description: fm.description || '', instructions: m[2].trim() };
+}
+const skillMd = (k) => `---\nname: ${slug(k.name)}\ndescription: ${String(k.description).replace(/\n/g, ' ')}\n---\n\n${k.instructions}\n`;
+let skDraft = null; // { id?, name, description, instructions, mode: 'goal' | 'edit' }
+function renderSkills() {
+  const act = activeSkill();
+  $('#skillList').innerHTML = S.skills.map((k) => `
+    <div class="card ${act?.id === k.id ? 'skill-on' : ''}" data-kid="${k.id}">
+      <div class="head"><b class="srv">✦ ${esc(k.name)}</b><span class="badge local">v${k.version}</span>${act?.id === k.id ? '<span class="badge on">ACTIVA EN ESTE HILO</span>' : ''}</div>
+      <div class="hint">${esc(k.description)}</div>
+      <div class="row wrap">${act?.id === k.id ? '<button class="btn sm ghost" data-sk="off">QUITAR DE ESTE HILO</button>' : '<button class="btn sm" data-sk="use">USAR EN ESTE HILO</button>'}
+        <button class="btn sm ghost" data-sk="edit">EDITAR</button><button class="btn sm ghost" data-sk="export">EXPORTAR</button><button class="btn sm red" data-sk="del">✕</button></div>
+    </div>`).join('') || '<p class="hint">Aún no tienes habilidades. Crea una con IA, en blanco, o importa un SKILL.md.</p>';
+  const d = skDraft, ed = $('#skEditor');
+  if (!d) { ed.innerHTML = ''; return; }
+  ed.innerHTML = d.mode === 'goal' ? `<div class="card">
+      <h4>CREAR CON IA</h4>
+      <label>¿QUÉ QUIERES QUE HAGA?<textarea id="skGoal" rows="3" placeholder="Ej.: convierte mis apuntes en un resumen y 5 preguntas de repaso">${esc(d.goal || '')}</textarea></label>
+      <label>EJEMPLO (opcional)<textarea id="skExample" rows="2" placeholder="Una entrada típica o cómo quieres el resultado">${esc(d.example || '')}</textarea></label>
+      <div class="row"><button class="btn" id="skGen">GENERAR BORRADOR</button><button class="btn sm ghost" id="skCancel">CANCELAR</button></div>
+    </div>` : `<div class="card">
+      <h4>${d.id ? 'EDITAR HABILIDAD' : 'REVISA EL BORRADOR'}</h4>
+      <label>NOMBRE<input id="skName" value="${esc(d.name)}" maxlength="64"></label>
+      <label>CUÁNDO USARLA<input id="skDesc" value="${esc(d.description)}" maxlength="1024"></label>
+      <label>INSTRUCCIONES<textarea id="skInstr" rows="10">${esc(d.instructions)}</textarea></label>
+      <p class="hint" id="skSize"></p>
+      <label>PROBAR CON UNA ENTRADA<textarea id="skSample" rows="2" placeholder="Pega un texto de ejemplo">${esc(d.sample || '')}</textarea></label>
+      <div class="row wrap"><button class="btn sm ghost" id="skTest">PROBAR</button><button class="btn" id="skSave">GUARDAR${d.id ? ' NUEVA VERSIÓN' : ''}</button><button class="btn sm ghost" id="skCancel">CANCELAR</button></div>
+      <div id="skResult"></div>
+    </div>`;
+  skSize();
+}
+function skSize() {
+  const el = $('#skInstr'); if (!el) return;
+  const t = Math.ceil(el.value.length / 3.5);
+  $('#skSize').textContent = `≈ ${t} tokens en cada mensaje${t > 1200 ? ' · es larga: las IAs gratuitas con poco contexto lo notarán' : ''}`;
+}
+const readDraft = () => Object.assign(skDraft, { name: $('#skName').value.trim(), description: $('#skDesc').value.trim(), instructions: $('#skInstr').value.trim(), sample: $('#skSample').value });
+const SK_FORMAT = 'Responde SOLO con el archivo SKILL.md, sin explicaciones ni bloques de código, con este formato exacto:\n---\nname: nombre-en-minusculas-con-guiones\ndescription: Qué hace y cuándo usarla, en una o dos frases.\n---\n\n# Título\n\nInstrucciones en pasos numerados, formato de la respuesta y qué hacer si falta información. No inventes herramientas, archivos ni capacidades. En español, máximo 300 palabras.';
+async function draftSkill(prompt, btn) {
+  btn.disabled = true; btn.textContent = 'GENERANDO…';
+  try {
+    const { text, t } = await ask([{ role: 'system', content: 'Diseñas habilidades (skills) reutilizables para asistentes de IA en formato SKILL.md de Agent Skills.' }, { role: 'user', content: prompt }]);
+    const p = parseSkillMd(text);
+    if (!p.instructions) throw new Error('la IA no devolvió instrucciones');
+    skDraft = { mode: 'edit', name: p.name.replace(/-/g, ' ') || 'Nueva habilidad', description: p.description, instructions: p.instructions };
+    renderSkills(); toast(`Borrador creado con ${t.label}: revísalo y pruébalo`);
+  } catch (e) { toast('Crear habilidad: ' + netHint(e), true); btn.disabled = false; btn.textContent = 'GENERAR BORRADOR'; }
+}
+// Desde una buena respuesta: se extrae el procedimiento y se quitan los datos particulares.
+function skillFromReply(id) {
+  const msgs = thread().messages, i = msgs.findIndex((m) => m.id === id);
+  const user = [...msgs.slice(0, i)].reverse().find((m) => m.role === 'user');
+  const convo = `USUARIO: ${textOf(userContent(user || {}, false))}\n\nIA: ${msgs[i].content}`.slice(0, 8000);
+  openSheet('#sheetSkills');
+  skDraft = { mode: 'goal' }; renderSkills();
+  draftSkill(`Esta conversación salió bien. Extrae el procedimiento reutilizable como una habilidad para repetirlo con otros datos. Sustituye los datos particulares (nombres, rutas, cifras, claves) por descripciones genéricas; no copies el contenido concreto.\n\n${convo}\n\n${SK_FORMAT}`, $('#skGen'));
+}
+$('#btnSkills').onclick = () => { renderSkills(); openSheet('#sheetSkills'); };
+$('#skNew').onclick = () => { skDraft = { mode: 'goal' }; renderSkills(); $('#skGoal').focus(); };
+$('#skBlank').onclick = () => { skDraft = { mode: 'edit', name: '', description: '', instructions: '' }; renderSkills(); $('#skName').focus(); };
+$('#skImport').onclick = () => $('#skFile').click();
+$('#skFile').onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (f.size > 100e3) return toast('SKILL.md demasiado grande (máx. 100 KB)', true);
+  const p = parseSkillMd(await f.text());
+  // Se importa como borrador para revisarlo antes de guardar: el contenido de terceros no es de confianza.
+  skDraft = { mode: 'edit', name: p.name.replace(/-/g, ' ') || f.name.replace(/\.md$/i, ''), description: p.description, instructions: p.instructions };
+  renderSkills(); toast('Revisa la habilidad importada antes de guardarla');
+};
+$('#skEditor').addEventListener('input', (e) => { if (e.target.id === 'skInstr') skSize(); });
+$('#skEditor').addEventListener('click', async (e) => {
+  const id = e.target.id;
+  if (id === 'skCancel') { skDraft = null; renderSkills(); }
+  if (id === 'skGen') {
+    const goal = $('#skGoal').value.trim(), ex = $('#skExample').value.trim();
+    if (!goal) return toast('Describe qué quieres que haga', true);
+    Object.assign(skDraft, { goal, example: ex });
+    draftSkill(`Crea una habilidad para: ${goal}${ex ? `\n\nEjemplo: ${ex}` : ''}\n\n${SK_FORMAT}`, e.target);
+  }
+  if (id === 'skTest') {
+    const d = readDraft();
+    if (!d.instructions || !d.sample.trim()) return toast('Escribe las instrucciones y una entrada de prueba', true);
+    e.target.disabled = true; e.target.textContent = 'PROBANDO…';
+    try {
+      const { text, t } = await ask(withInstructions([{ role: 'user', content: d.sample }], { name: d.name || 'borrador', version: 'prueba', instructions: d.instructions }));
+      $('#skResult').innerHTML = `<div class="reply"><div class="tag"><span>PRUEBA · ${esc(t.label)}</span></div><div class="txt">${md(text)}</div></div>`;
+    } catch (err) { toast('Prueba: ' + netHint(err), true); }
+    e.target.disabled = false; e.target.textContent = 'PROBAR';
+  }
+  if (id === 'skSave') {
+    const d = readDraft();
+    if (!d.name || !d.instructions) return toast('La habilidad necesita nombre e instrucciones', true);
+    const k = d.id && S.skills.find((x) => x.id === d.id);
+    if (k) {
+      const changed = k.name !== d.name || k.description !== d.description || k.instructions !== d.instructions;
+      Object.assign(k, { name: d.name, description: d.description, instructions: d.instructions, version: k.version + (changed ? 1 : 0), updatedAt: Date.now() });
+    } else S.skills.push({ id: uid() + uid(), name: d.name, description: d.description, instructions: d.instructions, version: 1, updatedAt: Date.now() });
+    skDraft = null; save(); renderSkills(); renderLog(); toast('HABILIDAD GUARDADA');
+  }
+});
+$('#skillList').addEventListener('click', (e) => {
+  const act = e.target.dataset.sk, card = e.target.closest('[data-kid]'); if (!act || !card) return;
+  const k = S.skills.find((x) => x.id === card.dataset.kid), th = thread();
+  if (act === 'use' || act === 'off') { th.skill = act === 'use' ? k.id : null; th.ts = Date.now(); save(); renderLog(); syncAll(); if (act === 'use') { closeSheets(); toast(`✦ ${k.name} activa en este hilo`); } }
+  if (act === 'edit') { skDraft = { mode: 'edit', id: k.id, name: k.name, description: k.description, instructions: k.instructions }; }
+  if (act === 'export') download(`SKILL-${slug(k.name)}.md`, skillMd(k), 'text/markdown');
+  if (act === 'del') {
+    if (!confirm(`¿Borrar la habilidad «${k.name}»?`)) return;
+    S.skills = S.skills.filter((x) => x !== k);
+    S.threads.forEach((t) => { if (t.skill === k.id) t.skill = null; });
+    save(); renderLog();
+  }
+  renderSkills();
+});
+
 // ---------- PIN: claves cifradas con AES-GCM ----------
 const vault = { key: null, locked: !!S.vault, sealed: '', timer: null };
 const b64 = (u8) => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -1256,8 +1399,9 @@ $('#mic').onclick = toggleMic;
 $('#app').addEventListener('dragover', (e) => e.preventDefault());
 $('#app').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
 $('#log').addEventListener('click', (e) => {
-  const { copy, speak: sp } = e.target.dataset || {};
+  const { copy, speak: sp, skillify } = e.target.dataset || {};
   if (sp) return speak(sp);
+  if (skillify) return skillFromReply(skillify);
   if (!copy) return;
   const m = thread().messages.find((x) => x.id === copy);
   navigator.clipboard?.writeText(m?.content || '').then(() => toast('COPIADO'), () => toast('No se pudo copiar', true));

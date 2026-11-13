@@ -219,3 +219,11 @@ mark{background:rgba(255,122,0,.35);color:var(--text)}
 .reply.err details{margin-top:4px;color:var(--dim)}
 .reply.err summary{cursor:pointer;font-size:11px}
 .wide-input{width:100%;resize:vertical;font:13px/1.4 var(--cond)}
+
+/* habilidades */
+.skillbtn{background:transparent;color:var(--purple2)}
+.skillbtn.on{color:var(--green);border-color:var(--green)}
+.chip.skill{color:var(--green);border-color:rgba(93,255,122,.4);margin-left:6px}
+.card.skill-on{border-left-color:var(--green)}
+#skEditor h4{margin:0;font:700 12px var(--cond);letter-spacing:.2em;color:var(--orange2)}
+#skEditor textarea{width:100%;resize:vertical;font:13px/1.4 var(--cond)}
