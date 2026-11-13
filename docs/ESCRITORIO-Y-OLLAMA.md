@@ -247,17 +247,23 @@ La IA puede listar, buscar por nombre o contenido, leer archivos de texto y hace
 
 ## 5.6 Neura Gateway: usar Neura desde otras herramientas
 
-Con el **Gateway**, programas como Continue, Cline, Aider u Open WebUI usan Neura como si fuera un proveedor de IA: por detrás van tus IAs gratuitas, tus modelos locales, AUTO-SALTO y SOLO GRATIS.
+Con el **Gateway** conectas tus herramientas a los modelos y proveedores que utilizas mediante Neura, con selección automática y controles de destino y coste. Programas como Continue, Cline, Aider u Open WebUI usan Neura como si fuera un proveedor de IA: por detrás van tus IAs gratuitas, tus modelos locales, AUTO-SALTO y SOLO GRATIS.
+
+La API está probada con los SDK oficiales de OpenAI y Anthropic. Las configuraciones de cada herramienta son **ejemplos**: aún no se han validado con cada una (ver `docs/VALIDACION.md`).
 
 1. En Neura para PC (modo Profesional): **⬡ → ESTE PC → 🔌 NEURA GATEWAY → ACTIVAR GATEWAY**.
 2. Despliega tu herramienta y pulsa **COPIAR**: la configuración ya lleva la URL y el token.
-   - Compatible con OpenAI: `http://127.0.0.1:8787/v1`, clave = token, modelo `auto`.
-   - Compatible con Anthropic: `http://127.0.0.1:8787`, clave = token.
-3. **SOLO MODELOS DE ESTE EQUIPO** limita el Gateway a los modelos del PC.
+   - Compatible con OpenAI: `http://127.0.0.1:8787/v1`, clave = **token del Gateway**, modelo `auto`.
+   - Compatible con Anthropic: `http://127.0.0.1:8787`, clave = token del Gateway.
+3. **SOLO MODELOS DE ESTE EQUIPO** limita el Gateway a los modelos de este PC: ni IAs de internet ni otros ordenadores de tu red.
 
-Con `auto`, si la IA elegida en Neura agota su cuota o falla, el Gateway prueba la siguiente y deja la otra en pausa. Si pides un modelo concreto (por ejemplo `ollama/qwen3:4b`), usa solo ese.
+- **Token del Gateway:** es distinto del token del puente. Solo sirve para pedir respuestas y ver los modelos; no da acceso a tus hilos, archivos ni ajustes. Tiene su propio botón **REGENERAR**.
+- **`auto`:** si la IA elegida en Neura agota su cuota o falla, el Gateway prueba la siguiente y deja la otra en pausa (una clave inválida pausa todo ese proveedor).
+- **Modelo concreto** (por ejemplo `ollama/qwen3:4b`): usa solo ese.
+- **Modelo desconocido** (por ejemplo, una errata): da error y no se envía a ninguna IA, salvo que actives **USAR «auto» PARA NOMBRES DE MODELO DESCONOCIDOS**. Para Claude Code, la configuración de ejemplo ya fija `ANTHROPIC_MODEL=auto`.
+- **Si la IA se corta a mitad de una respuesta**, la herramienta recibe un error, no una respuesta incompleta como si estuviera terminada.
 
-> Cualquier programa del PC que tenga el token, y otros equipos si abres el puente a tu red, usará tus claves y tus cuotas gratuitas. Si el token se filtra, pulsa **REGENERAR**. Los modelos gratuitos rinden peor que los grandes en tareas largas de programación con herramientas.
+> Cualquier programa del PC que tenga el token del Gateway, y otros equipos si abres el puente a tu red, usará tus claves y tus cuotas gratuitas. Si se filtra, pulsa **REGENERAR**. El Gateway recibe las claves en memoria y no crea una copia adicional en disco. Los modelos gratuitos rinden peor que los grandes en tareas largas de programación con herramientas.
 
 ---
 
