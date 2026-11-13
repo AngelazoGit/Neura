@@ -114,6 +114,7 @@ async function refreshPairing() {
 const bridgeInfo = () => ({
   port: state.port, token: cfg.token, lan: cfg.lan, ips: lanIPs(), error: state.error,
   qr: state.qr, qrTs: state.qrTs, tailscale: state.tailscale, folders: cfg.folders,
+  ram: Math.round(os.totalmem() / 2 ** 30), platform: process.platform, // para recomendar modelo local e instalador
 });
 
 // ---------- Tailscale (fuera de casa) ----------
