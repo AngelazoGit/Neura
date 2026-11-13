@@ -163,13 +163,17 @@ function score(t) {
 }
 // ---------- política de destinos: gasto y privacidad ----------
 // "Gratis" solo si es comprobable: proveedor del nivel gratuito (en OpenRouter, variantes :free) o un equipo tuyo.
+// Backend del puente que atiende un modelo MCP; el puente indica si es local (tu equipo o tu red privada).
+const mcpBackend = (t) => S.mcp.find((s) => s.id === t.sid)?.backends?.find((b) => t.model.startsWith(b.id + '/'));
+const localBackend = (t) => mcpBackend(t)?.local === true;
+// Un puente puede reenviar a una API externa de pago: solo cuenta como gratis si su backend es local.
 function isFree(t) {
-  if (t.kind === 'mcp') return true;
+  if (t.kind === 'mcp') return localBackend(t);
   const p = S.providers.find((x) => x.id === t.pid);
   return p?.tier === 'free' && (!p.freeOnly || /:free$/.test(t.model));
 }
-// "Privado": solo el puente de este PC o servidores que hayas marcado como equipo tuyo.
-const isMine = (t) => t.kind === 'mcp' && S.mcp.some((s) => s.id === t.sid && (s.local || s.mine));
+// "Privado": un equipo tuyo (puente de este PC o marcado como tuyo) y además con backend local.
+const isMine = (t) => t.kind === 'mcp' && localBackend(t) && S.mcp.some((s) => s.id === t.sid && (s.local || s.mine));
 const allowed = (t) => (!S.freeOnly || isFree(t)) && (!thread().private || isMine(t));
 const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : 'es de pago o de coste desconocido y tienes SOLO GRATIS activado');
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
@@ -364,6 +368,7 @@ async function callTarget(t, messages, onDelta, signal, opt = {}) {
     const args = { model: t.model, messages };
     // Con herramientas, el puente deja que el modelo local use los archivos compartidos del PC.
     if (opt.tools && (s.tools || []).some((x) => x.name === 'read_file')) args.tools = true;
+    if (thread().private) args.local_only = true; // el puente también lo comprueba
     let acc = '';
     const r = await mcpRpc(s, 'tools/call', { name: 'chat', arguments: args }, { signal, onProgress: (d) => { acc += d; onDelta(acc); } });
     const txt = (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
@@ -488,7 +493,8 @@ async function syncWith(s) {
   const startedAt = Date.now();
   try {
     // Solo se envía lo cambiado desde la última vez; los mensajes a medias no salen del dispositivo.
-    const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length))
+    // Los hilos privados solo se copian a tus equipos.
+    const out = S.threads.filter((t) => t.ts > (s.pushedAt || 0) && (t.deleted || t.messages.length) && (!t.private || s.local || s.mine))
       .map((t) => ({ ...t, messages: t.messages.filter((m) => !m.pending) }));
     const newer = (list) => list.filter((x) => (x.updatedAt || 0) > (s.pushedAt || 0));
     const collections = { skills: newer(S.skills), projects: newer(S.projects) };
@@ -639,14 +645,14 @@ function withInstructions(hist, skill = activeSkill()) {
   if (skill) sys.push(`Habilidad activa: «${skill.name}» (v${skill.version}). Sigue este procedimiento:\n\n${skill.instructions}`);
   return sys.length ? [{ role: 'system', content: sys.join('\n\n---\n\n') }, ...hist] : hist;
 }
-async function runTarget(t, hist, msg, signal, tools) {
+// skill: la versión fijada al enviar; una sincronización durante los reintentos no la cambia.
+async function runTarget(t, hist, msg, signal, tools, sk = null) {
   const t0 = performance.now();
   msg.tools = [];
-  const sk = activeSkill();
-  if (sk && !msg.synth) msg.skill = { id: sk.id, v: sk.version, name: sk.name };
+  if (sk) msg.skill = { id: sk.id, v: sk.version, name: sk.name };
   // A un modelo sin visión, las imágenes de mensajes anteriores le llegan como una nota de texto.
   if (S.health[t.key]?.noVision) hist = hist.map((m) => (Array.isArray(m.content) ? { ...m, content: `${textOf(m.content)}\n[imagen adjunta, no visible para este modelo]` } : m));
-  const out = await callTarget(t, withInstructions(hist), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
+  const out = await callTarget(t, withInstructions(hist, sk), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
     tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
   });
   msg.content = noThink(out) || msg.content || '(respuesta vacía)';
@@ -664,7 +670,11 @@ async function send(text, files = []) {
   setBusy(true);
   const signal = abortCtl.signal;
   try {
-    let hist = await fitContext(th, buildHistory(th), S.ctxTokens, signal);
+    const skill = activeSkill() && JSON.parse(JSON.stringify(activeSkill()));
+    // El presupuesto cuenta toda la petición (instrucciones, memoria del proyecto y habilidad) y deja sitio para la respuesta.
+    const RESERVE = 800;
+    const budget = Math.max(800, S.ctxTokens - tokens(withInstructions([], skill)) - RESERVE);
+    let hist = await fitContext(th, buildHistory(th), budget, signal);
     renderLog();
     const first = findT(S.target);
     // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
@@ -674,7 +684,7 @@ async function send(text, files = []) {
     if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
     if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
     else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
-    else if (S.council) await sendCouncil(th, hist, first, signal, needs);
+    else if (S.council) await sendCouncil(th, hist, first, signal, needs, skill);
     else {
       let attempts = 0, ctxRetried = false;
       for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
@@ -687,7 +697,7 @@ async function send(text, files = []) {
         attempts++;
         const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now() };
         msgs.push(msg); renderLog();
-        try { await runTarget(t, hist, msg, signal, S.useTools); break; }
+        try { await runTarget(t, hist, msg, signal, S.useTools, skill); break; }
         catch (e) {
           if (isCtxErr(e) && !ctxRetried) {
             // No cabía en el contexto de este modelo: se comprime a la mitad y se reintenta con la misma IA.
@@ -724,7 +734,7 @@ function councilMembers(first, needs = {}) {
   }
   return out;
 }
-async function sendCouncil(th, hist, first, signal, needs = {}) {
+async function sendCouncil(th, hist, first, signal, needs = {}, skill = null) {
   const group = uid();
   const members = councilMembers(first, needs);
   const runs = members.map((t) => {
@@ -734,7 +744,7 @@ async function sendCouncil(th, hist, first, signal, needs = {}) {
   });
   renderLog();
   await Promise.all(runs.map(async ({ t, msg }) => {
-    try { await runTarget(t, hist, msg, signal, S.useTools); }
+    try { await runTarget(t, hist, msg, signal, S.useTools, skill); }
     catch (e) { failMsg(msg, e, t); }
     schedule(msg);
   }));
@@ -1144,7 +1154,7 @@ function renderAttach() {
 // ---------- voz: dictado y lectura en voz alta ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null;
-const sttProvider = () => S.providers.find((p) => p.enabled !== false && p.apiKey && PRESETS[p.preset]?.stt);
+const sttProvider = () => S.providers.find((p) => p.enabled !== false && p.apiKey && PRESETS[p.preset]?.stt && (!S.freeOnly || p.tier === 'free'));
 async function multipart(fields, filename, blob) {
   const b = '----neura' + uid() + uid(), enc = new TextEncoder(), parts = [];
   for (const [k, v] of Object.entries(fields)) parts.push(enc.encode(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
@@ -1173,6 +1183,8 @@ function insertText(t) {
 const micUI = (on) => { $('#mic').classList.toggle('rec', on); $('#mic').setAttribute('aria-pressed', on); };
 async function toggleMic() {
   if (rec) { rec.stop(); return; }
+  // El dictado envía la voz a un servicio externo (Groq/OpenAI o el del navegador): no en hilos privados.
+  if (thread().private) return toast('🔒 Hilo privado: el dictado enviaría tu voz a un servicio externo, así que está desactivado', true);
   const p = sttProvider();
   if (!p && SR) {
     // Sin clave de Groq/OpenAI: dictado del propio navegador.
@@ -1284,6 +1296,7 @@ function renderSkills() {
       <div class="row"><button class="btn" id="skGen">GENERAR BORRADOR</button><button class="btn sm ghost" id="skCancel">CANCELAR</button></div>
     </div>` : `<div class="card">
       <h4>${d.id ? 'EDITAR HABILIDAD' : 'REVISA EL BORRADOR'}</h4>
+      ${(() => { const k = d.id && S.skills.find((x) => x.id === d.id); return k?.history?.length ? `<div class="hint">Versiones anteriores: ${k.history.slice().reverse().map((h) => `<button type="button" class="btn sm ghost" data-restore="${h.version}" title="${esc(new Date(h.ts).toLocaleString())}">v${h.version}</button>`).join(' ')} · cargar una la guarda como versión nueva</div>` : ''; })()}
       <label>NOMBRE<input id="skName" value="${esc(d.name)}" maxlength="64"></label>
       <label>CUÁNDO USARLA<input id="skDesc" value="${esc(d.description)}" maxlength="1024"></label>
       <label>INSTRUCCIONES<textarea id="skInstr" rows="10">${esc(d.instructions)}</textarea></label>
@@ -1366,6 +1379,11 @@ $('#skEditor').addEventListener('input', (e) => { if (e.target.id === 'skInstr')
 $('#skEditor').addEventListener('click', async (e) => {
   const id = e.target.id;
   if (id === 'skCancel') { skDraft = null; renderSkills(); }
+  const rv = e.target.dataset.restore;
+  if (rv) {
+    const h = S.skills.find((x) => x.id === skDraft.id)?.history?.find((x) => String(x.version) === rv);
+    if (h) { Object.assign(skDraft, { name: h.name, description: h.description, instructions: h.instructions }); renderSkills(); toast(`v${h.version} cargada: pulsa GUARDAR para restaurarla`); }
+  }
   if (id === 'skGen') {
     const goal = $('#skGoal').value.trim(), ex = $('#skExample').value.trim();
     if (!goal) return toast('Describe qué quieres que haga', true);
@@ -1388,6 +1406,8 @@ $('#skEditor').addEventListener('click', async (e) => {
     const k = d.id && S.skills.find((x) => x.id === d.id);
     if (k) {
       const changed = k.name !== d.name || k.description !== d.description || k.instructions !== d.instructions;
+      // Las versiones anteriores se guardan sin cambios para poder consultarlas o restaurarlas.
+      if (changed) k.history = [...(k.history || []), { version: k.version, name: k.name, description: k.description, instructions: k.instructions, ts: k.updatedAt }].slice(-20);
       Object.assign(k, { name: d.name, description: d.description, instructions: d.instructions, version: k.version + (changed ? 1 : 0), updatedAt: Date.now() });
     } else S.skills.push({ id: uid() + uid(), name: d.name, description: d.description, instructions: d.instructions, version: 1, updatedAt: Date.now() });
     skDraft = null; save(); renderSkills(); renderLog(); syncAll(); toast('HABILIDAD GUARDADA');

@@ -186,3 +186,8 @@ test('threads_sync también sincroniza habilidades y proyectos (gana el más rec
   const borrado = await sync({ since: a.rev, collections: { skills: [{ id: 'k1', deleted: true, updatedAt: 20 }] } });
   assert.equal(borrado.collections.skills[0].deleted, true);
 });
+
+test('backends: local si están en este equipo o en la red privada; local_only rechaza los externos', async () => {
+  const r = await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).json();
+  for (const b of r.result.structuredContent.backends) assert.equal(b.local, /127\.0\.0\.1|localhost/.test(b.url), b.url);
+});

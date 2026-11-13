@@ -79,13 +79,23 @@ async function backendModels(b) {
   return (d.data || []).map((m) => m.id);
 }
 
+// Backend local = corre en este equipo o en tu red privada (LAN, Tailscale). Se puede forzar con "local": true/false en config.
+function isLocalBackend(b) {
+  if (typeof b.local === 'boolean') return b.local;
+  let h;
+  try { h = new URL(b.url).hostname.replace(/^\[|\]$/g, ''); } catch { return false; }
+  if (h === 'localhost' || h === '::1' || /\.(local|lan|home\.arpa|ts\.net)$/i.test(h)) return true;
+  const ip = h.split('.').map(Number);
+  if (ip.length !== 4 || ip.some((n) => !(n >= 0 && n <= 255))) return false;
+  return ip[0] === 127 || ip[0] === 10 || (ip[0] === 192 && ip[1] === 168) || (ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31) || (ip[0] === 100 && ip[1] >= 64 && ip[1] <= 127);
+}
 async function listModels() {
   const backends = await Promise.all(BACKENDS.map(async (b) => {
     try {
       const names = await backendModels(b);
-      return { id: b.id, type: b.type, url: b.url, online: true, models: names };
+      return { id: b.id, type: b.type, url: b.url, local: isLocalBackend(b), online: true, models: names };
     } catch (e) {
-      return { id: b.id, type: b.type, url: b.url, online: false, error: e.cause?.code || e.message, models: [] };
+      return { id: b.id, type: b.type, url: b.url, local: isLocalBackend(b), online: false, error: e.cause?.code || e.message, models: [] };
     }
   }));
   const models = backends.flatMap((b) => b.models.map((name) => ({ id: `${b.id}/${name}`, backend: b.id, name })));
@@ -182,8 +192,10 @@ async function round(b, name, msgs, { tools, onDelta, signal, temperature, max_t
 }
 
 const MAX_ROUNDS = 6;
-async function chat({ model, messages, system, temperature, max_tokens, tools }, ctx = {}) {
+async function chat({ model, messages, system, temperature, max_tokens, tools, local_only }, ctx = {}) {
   const [b, name] = backendFor(model);
+  // Hilo privado: el puente también se niega a reenviar a un backend externo.
+  if (local_only && !isLocalBackend(b)) throw new Error(`El backend ${b.id} no es local y este hilo es privado`);
   if (!Array.isArray(messages) || !messages.length) throw new Error('messages vacío');
   const msgs = [
     ...(system ? [{ role: 'system', content: system }] : []),
@@ -538,6 +550,7 @@ const TOOLS = [
       messages: { type: 'array', items: { type: 'object', required: ['role', 'content'], properties: {
         role: { type: 'string', enum: ['system', 'user', 'assistant'] }, content } } },
       system: { type: 'string' }, temperature: { type: 'number' }, max_tokens: { type: 'integer' },
+      local_only: { type: 'boolean', description: 'Rechazar si el backend no es local (hilos privados)' },
       ...(FOLDERS.length ? { tools: { type: 'boolean', description: 'Deja que el modelo use las carpetas compartidas antes de responder' } } : {}) } } },
   { name: 'system_info', title: 'Estado del equipo',
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
