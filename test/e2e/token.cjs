@@ -1,0 +1,31 @@
+// Regenerar token: el antiguo se rechaza, el nuevo funciona y el PC se reconecta solo.
+const { _electron } = require('playwright'); const fs = require('fs'), path = require('path');
+const mocks = require('./mocks.cjs');
+const ROOT = path.join(__dirname, '../../desktop');
+const UD = fs.mkdtempSync(path.join(require('os').tmpdir(), 'neura-ud-'));
+let failures = 0; const ok = (c, m) => { console.log(c ? '✓' : '✗', m); if (!c) failures++; };
+const call = (port, token) => fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then((r) => r.status);
+(async () => {
+  await mocks.start();
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const w = await app.firstWindow();
+  w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
+  w.on('dialog', (d) => d.accept());
+  await w.waitForSelector('#target option', { state: 'attached' }); await w.waitForFunction(() => typeof S !== 'undefined' && S.mcp[0]?.status === 'on', null, { timeout: 20000 });
+  const old = await w.evaluate(() => window.neuraDesktop.bridge());
+  ok(await call(old.port, old.token) === 200, 'con el token actual el puente responde');
+  await w.click('#btnMcp'); await w.check('[data-act=lan]');
+  await w.waitForSelector('[data-act=regentoken]');
+  await w.click('[data-act=regentoken]');
+  await w.waitForFunction((t) => S.mcp[0].token !== t && S.mcp[0].status === 'on', old.token, { timeout: 15000 });
+  const neu = await w.evaluate(() => window.neuraDesktop.bridge());
+  ok(await call(neu.port, old.token) === 401, 'el token antiguo es rechazado (401)');
+  ok(await call(neu.port, neu.token) === 200, 'el token nuevo funciona');
+  await w.waitForFunction(() => S.mcp[0]?.status === 'on', null, { timeout: 10000 }).then(() => ok(true, 'ESTE PC se reconecta solo con el token nuevo'), () => ok(false, 'reconexión'));
+  ok(await w.evaluate((t) => S.mcp[0].token === t, neu.token), 'la app guarda el token nuevo');
+  ok((await w.$eval('#mcpList', (e) => e.innerText)).includes(neu.token) && !!(await w.$('.qr img')), 'la tarjeta muestra el token y el QR nuevos');
+  const cfg = JSON.parse(fs.readFileSync(path.join(UD, 'escritorio.json'), 'utf8'));
+  ok(cfg.token === neu.token, 'el token nuevo se conserva al reiniciar (escritorio.json)');
+  await app.close();
+  console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });

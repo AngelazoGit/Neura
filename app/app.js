@@ -791,7 +791,7 @@ async function send(text, files = []) {
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
 function councilMembers(first, needs = {}) {
-  const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key) && allowed(t));
+  const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key) && allowed(t) && capable(t, needs));
   if (chosen.length >= 2) return chosen.slice(0, 5);
   const seen = new Set(), out = [];
   for (const t of plan(first, needs)) {
@@ -1346,9 +1346,19 @@ function parseSkillMd(text) {
   const t = String(text).replace(/^\uFEFF/, '').trim().replace(/^```[\w-]*\n([\s\S]*?)\n```$/, '$1').trim();
   const m = t.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
   if (!m) return { name: '', description: '', instructions: t };
+  // Frontmatter YAML simple: «clave: valor», bloques «>» (une con espacios) y «|» (conserva saltos)
+  // y continuaciones sangradas. shortcut: sin listas ni objetos anidados, que Agent Skills no usa en name/description.
   const fm = {};
-  for (const l of m[1].split('\n')) { const kv = l.match(/^([\w-]+):\s*(.*)$/); if (kv) fm[kv[1]] = kv[2].replace(/^["']|["']$/g, '').trim(); }
-  return { name: fm.name || '', description: fm.description || '', instructions: m[2].trim() };
+  let key = null, mode = '';
+  for (const l of m[1].split('\n')) {
+    const kv = l.match(/^([\w-]+):\s*(.*)$/);
+    if (kv) {
+      key = kv[1]; const v = kv[2].trim();
+      mode = /^[>|][+-]?$/.test(v) ? v[0] : ' ';
+      fm[key] = mode === ' ' ? v.replace(/^["']|["']$/g, '') : '';
+    } else if (key && /^\s+\S/.test(l)) fm[key] += (fm[key] ? (mode === '|' ? '\n' : ' ') : '') + l.trim();
+  }
+  return { name: fm.name || '', description: (fm.description || '').trim(), instructions: m[2].trim() };
 }
 const skillMd = (k) => `---\nname: ${slug(k.name)}\ndescription: ${String(k.description).replace(/\n/g, ' ')}\n---\n\n${k.instructions}\n`;
 let skDraft = null; // { id?, name, description, instructions, mode: 'goal' | 'edit' }
