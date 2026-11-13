@@ -19,6 +19,7 @@ const lastQ = () => { const x = mocks.log.filter((l) => l.model).at(-1); return 
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForSelector('.wizard', { timeout: 15000 });
   ok(true, 'sin IAs, la pantalla de inicio muestra el asistente de configuración');
+  await w.click('[data-wz=cloud]'); // en el PC el asistente empieza por «IA en este equipo»
   await w.selectOption('#wzPreset', 'groq');
   ok((await w.getAttribute('#wzKey', 'href')).includes('console.groq.com'), 'el enlace de la clave cambia según la IA elegida');
   await w.selectOption('#wzPreset', 'gemini');

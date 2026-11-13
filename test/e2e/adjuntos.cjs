@@ -67,7 +67,7 @@ const setT = (p, k) => p.evaluate((k) => { const s = document.querySelector('#ta
   await p.click('#log .msg.user:last-of-type [data-branch], #log .msg.user [data-branch] >> nth=-1');
   await p.waitForTimeout(500);
   ok((await p.evaluate(() => blobs.keys())).length === keys2 && keys2 === keys1 + 1, 'una rama comparte la imagen con el hilo original (no la duplica)');
-  await p.reload(); await p.waitForSelector('#log');
+  await p.reload(); await p.waitForSelector('#log .msg'); // #log existe desde el HTML: esperar a que se pinten los mensajes
   ok((await p.$$('#log .thumb')).length >= 1 && !(await p.$('#log .chip.off')), 'tras reiniciar, la rama conserva sus imágenes');
 
   // 4. PDF escaneado: páginas idénticas antes y después de guardar

@@ -83,10 +83,20 @@ const openai = http.createServer(async (req, res) => {
   }
 });
 
+const ollamaModels = ['qwen3:4b'];
 const ollama = http.createServer(async (req, res) => {
   const raw = await body(req);
   res.setHeader('content-type', 'application/json');
-  if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'qwen3:4b' }] }));
+  if (req.url === '/api/tags') return res.end(JSON.stringify({ models: ollamaModels.map((name) => ({ name })) }));
+  if (req.url === '/api/pull') {
+    // Descarga simulada: progreso por trozos y, al final, el modelo queda disponible.
+    const { model } = JSON.parse(raw);
+    res.setHeader('content-type', 'application/x-ndjson');
+    res.write(JSON.stringify({ status: 'pulling manifest' }) + '\n');
+    for (let done = 0; done <= 100; done += 25) { res.write(JSON.stringify({ status: 'downloading', total: 100, completed: done }) + '\n'); await sleep(150); }
+    ollamaModels.push(model);
+    return res.end(JSON.stringify({ status: 'success' }) + '\n');
+  }
   if (req.url === '/api/embed') {
     const j = JSON.parse(raw);
     const vec = (s) => { const v = new Array(26).fill(0); for (const ch of s.toLowerCase()) { const k = ch.charCodeAt(0) - 97; if (k >= 0 && k < 26) v[k]++; } return v; };
@@ -106,4 +116,10 @@ const ollama = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ message: { role: 'assistant', content: text }, done: true }));
 });
 
-module.exports = { start: () => Promise.all([new Promise((r) => openai.listen(5601, r)), new Promise((r) => ollama.listen(11434, r))]), calls, log };
+module.exports = {
+  start: () => Promise.all([new Promise((r) => openai.listen(5601, r)), new Promise((r) => ollama.listen(11434, r))]),
+  // Para simular un equipo sin Ollama instalado y su instalación posterior.
+  stopOllama: () => new Promise((r) => { ollama.closeAllConnections?.(); ollama.close(() => r()); }),
+  startOllama: () => new Promise((r) => ollama.listen(11434, r)),
+  calls, log, ollamaModels,
+};
