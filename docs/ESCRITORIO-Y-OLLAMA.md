@@ -139,6 +139,8 @@ Detalles:
 |---|---|
 | **Instrucciones para todas las IAs** | ⚙ → INSTRUCCIONES. Por defecto: responder solo en español y de forma concisa. Se envían en cada mensaje; puedes cambiarlas (tono, longitud, idioma) o dejarlas vacías. |
 | **Modelos retirados** | Si un proveedor retira un modelo (p. ej. Gemini 2.5), Neura lo marca como "ya no disponible", pasa a otra IA y descarga la lista de modelos vigente. Gemini usa por defecto los alias `gemini-flash-latest` y `gemini-flash-lite-latest`, que siempre apuntan al modelo actual. |
+| **SOLO GRATIS** | ⚙ → GASTO. Neura solo usa IAs del nivel gratuito (en OpenRouter, modelos `:free`) y tus equipos. Las de pago o de coste desconocido salen con ⛔ y no se usan en AUTO-SALTO, CONSEJO ni resúmenes. |
+| **🔒 PRIVADO** | Casilla en la barra, para cada hilo. Solo responden tus equipos: el puente de este PC o los servidores marcados en ⬡ como **ES UN EQUIPO MÍO** (los emparejados por QR lo están). Ningún dato del hilo sale a IAs externas. Ojo: si en un puente configuras como backend una IA externa, esa IA sí recibe los datos. |
 | **AUTO-SALTO inteligente** | Si una IA agota su cuota, Neura sabe hasta cuándo (⏳ en el desplegable y en ⚙) y no la vuelve a probar antes de tiempo. Las demás se ordenan por éxito y velocidad. **REINTENTAR YA** en ⚙ borra la espera. |
 | **Memoria de contexto** | ⚙ → MEMORIA DE CONTEXTO (6000 tokens por defecto). Al pasar ese tamaño, lo antiguo se resume (🗜 VER RESUMEN en el chat). Con Ollama, el resumen lo hace tu IA local y no gasta cuota. |
 | **⚖ CONSEJO** | Actívalo en la barra. Responden 3 IAs de proveedores distintos (o las que elijas en ⚙) y la IA elegida escribe la síntesis. |
