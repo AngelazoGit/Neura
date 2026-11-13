@@ -1,7 +1,7 @@
 {
   "name": "neura-desktop",
   "productName": "Neura",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Neura para PC (Windows, macOS, Linux): chat multi-IA, hilos guardados en disco y puente MCP integrado",
   "author": "AngelazoGit (https://github.com/AngelazoGit)",
@@ -45,15 +45,22 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "Neura"
+      "shortcutName": "Neura",
+      "artifactName": "Neura-${version}-Windows-instalador.${ext}"
     },
     "mac": {
-      "target": "dmg",
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.productivity"
     },
     "linux": {
@@ -63,6 +70,9 @@
       ],
       "category": "Utility",
       "maintainer": "AngelazoGit"
+    },
+    "portable": {
+      "artifactName": "Neura-${version}-Windows-portable.${ext}"
     }
   },
   "repository": {
