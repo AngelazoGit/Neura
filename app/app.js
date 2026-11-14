@@ -268,7 +268,7 @@ const costOf = (p, inT, outT) => (priced(p) ? ((+p.price.in || 0) * inT + (+p.pr
 const localMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return +d; };
 // Peticiones de hoy a un proveedor (las rechazadas por cuota no cuentan: el proveedor no las atendió).
 const provToday = (p) => Object.entries(S.usage?.[today()] || {}).reduce((n, [k, v]) => n + (k.startsWith(p.id + '::') ? v.n + (v.err || 0) : 0), 0);
-let usageRev = 0;
+let usageRev = 0, gwUse = null, gwSpentNow = null; // lo que cuenta el puente del PC (se pide al abrir ⚙ y antes de enviar)
 function recordUse(t, messages, out, e) {
   if (e && (e.name === 'AbortError' || e.status === 429)) return;
   const day = ((S.usage ||= {})[today()] ||= {});
@@ -295,11 +295,11 @@ function recordUse(t, messages, out, e) {
 // Gasto de hoy y del mes: el de esta app más el del Gateway de este PC (si lo hay).
 let spentMemo = { rev: -1 };
 function spent() {
-  const day = today(), rev = `${usageRev}|${day}|${JSON.stringify(S.gwSpent || null)}`;
+  const day = today(), rev = `${usageRev}|${day}|${JSON.stringify(gwSpentNow)}`;
   if (spentMemo.rev === rev) return spentMemo.v;
   let d = 0, m = 0;
   for (const [k, v] of Object.entries(S.usage || {})) for (const x of Object.values(v)) { if (k === day) d += x.eur; if (monthOf(k) === monthOf(day)) m += x.eur; }
-  const g = S.gwSpent && monthOf(S.gwSpent.date) === monthOf(day) ? S.gwSpent : null;
+  const g = gwSpentNow && monthOf(gwSpentNow.date) === monthOf(day) ? gwSpentNow : null;
   const v = { day: d + (g?.date === day ? g.day : 0), month: m + (g ? g.month : 0), app: { day: d, month: m } };
   spentMemo = { rev, v };
   return v;
@@ -967,12 +967,8 @@ async function saveImage(id) {
   const f = thread().messages.find((m) => m.id === id)?.files?.find((x) => x.kind === 'image' && x.data);
   if (!f) return;
   if (DESK) { const p = await DESK.saveFile(f.name, f.data.split(',')[1], 'base64'); if (p) toast('GUARDADO: ' + p); return; }
-  const blob = toBlob(f.data), file = new File([blob], f.name, { type: blob.type });
-  if (CAP && navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: f.name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(file); a.download = f.name;
-  document.body.append(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  const blob = toBlob(f.data);
+  download(f.name, blob, blob.type);
 }
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
@@ -1455,8 +1451,8 @@ function usageHTML() {
     return `<tr><td>${esc(name)}${lim ? `<progress max="${lim}" value="${Math.min(used, lim)}"></progress>` : ''}</td><td>${used}${lim ? ` / ${lim}` : ''}</td><td>${fmtTok(d.tok)}</td><td>${money(p, d.eur)}</td><td>${money(p, m.eur)}</td></tr>`;
   };
   const rows = [...S.providers.map((p) => row(p.name, (k) => k.startsWith(p.id + '::'), p)), row('⬡ Tus equipos', (k) => k.startsWith('mcp:'), null)].join('');
-  const gw = S.gwUsage, gwRows = gw ? Object.entries(gw.today || {}).map(([id, u]) => `<tr><td>${esc(id)}</td><td>${u.n + (u.err || 0)}</td><td>${fmtTok(u.in + u.out)}</td><td>${eur(u.eur)}</td><td>${eur(gw.month?.[id]?.eur || 0)}</td></tr>`).join('') : '';
-  const unpriced = S.providers.filter((p) => p.enabled !== false && p.tier !== 'free' && !priced(p) && !(S.freeOnly));
+  const gw = gwUse, gwRows = gw ? Object.entries(gw.today || {}).map(([id, u]) => `<tr><td>${esc(id)}</td><td>${u.n + (u.err || 0)}</td><td>${fmtTok(u.in + u.out)}</td><td>${eur(u.eur)}</td><td>${eur(gw.month?.[id]?.eur || 0)}</td></tr>`).join('') : '';
+  const unpriced = S.providers.filter((p) => p.enabled !== false && p.tier !== 'free' && !priced(p) && !S.freeOnly);
   const head = '<thead><tr><th>IA</th><th>HOY</th><th>TOKENS</th><th>€ HOY</th><th>€ MES</th></tr></thead>';
   return `<h3>📊 CONSUMO</h3>
     <p class="hint" id="usageSum">${usageSumHTML()}</p>
@@ -1526,8 +1522,8 @@ async function refreshGwUsage() {
     const r = await xfetch(`http://127.0.0.1:${b.port}/neura/gateway`, { headers: { Authorization: 'Bearer ' + b.token } });
     if (!r.ok) return;
     const j = await r.json();
-    S.gwUsage = { today: j.today, month: j.month, cache: j.cache };
-    S.gwSpent = { date: j.date, day: j.spent.day, month: j.spent.month };
+    gwUse = { today: j.today, month: j.month, cache: j.cache };
+    gwSpentNow = { date: j.date, day: j.spent.day, month: j.spent.month };
   } catch {}
 }
 // Si estás escribiendo en el panel, solo se actualiza el resumen (para no borrar el campo que editas).
@@ -1772,7 +1768,7 @@ function fromChatGPT(list) {
     const msgs = [];
     for (let id = c.current_node; id && c.mapping?.[id]; id = c.mapping[id].parent) {
       const m = c.mapping[id].message, role = m?.author?.role;
-      if (!m || !['user', 'assistant'].includes(role) || m.metadata?.is_visually_hidden_from_conversation) continue;
+      if (!m || !['user', 'assistant'].includes(role) || m.metadata?.is_visually_hidden_from_conversation || (m.recipient && m.recipient !== 'all')) continue;
       const text = (m.content?.parts || []).filter((x) => typeof x === 'string').join('\n').trim() || (typeof m.content?.text === 'string' ? m.content.text.trim() : '');
       if (!text) continue;
       msgs.unshift({ id: 'gpt-' + (m.id || id), role, content: text, ts: tsOf(m.create_time || c.create_time), ...(role === 'assistant' ? { label: `ChatGPT${m.metadata?.model_slug ? ' / ' + m.metadata.model_slug : ''}` } : {}) });
