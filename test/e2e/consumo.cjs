@@ -58,6 +58,23 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   const rapido = mocks.calls.rapido;
   await sendMsg('tercera');
   ok(mocks.calls.rapido === rapido && /LÍMITE DIARIO/.test(await w.$$eval('#log .reply', (r) => r.map((x) => x.innerText).join('\n'))), '…y AUTO-SALTO pasa a otra IA avisando del límite');
+  // Sin ninguna otra IA (AUTO-SALTO apagado), el límite no se sobrepasa en silencio: no se envía nada y se explica.
+  await w.evaluate(() => { S.autoSkip = false; save(); renderTargets(); });
+  const r2 = mocks.calls.rapido;
+  await sendMsg('cuarta sin alternativas');
+  ok(mocks.calls.rapido === r2 && /límite diario que pusiste/.test(await w.textContent('#log')), 'si todas están en su límite diario, no se envía nada y se explica (no se sobrepasa en silencio)');
+  await w.evaluate(() => { S.autoSkip = true; S.health = {}; S.providers[0].dailyLimit = null; save(); renderTargets(); });
+
+  // Reserva: con tope, una IA de pago solo se usa si su coste estimado (entrada + 4.096 tokens de salida) cabe en lo que queda.
+  await w.evaluate(() => { S.budget = { day: spent().day + 1000 }; S.target = 'oa::caro'; save(); renderTargets(); });
+  const caro0 = mocks.calls.caro || 0;
+  await sendMsg('esta no cabe en la reserva');
+  const lastTxt = await w.$$eval('#log .reply', (r) => r.map((x) => x.innerText).join('\n'));
+  ok((mocks.calls.caro || 0) === caro0 && /No cabe en tu tope de gasto/.test(lastTxt) && /Hola desde rapido/.test(lastTxt), 'con tope, si la reserva de una IA de pago no cabe, no se envía y responde una gratuita');
+  ok(await w.evaluate(() => !S.health['oa::caro']?.coolUntil), '…sin marcar esa IA como averiada');
+  ok(await w.evaluate(async () => { S.budget = { day: spent().day + 1e7 }; const before = spent().day; const p = callTarget(findT('oa::caro'), [{ role: 'user', content: 'x' }], () => {}); const during = spent().day; await p; return during - before > 4000 && spent().day - before < 4000; }),
+    'mientras una petición está en curso, su reserva cuenta en el gasto (otras a la vez la ven); al terminar se cambia por el gasto real');
+  await w.evaluate(() => { S.budget = {}; S.target = 'm::rapido'; save(); renderTargets(); });
 
   // Gateway: su consumo aparece aparte.
   await w.evaluate(() => { S.health = {}; S.gateway = { enabled: true }; save(); });

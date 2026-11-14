@@ -56,6 +56,21 @@ const spy = http.createServer((q, res) => { hits.push(q.url); res.end(''); });
   ok(gem.length === 1 && gem[0].title.startsWith('Gemini · 2026-09-15') && gem[0].msgs.length === 4 && /calor/.test(gem[0].msgs[1]) && !/<b>|<img/.test(gem[0].msgs[1]),
     'Gemini: un hilo por día con cada pregunta y su respuesta en texto (sin registros que no son preguntas ni actividad de otros productos)');
   ok(await w.evaluate(() => !window.__pwned), 'el HTML importado no ejecuta nada');
+  ok(await w.evaluate(() => { const t = htmlText('<style>.a{color:red}</style><script>alert(1)</script><table><tr><th>Día</th><th>Plato</th></tr><tr><td>Lunes</td><td>Paella</td></tr></table><p>Fin &amp; ya</p>'); return /Día \| Plato/.test(t) && /Lunes \| Paella/.test(t) && !/alert|color:red/.test(t) && /Fin & ya/.test(t); }),
+    'HTML a texto legible: sin código de scripts ni estilos, con las celdas de las tablas separadas');
+  // Archivos dañados: un nodo que apunta a sí mismo, un ciclo A ↔ B y una cadena enorme. No cuelgan la app.
+  const conv = (id, mapping, cur) => ({ title: id, conversation_id: id, current_node: cur, mapping });
+  const msg = (id, parent, text) => ({ id, parent, message: { id, author: { role: 'user' }, content: { content_type: 'text', parts: [text] } } });
+  const chain = {}; for (let i = 0; i <= 50001; i++) chain['n' + i] = msg('n' + i, i ? 'n' + (i - 1) : null, 'x');
+  const damaged = [conv('propio', { a: msg('a', 'a', 'yo') }, 'a'), conv('ciclo', { a: msg('a', 'b', 'uno'), b: msg('b', 'a', 'dos') }, 'a'),
+    conv('enorme', chain, 'n50001'), conv('sana', { s1: msg('s1', null, 'conversación sana') }, 's1')];
+  const dam = path.join(UD, 'conversations.json'); fs.writeFileSync(dam, JSON.stringify(damaged));
+  const prevD = await w.evaluate(() => S.threads.length);
+  await w.setInputFiles('#importFile', dam);
+  await w.waitForFunction(() => /dañadas/.test(document.querySelector('#toast').textContent), null, { timeout: 20000 }).catch(() => {});
+  const td = await w.textContent('#toast');
+  ok(/1 hilos importados/.test(td) && /3 conversaciones dañadas no se importan/.test(td) && await w.evaluate((n) => S.threads.length === n + 1 && S.threads.some((t) => t.id === 'gpt-sana'), prevD),
+    'conversaciones con ciclos o cadenas enormes se descartan (con aviso) sin colgar la app; las sanas sí se importan · ' + td);
   await imp('gemini-red.json'); await w.waitForTimeout(1500);
   ok(hits.length === 0 && await w.evaluate(() => S.threads.some((t) => t.messages.some((m) => /^Texto seguro\nx\n<img src=/.test(m.content)))) && await w.evaluate(() => !window.__pwned),
     `el HTML importado no hace ninguna petición de red (imágenes, iframes, estilos, vídeo, SVG, srcset…) y una etiqueta sin cerrar queda como texto: ${hits.length} peticiones`);

@@ -115,11 +115,17 @@ symlinkSync(outside, join(shared, 'enlace'));
 // Generadores de imágenes simulados: AUTOMATIC1111/Forge (/sdapi) y ComfyUI (/prompt, /history, /view).
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const imgSeen = [];
+let a1111Busy = false;
 const a1111 = http.createServer((req, res) => {
   let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/sdapi/v1/sd-models') return res.end('[{"title":"sdxl"}]');
-    if (req.url === '/sdapi/v1/txt2img') { const j = JSON.parse(b); imgSeen.push({ a1111: j }); return setTimeout(() => res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })), j.prompt === 'lenta' ? 400 : 0); }
+    if (req.url.startsWith('/sdapi/v1/progress')) return res.end(JSON.stringify({ state: { job_count: a1111Busy ? 1 : 0 } }));
+    if (req.url === '/sdapi/v1/txt2img') {
+      const j = JSON.parse(b); imgSeen.push({ a1111: j }); a1111Busy = true;
+      // «cuelga»: sigue trabajando 3,5 s, más que el tiempo de espera del puente (imageTimeoutMs: 1500).
+      return setTimeout(() => { a1111Busy = false; if (!res.destroyed) res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })); }, j.prompt === 'cuelga' ? 3500 : j.prompt === 'lenta' ? 400 : 0);
+    }
     res.statusCode = 404; res.end('{}');
   });
 });
@@ -138,6 +144,7 @@ await Promise.all([a1111, comfy].map((x) => new Promise((r) => x.listen(0, '127.
 after(() => { a1111.close(); comfy.close(); });
 const cfgFile = join(base, 'config.json');
 writeFileSync(cfgFile, JSON.stringify({ backends: [{ id: 'ollama', type: 'ollama', url: `http://127.0.0.1:${ollama.address().port}` }], folders: [shared],
+  imageTimeoutMs: 1500,
   images: [{ id: 'forge', type: 'a1111', url: `http://127.0.0.1:${a1111.address().port}` }, { id: 'comfy', type: 'comfyui', url: `http://127.0.0.1:${comfy.address().port}` }, { id: 'apagado', type: 'comfyui', url: 'http://127.0.0.1:9' }] }));
 
 const PORT2 = 18788, BASE2 = `http://127.0.0.1:${PORT2}`;
@@ -498,5 +505,29 @@ test('Gateway: con un tope activo, una IA de pago sin precio no se usa (su gasto
   await configure({ enabled: true, providers, budget: { month: 50 } });
   const l = await ids();
   assert.ok(!l.includes('pago/sinprecio') && l.includes('gratis/eco'));
+  await configure({ enabled: false });
+});
+
+test('imágenes: si se agota la espera, el turno sigue ocupado hasta que el generador termina de verdad', async () => {
+  const a = await call('image_generate', { prompt: 'cuelga' });
+  assert.equal(a.isError, true); assert.match(a.content[0].text, /sigue trabajando/);
+  const b = await call('image_generate', { prompt: 'mientras tanto' });
+  assert.equal(b.isError, true, 'el generador sigue ocupado: no se acepta otra'); assert.match(b.content[0].text, /imagen anterior/);
+  await new Promise((r) => setTimeout(r, 4500)); // termina a los 3,5 s; el puente lo comprueba cada 2 s
+  assert.equal((await call('image_generate', { prompt: 'ya libre' })).isError, undefined, 'cuando termina, se acepta la siguiente');
+});
+test('Gateway: el tope reserva el coste estimado antes de enviar (dos peticiones a la vez no pueden pasarse)', async () => {
+  // 1.000 €/M de salida → cada petición reserva 4.096 tokens × 1.000 € / 1M ≈ 4,10 €; el tope de 6 € solo deja una a la vez.
+  const providers = [{ ...prov('pago/eco', 'eco'), price: { in: 0, out: 1000 } }];
+  const d = new Date(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const spent0 = (await (await gw('/neura/gateway')).json()).spent.day;
+  await configure({ enabled: true, providers, budget: { day: spent0 + 6 }, appSpent: { date: day, day: 0, month: 0 } });
+  const one = (q) => gw('/v1/chat/completions', { model: 'pago/eco', stream: true, messages: [{ role: 'user', content: q }] });
+  const [r1, r2] = await Promise.all([one('primera-larga'), new Promise((r) => setTimeout(r, 50)).then(() => one('segunda'))]);
+  const st = [r1.status, r2.status].sort();
+  await r1.text(); await r2.text();
+  assert.deepEqual(st, [200, 402], 'la segunda no cabe mientras la primera tiene su reserva');
+  await new Promise((r) => setTimeout(r, 100));
+  const r3 = await one('tercera'); assert.equal(r3.status, 200, 'al terminar, la reserva se cambia por el gasto real (pequeño) y vuelve a caber'); await r3.text();
   await configure({ enabled: false });
 });

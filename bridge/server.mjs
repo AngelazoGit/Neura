@@ -25,6 +25,7 @@ const TOKEN_GENERATED = !process.env.NEURA_TOKEN && !cfg.token && !!TOKEN;
 // Token propio del Gateway: solo vale para /v1/* (modelos e inferencia). No da acceso a hilos, archivos ni configuración.
 const GW_TOKEN = process.env.NEURA_GATEWAY_TOKEN || cfg.gatewayToken || randomBytes(18).toString('base64url');
 const TIMEOUT = Number(cfg.timeoutMs || 300000);
+const IMAGE_TIMEOUT = Number(cfg.imageTimeoutMs || TIMEOUT); // cuánto se espera una imagen (el generador puede seguir después)
 const APP_DIR = cfg.appDir || join(HERE, '..', 'app');
 const SERVE_APP = cfg.serveApp !== false && existsSync(join(APP_DIR, 'index.html'));
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -153,9 +154,9 @@ async function comfyGenerate(g, a, signal) {
   }
   const { prompt_id: id } = await getJSON(`${base}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: 'neura' }), timeout: 30000, signal });
   if (!id) throw new Error('ComfyUI no aceptó el flujo');
-  const end = Date.now() + TIMEOUT;
+  const end = Date.now() + IMAGE_TIMEOUT;
   while (Date.now() < end) {
-    if (signal?.aborted) throw new Error('Cancelado');
+    if (signal?.aborted) throw stillBusy(() => comfyIdle(base, id));
     const h = (await getJSON(`${base}/history/${encodeURIComponent(id)}`, { timeout: 10000, signal }))[id];
     if (h?.status?.status_str === 'error') throw new Error('ComfyUI falló al generar la imagen');
     const img = Object.values(h?.outputs || {}).flatMap((o) => o.images || [])[0];
@@ -167,11 +168,33 @@ async function comfyGenerate(g, a, signal) {
     }
     await new Promise((res) => setTimeout(res, 700));
   }
-  throw new Error('ComfyUI tardó demasiado');
+  throw stillBusy(() => comfyIdle(base, id));
 }
+// Dejar de esperar no para el generador: el turno se mantiene hasta comprobar que ha terminado (máx. 30 min).
+const stillBusy = (idle) => Object.assign(new Error('La imagen está tardando más de lo previsto. El generador del PC sigue trabajando: Neura no aceptará otra imagen hasta que termine.'), { idle });
+async function untilIdle(check) {
+  const end = Date.now() + 30 * 60e3;
+  while (Date.now() < end) {
+    // Si el generador no responde (cerrado, o una versión sin esa consulta), no se le puede esperar: se libera.
+    try { if (await check()) return; } catch { return; }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+}
+const comfyIdle = (base, id) => untilIdle(async () => {
+  const q = await getJSON(`${base}/queue`, { timeout: 5000 });
+  return ![...(q.queue_running || []), ...(q.queue_pending || [])].some((x) => x?.[1] === id);
+});
+const a1111Idle = (base) => untilIdle(async () => !(await getJSON(`${base}/sdapi/v1/progress?skip_current_image=true`, { timeout: 5000 })).state?.job_count);
 async function a1111Generate(g, a, signal) {
-  const d = await getJSON(`${trim(g.url)}/sdapi/v1/txt2img`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
-    body: JSON.stringify({ prompt: a.prompt, negative_prompt: a.negative, width: a.width, height: a.height, steps: a.steps, seed: a.seed }) });
+  let d;
+  try {
+    d = await getJSON(`${trim(g.url)}/sdapi/v1/txt2img`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, timeout: IMAGE_TIMEOUT,
+      body: JSON.stringify({ prompt: a.prompt, negative_prompt: a.negative, width: a.width, height: a.height, steps: a.steps, seed: a.seed }) });
+  } catch (e) {
+    // Tiempo agotado o cancelado: Forge sigue con el trabajo; se espera a que su cola quede vacía.
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw stillBusy(() => a1111Idle(trim(g.url)));
+    throw e;
+  }
   if (!d.images?.[0]) throw new Error('El generador no devolvió ninguna imagen');
   let model = '';
   try { model = JSON.parse(d.info || '{}').sd_model_name || ''; } catch {}
@@ -184,7 +207,11 @@ async function imageGenerate(args, { signal } = {}) {
   if (!prompt) throw new Error('Falta el prompt');
   if (imageBusy) throw new Error('El generador del PC aún está terminando la imagen anterior. Espera a que acabe y vuelve a intentarlo.');
   imageBusy = true;
-  try { return await imageGenerateNow(prompt, args, signal); } finally { imageBusy = false; }
+  try { const out = await imageGenerateNow(prompt, args, signal); imageBusy = false; return out; }
+  catch (e) {
+    if (e.idle) e.idle().finally(() => { imageBusy = false; }); else imageBusy = false;
+    throw e;
+  }
 }
 async function imageGenerateNow(prompt, args, signal) {
   const a = { prompt, negative: String(args.negative || '').slice(0, 2000), steps: clampInt(args.steps, 1, 80, 25),
@@ -761,13 +788,23 @@ function gwRecord(t, inTok, outTok, failed) {
     try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(gwUsageFile + '.tmp', JSON.stringify(gwUsage)); renameSync(gwUsageFile + '.tmp', gwUsageFile); } catch {}
   }, 1000);
 }
+// Coste reservado por las peticiones en curso: cuenta para el tope hasta que se conoce el consumo real.
+let gwReserved = 0;
+const RESERVE_OUT = 4096; // tokens de salida que se reservan si la petición no fija max_tokens
+const gwEstimate = (t, body) => (t.price ? ((+t.price.in || 0) * Math.ceil(JSON.stringify(body.messages || []).length / 4) + (+t.price.out || 0) * (+body.max_tokens || RESERVE_OUT)) / 1e6 : 0);
 function gwSpent() {
   const day = dayKey();
-  let d = 0, m = 0;
+  let d = gwReserved, m = gwReserved;
   for (const [k, v] of Object.entries(gwUsage)) for (const u of Object.values(v)) { if (k === day) d += u.eur; if (k.slice(0, 7) === day.slice(0, 7)) m += u.eur; }
   return { day: d, month: m };
 }
 // Tope de gasto: lo del Gateway más lo que la app de este PC ha gastado por su cuenta.
+// Lo que queda hasta el tope más cercano (día o mes), contando lo reservado y lo gastado en la app.
+function gwBudgetLeft() {
+  const b = gateway.budget || {}, s = gwSpent(), a = gateway.appSpent || {}, day = dayKey();
+  const ad = a.date === day ? +a.day || 0 : 0, am = String(a.date || '').slice(0, 7) === day.slice(0, 7) ? +a.month || 0 : 0;
+  return Math.min(b.day > 0 ? b.day - s.day - ad : Infinity, b.month > 0 ? b.month - s.month - am : Infinity);
+}
 function gwOver() {
   const b = gateway.budget || {}, s = gwSpent(), a = gateway.appSpent || {}, day = dayKey();
   const ad = a.date === day ? +a.day || 0 : 0, am = String(a.date || '').slice(0, 7) === day.slice(0, 7) ? +a.month || 0 : 0;
@@ -789,7 +826,7 @@ function gwCachePut(k, v) {
   while (gwCache.size > 200) gwCache.delete(gwCache.keys().next().value);
 }
 // Se lee una copia de la respuesta mientras llega al cliente: cuenta tokens y, si terminó bien, la guarda en caché.
-function gwTap(r, t, body, key) {
+function gwTap(r, t, body, key, est = 0) {
   const [a, b] = r.body.tee();
   const ct = r.headers.get('content-type') || '';
   (async () => {
@@ -817,6 +854,7 @@ function gwTap(r, t, body, key) {
       try { const j = JSON.parse(txt); inTok = j.usage?.prompt_tokens || inTok; outTok = j.usage?.completion_tokens || Math.ceil(JSON.stringify(j.choices?.[0]?.message || '').length / 4); }
       catch { complete = false; }
     }
+    gwReserved -= est; // la reserva se cambia por el consumo real
     gwRecord(t, inTok, outTok, false);
     if (key && complete) gwCachePut(key, { ct, buf, t });
   })();
@@ -881,19 +919,25 @@ async function gwCall(model, body, signal) {
     // Saltar lo que un fallo de esta misma petición acaba de pausar (p. ej. misma clave inválida);
     // si todo estaba ya en pausa al empezar, se prueba igualmente como último recurso.
     if (plan.length > 1 && gwCool.get(t.id) !== pausedBefore.get(t.id)) continue;
+    // Con tope: se reserva el coste estimado antes de enviar; si no cabe, se pasa a la siguiente IA.
+    const est = gwEstimate(t, body);
+    if (est && gwBudgetLeft() < est) { last = Object.assign(new Error(`${t.id}: no cabe en tu tope de gasto`), { status: 402 }); continue; }
+    gwReserved += est;
     try {
       const r = await fetch(`${t.url}/chat/completions`, {
         method: 'POST', signal: signalFor(TIMEOUT, signal),
         headers: { 'Content-Type': 'application/json', ...(t.apiKey ? { Authorization: `Bearer ${t.apiKey}` } : {}) },
         body: JSON.stringify({ ...body, model: t.model }),
       });
-      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, body, key), t }; }
+      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, body, key, est), t }; }
+      gwReserved -= est;
       gwFail(t, r.status, r.headers);
       if (r.status !== 429) gwRecord(t, 0, 0, true);
       last = Object.assign(new Error(`${t.id}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
       if (r.status === 400) break; // petición mal formada: otra IA no lo arreglará
     } catch (e) {
-      if (signal?.aborted) throw e;
+      if (signal?.aborted) { gwReserved -= est; throw e; }
+      gwReserved -= est;
       gwFail(t, 0); gwRecord(t, 0, 0, true); last = e;
     }
   }

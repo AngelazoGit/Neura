@@ -105,7 +105,7 @@ function save() {
 function gatewayPayload() {
   const g = S.gateway || {};
   const name = (t) => `${slug(S.providers.find((p) => p.id === t.pid).name)}/${t.model}`;
-  const cloud = targets().filter((t) => t.pid && t.kind === 'openai' && (!S.freeOnly || isFree(t)));
+  const cloud = targets().filter((t) => t.pid && t.kind === 'openai' && (!S.freeOnly || isFree(t)) && !atLimit(t));
   const mine = targets().filter((t) => t.kind === 'mcp' && S.mcp.find((s) => s.id === t.sid)?.local);
   const first = findT(S.target);
   // Por clave: targets() crea objetos nuevos en cada llamada.
@@ -235,7 +235,7 @@ function noteOk(t, ms) { if (!(H(t.key).reason === 'LÍMITE' && cooling(t.key)))
 const isNoVision = (e) => e.status === 400 && /image|vision|multimodal|modalit/i.test(e.message || '');
 const capable = (t, needs = {}) => !(needs.vision && S.health[t.key]?.noVision);
 function noteFail(t, e) {
-  if (e.name === 'AbortError') return;
+  if (e.name === 'AbortError' || e.budget) return;
   const h = H(t.key), msg = e.message || '';
   h.fail++; h.streak = (h.streak || 0) + 1;
   if (isNoVision(e)) { Object.assign(h, { noVision: true, streak: 0 }); return; }
@@ -268,9 +268,9 @@ const costOf = (p, inT, outT) => (priced(p) ? ((+p.price.in || 0) * inT + (+p.pr
 const localMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return +d; };
 // Peticiones de hoy a un proveedor (las rechazadas por cuota no cuentan: el proveedor no las atendió).
 const provToday = (p) => Object.entries(S.usage?.[today()] || {}).reduce((n, [k, v]) => n + (k.startsWith(p.id + '::') ? v.n + (v.err || 0) : 0), 0);
-let usageRev = 0, gwUse = null, gwSpentNow = null; // lo que cuenta el puente del PC (se pide al abrir ⚙ y antes de enviar)
+let usageRev = 0, gwUse = null, gwSpentNow = null, reserved = 0; // lo que cuenta el puente del PC (se pide al abrir ⚙ y antes de enviar)
 function recordUse(t, messages, out, e) {
-  if (e && (e.name === 'AbortError' || e.status === 429)) return;
+  if (e && (e.name === 'AbortError' || e.status === 429 || e.budget)) return;
   const day = ((S.usage ||= {})[today()] ||= {});
   const u = (day[t.key] ||= { n: 0, in: 0, out: 0, eur: 0, err: 0 });
   if (e) u.err++;
@@ -300,12 +300,13 @@ function spent() {
   let d = 0, m = 0;
   for (const [k, v] of Object.entries(S.usage || {})) for (const x of Object.values(v)) { if (k === day) d += x.eur; if (monthOf(k) === monthOf(day)) m += x.eur; }
   const g = gwSpentNow && monthOf(gwSpentNow.date) === monthOf(day) ? gwSpentNow : null;
-  const v = { day: d + (g?.date === day ? g.day : 0), month: m + (g ? g.month : 0), app: { day: d, month: m } };
+  const v = { day: d + reserved + (g?.date === day ? g.day : 0), month: m + reserved + (g ? g.month : 0), app: { day: d + reserved, month: m + reserved } };
   spentMemo = { rev, v };
   return v;
 }
 const hasBudget = () => +S.budget?.day > 0 || +S.budget?.month > 0;
 const unpricedPaid = (t) => { const p = provOf(t); return !!p && p.tier !== 'free' && !priced(p); };
+const budgetLeft = () => { const b = S.budget || {}, x = spent(); return Math.min(+b.day > 0 ? b.day - x.day : Infinity, +b.month > 0 ? b.month - x.month : Infinity); };
 const overBudget = () => { const b = S.budget || {}, x = spent(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
 const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
 
@@ -327,11 +328,13 @@ const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo 
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
 // Nunca incluye destinos que la política de gasto o privacidad no permite.
 // needs.vision: el mensaje lleva imágenes; se evitan los modelos que ya las rechazaron.
+// Una IA que llegó al límite diario que pusiste no se usa hasta mañana, aunque no quede otra.
+const atLimit = (t) => S.health[t.key]?.reason === 'LÍMITE' && cooling(t.key);
 function plan(first, needs = {}) {
   if (!first) return [];
-  const own = allowed(first) && capable(first, needs) ? [first] : [];
+  const own = allowed(first) && capable(first, needs) && !atLimit(first) ? [first] : [];
   if (!S.autoSkip) return own;
-  const rest = targets().filter((t) => t.key !== first.key && allowed(t) && capable(t, needs));
+  const rest = targets().filter((t) => t.key !== first.key && allowed(t) && capable(t, needs) && !atLimit(t));
   const adj = (t) => score(t) - (t.pid && t.pid === first.pid ? 0.5 : 0) - (S.useTools && S.health[t.key]?.noTools ? 0.4 : 0);
   const ready = rest.filter((t) => !cooling(t.key)).sort((a, b) => adj(b) - adj(a));
   const cold = rest.filter((t) => cooling(t.key)).sort((a, b) => S.health[a.key].coolUntil - S.health[b.key].coolUntil);
@@ -509,9 +512,14 @@ async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
   }
 }
 
+// Con tope, cada petición a una IA de pago reserva su coste estimado (entrada + hasta 4.096 tokens de salida)
+// antes de enviarse; así varias a la vez (CONSEJO, reintentos) no pueden pasar del tope sin contarse.
 async function callTarget(t, messages, onDelta, signal, opt = {}) {
-  try { const out = await callTargetRaw(t, messages, onDelta, signal, opt); recordUse(t, messages, out); return out; }
-  catch (e) { recordUse(t, messages, null, e); throw e; }
+  const est = hasBudget() ? costOf(provOf(t), tokens(messages), 4096) : 0;
+  if (est && budgetLeft() < est) throw Object.assign(new Error('No cabe en tu tope de gasto'), { budget: true });
+  reserved += est; usageRev++;
+  try { const out = await callTargetRaw(t, messages, onDelta, signal, opt); reserved -= est; usageRev++; recordUse(t, messages, out); return out; }
+  catch (e) { reserved -= est; usageRev++; recordUse(t, messages, null, e); throw e; }
 }
 async function callTargetRaw(t, messages, onDelta, signal, opt = {}) {
   if (t.kind === 'mcp') {
@@ -770,6 +778,7 @@ async function fitContext(th, hist, budget, signal) {
 const skippable = (e) => e.name !== 'AbortError' && (!e.status || e.status === 429 || e.status >= 500 || e.status === 402 || isKeyErr(e) || isGone(e) || isNoVision(e));
 function friendly(e) {
   if (e.name === 'AbortError') return 'Cancelado';
+  if (e.budget) return 'No cabe en tu tope de gasto (⚙ → CONSUMO).';
   if (isGone(e)) return 'Este modelo ya no está disponible. Neura ha actualizado la lista de modelos.';
   if (isNoVision(e)) return 'Este modelo no admite imágenes.';
   if (e.status === 429 || /quota|rate.?limit|exhausted/i.test(e.message || '')) return 'Cuota gratuita agotada por ahora.';
@@ -841,9 +850,10 @@ async function send(text, files = []) {
     const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
     const queue = plan(first, needs);
     if (first && allowed(first) && !capable(first, needs)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: '📷 no admite imágenes', skipped: true, ts: Date.now() });
+    if (first && allowed(first) && atLimit(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⏳ ${coolText(first.key)}`, skipped: true, ts: Date.now() });
     if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
     if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
-    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
+    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : targets().some(atLimit) && !overBudget() ? 'Las IAs disponibles han llegado al límite diario que pusiste (⚙). Súbelo o espera a mañana.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
     else if (S.council) await sendCouncil(th, hist, first, signal, needs, skill);
     else {
       let attempts = 0, ctxRetried = false;
@@ -1463,7 +1473,7 @@ function usageHTML() {
     ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
     <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
     <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
-    <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Es un <b>tope aproximado</b>: se basa en estimaciones por caracteres, cuenta solo lo que pasa por Neura y las peticiones que ya estaban en marcha al llegar al tope pueden terminar. La factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+    <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de enviar a una IA de pago, Neura <b>reserva</b> su coste estimado (entrada + hasta 4.096 tokens de salida) y no la usa si no cabe. Es un tope sobre <b>estimaciones</b>: solo se pasa si una respuesta es más larga que lo reservado o los tokens reales difieren de la estimación, y cuenta solo lo que pasa por Neura. La factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
 }
 function usageSumHTML() {
   const x = spent();
@@ -1500,7 +1510,7 @@ async function diagnose(allModels) {
     for (const x of list) {
       const t = x.t;
       if (!allowed(t)) { Object.assign(x, { ok: false, why: `no se prueba: ${notAllowedWhy(t)}` }); paint(); continue; }
-      if (S.health[t.key]?.reason === 'LÍMITE' && cooling(t.key)) { Object.assign(x, { ok: false, why: 'ha llegado a tu límite diario' }); paint(); continue; }
+      if (atLimit(t)) { Object.assign(x, { ok: false, why: 'ha llegado a tu límite diario' }); paint(); continue; }
       const t0 = performance.now(), sig = AbortSignal.timeout(45000);
       try {
         await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, sig);
@@ -1733,7 +1743,8 @@ async function download(name, text, type) {
 const safeName = (s) => String(s).replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 40) || 'hilo';
 // ---------- importar: copias de Neura y exportaciones oficiales de ChatGPT, Claude y Gemini ----------
 // Lector de ZIP mínimo: lee solo el índice y los archivos que interesan (las exportaciones pueden pesar mucho).
-const ZIP_MAX = 400 * 2 ** 20; // por archivo y en total: una exportación de texto mayor no cabría en memoria
+// Por archivo y en total. Texto, trozos y JSON interpretado conviven en memoria: en el móvil y la web, menos.
+const ZIP_MAX = (DESK ? 400 : 100) * 2 ** 20;
 async function readZip(file) {
   let total = 0;
   const u8 = async (a, b) => new Uint8Array(await file.slice(a, b).arrayBuffer());
@@ -1753,7 +1764,7 @@ async function readZip(file) {
       const h = new DataView((await u8(off, off + 30)).buffer);
       const start = off + 30 + h.getUint16(26, true) + h.getUint16(28, true);
       const blob = file.slice(start, start + size);
-      const tooBig = () => new Error(`${name} es demasiado grande para importarlo (más de 400 MB)`);
+      const tooBig = () => new Error(`${name} es demasiado grande para importarlo aquí (más de ${ZIP_MAX / 2 ** 20} MB)${DESK ? '' : ': impórtalo en Neura para PC'}`);
       if (full > ZIP_MAX) throw tooBig();
       if (method !== 0 && method !== 8) throw new Error(`Compresión no admitida en ${name}`);
       // Se cuentan los bytes que salen de verdad (el tamaño de la cabecera puede ser falso) y se corta al pasar el límite.
@@ -1774,14 +1785,18 @@ async function readZip(file) {
 }
 // Primero se quitan todas las etiquetas (y cualquier «<» suelto): DOMParser solo recibe texto y entidades,
 // así que no puede crear imágenes, iframes ni nada que descargue o ejecute algo.
-const htmlText = (h) => new DOMParser().parseFromString(String(h || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h\d)>/gi, '\n').replace(/<[^>]*>/g, '').replace(/</g, '&lt;'), 'text/html').body.textContent.replace(/\n{3,}/g, '\n\n').trim();
+const htmlText = (h) => new DOMParser().parseFromString(String(h || '').replace(/<(script|style|template|noscript)\b[\s\S]*?(<\/\1\s*>|$)/gi, '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h\d|tr|pre|blockquote)>/gi, '\n').replace(/<\/(td|th)>/gi, ' | ').replace(/<[^>]*>/g, '').replace(/</g, '&lt;'), 'text/html').body.textContent.replace(/\n{3,}/g, '\n\n').trim();
 const tsOf = (x) => (typeof x === 'number' ? (x < 1e12 ? x * 1000 : x) : Date.parse(x) || Date.now());
 // ChatGPT: cada conversación es un árbol (mapping); se sigue la rama visible, desde el último mensaje hacia atrás.
 let skippedParts = 0; // adjuntos que no se importan (solo texto); se avisa al terminar
+let badConvs = 0; // conversaciones dañadas (ciclos o demasiado largas) que no se importan; se avisa al terminar
 function fromChatGPT(list) {
   return list.map((c) => {
-    const msgs = [];
+    const msgs = [], seen = new Set();
     for (let id = c.current_node; id && c.mapping?.[id]; id = c.mapping[id].parent) {
+      // Un archivo dañado puede tener un nodo que apunta a sí mismo o un ciclo: se descarta esa conversación.
+      if (seen.has(id) || seen.size >= 50000) { badConvs++; return null; }
+      seen.add(id);
       const m = c.mapping[id].message, role = m?.author?.role;
       if (!m || !['user', 'assistant'].includes(role) || m.metadata?.is_visually_hidden_from_conversation || (m.recipient && m.recipient !== 'all')) continue;
       skippedParts += (m.content?.parts || []).filter((x) => typeof x !== 'string').length;
@@ -1790,7 +1805,7 @@ function fromChatGPT(list) {
       msgs.unshift({ id: 'gpt-' + (m.id || id), role, content: text, ts: tsOf(m.create_time || c.create_time), ...(role === 'assistant' ? { label: `ChatGPT${m.metadata?.model_slug ? ' / ' + m.metadata.model_slug : ''}` } : {}) });
     }
     return { id: 'gpt-' + (c.conversation_id || c.id || uid()), title: c.title || 'ChatGPT', source: 'ChatGPT', messages: msgs, ts: tsOf(c.update_time || c.create_time) };
-  });
+  }).filter(Boolean);
 }
 function fromClaude(list) {
   return list.map((c) => ({
@@ -1834,13 +1849,16 @@ function parseExport(data) {
 async function importThreads(file) {
   try {
     let sources;
-    skippedParts = 0;
+    skippedParts = 0; badConvs = 0;
     if (/\.zip$/i.test(file.name) || (await file.slice(0, 2).text()) === 'PK') {
       const want = (await readZip(file)).filter((z) => /(^|\/)conversations(-\d+)?\.json$/i.test(z.name) || /(gemini|bard)[^/]*\/[^/]*\.json$/i.test(z.name));
       if (!want.length) throw new Error('En el ZIP no hay conversations.json (ChatGPT o Claude) ni la actividad de Gemini en JSON');
       sources = [];
       for (const z of want) sources.push(await z.read()); // de uno en uno: el límite total se aplica en orden
-    } else sources = [await file.text()];
+    } else {
+      if (file.size > ZIP_MAX) throw new Error(`el archivo es demasiado grande para importarlo aquí (más de ${ZIP_MAX / 2 ** 20} MB)${DESK ? '' : ': impórtalo en Neura para PC'}`);
+      sources = [await file.text()];
+    }
     const found = [];
     for (const txt of sources) { const r = parseExport(JSON.parse(txt)); if (r) found.push(r); }
     if (!found.length) throw new Error('No es una copia de Neura ni una exportación de ChatGPT, Claude o Gemini');
@@ -1862,7 +1880,7 @@ async function importThreads(file) {
     }
     save(); await persistFiles(); renderThreads(); renderLog(); syncAll();
     const kinds = [...new Set(found.map((f) => f.kind))].join(' y ');
-    toast(`${n} hilos importados de ${kinds}${left ? ` · ${left} más antiguos no caben aquí: impórtalos en Neura para PC` : ''}${skippedParts ? ` · ${skippedParts} adjuntos no se importan (solo el texto)` : ''}`);
+    toast(`${n} hilos importados de ${kinds}${left ? ` · ${left} más antiguos no caben aquí: impórtalos en Neura para PC` : ''}${skippedParts ? ` · ${skippedParts} adjuntos no se importan (solo el texto)` : ''}${badConvs ? ` · ${badConvs} conversaciones dañadas no se importan` : ''}`);
   } catch (e) { toast('Importar: ' + e.message, true); }
 }
 
