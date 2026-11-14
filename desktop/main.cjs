@@ -192,6 +192,14 @@ ipcMain.handle('tailscale', async (_e, on) => {
   await refreshPairing();
   return r.error ? { error: 'Tailscale: ' + r.error } : bridgeInfo();
 });
+// PDF del hilo: se imprime la propia ventana con el estilo de impresión de la app.
+ipcMain.handle('save-pdf', async (_e, name) => {
+  const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('documents'), String(name).replace(/[\\/:*?"<>|]/g, '_')), filters: [{ name: 'PDF', extensions: ['pdf'] }] });
+  if (r.canceled || !r.filePath) return null;
+  const pdf = await win.webContents.printToPDF({ printBackground: false, pageSize: 'A4', margins: { marginType: 'default' } });
+  fs.writeFileSync(r.filePath, pdf);
+  return r.filePath;
+});
 ipcMain.handle('save-file', async (_e, name, text) => {
   const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('documents'), String(name).replace(/[\\/:*?"<>|]/g, '_')) });
   if (r.canceled || !r.filePath) return null;

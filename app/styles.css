@@ -275,3 +275,19 @@ ol.learn li span{display:block;margin-left:16px}
 .learnSet{margin:6px 0}
 .learnSet summary{cursor:pointer;font:500 11px var(--cond);letter-spacing:.18em;color:var(--orange2)}
 .learnSet h3{display:none}
+.chip.route{color:var(--orange2);border-color:rgba(255,140,40,.4);margin-left:6px;font-size:10px}
+.chip.voted{color:var(--green);border-color:rgba(93,255,122,.4)}
+.routes{display:flex;flex-direction:column;gap:6px}
+.routes select{width:100%}
+/* Exportar a PDF: solo la conversación, en negro sobre blanco */
+@media print{
+  *{color:#000!important;background:transparent!important;box-shadow:none!important;text-shadow:none!important;animation:none!important}
+  body::before,header.top,.stripe,nav.bar,#composer,#skillHint,#attachBar,#saveWarn,.sheet,#toast,.overlay,.acts,.processing,.reply.skip,.wizard,.empty{display:none!important}
+  html,body,#app,#log{height:auto!important;overflow:visible!important;display:block!important;position:static!important}
+  body[data-print]::before{content:attr(data-print);display:block!important;position:static!important;background:none!important;z-index:auto;pointer-events:auto;font:700 20px var(--serif);margin:0 0 12px;inset:auto}
+  .msg{max-width:none;break-inside:auto;margin:0 0 12px}
+  .reply,.msg.user .body{clip-path:none!important;border:1px solid #bbb!important;border-left:3px solid #666!important}
+  .cgrid{display:block!important}
+  pre,code{white-space:pre-wrap!important;word-break:break-word}
+  a{text-decoration:underline}
+}
