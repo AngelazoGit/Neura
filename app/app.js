@@ -950,17 +950,19 @@ async function runTarget(t, hist, msg, signal, tools, sk = null, purpose) {
   noteOk(t, msg.ms);
 }
 
-async function send(text, files = []) {
+// opt.display: lo que se ve en el chat si es distinto de lo que se envía; opt.skill: habilidad solo para este mensaje;
+// opt.web: buscar en internet en este mensaje; opt.searchQuery: qué buscar (si no, el propio mensaje).
+async function send(text, files = [], opt = {}) {
   const th = thread(), msgs = th.messages;
-  if (!msgs.length) th.title = (text || files[0]?.name || 'HILO').slice(0, 48);
+  if (!msgs.length) th.title = (opt.display || text || files[0]?.name || 'HILO').slice(0, 48);
   th.ts = Date.now();
-  msgs.push({ id: uid(), role: 'user', content: text, ...(files.length ? { files } : {}), ts: Date.now() });
+  msgs.push({ id: uid(), role: 'user', content: text, ...(opt.display ? { display: opt.display } : {}), ...(opt.searchQuery ? { searchQuery: opt.searchQuery } : {}), ...(files.length ? { files } : {}), ts: Date.now() });
   save();
   setBusy(true);
   const signal = abortCtl.signal;
   if (DESK && (+S.budget?.day || +S.budget?.month)) await refreshGwUsage();
   try {
-    const skill = activeSkill() && JSON.parse(JSON.stringify(activeSkill()));
+    const skill = opt.skill || (activeSkill() && JSON.parse(JSON.stringify(activeSkill())));
     // El presupuesto cuenta toda la petición (instrucciones, memoria del proyecto y habilidad) y deja sitio para la respuesta.
     const RESERVE = 800;
     const budget = Math.max(800, S.ctxTokens - tokens(withInstructions([], skill)) - RESERVE);
@@ -974,7 +976,7 @@ async function send(text, files = []) {
     // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
     const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
     // 🌐 WEB: se busca antes y los resultados van con la pregunta; la IA debe citar las fuentes.
-    if (S.web && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
+    if ((S.web || opt.web) && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
     if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
     else await respond(th, hist, first, signal, needs, skill);
   } catch (e) {
@@ -1078,6 +1080,71 @@ function routingHTML() {
     ${rt.on ? `<div class="routes">${[...TASKS, { id: 'general' }].map((t) => `<label class="field">${taskName(t.id)}<select data-route="${t.id}">${opts(t.id)}</select></label>`).join('')}</div>` : ''}`;
 }
 
+// ---------- 🛡 datos sensibles: aviso antes de enviarlos a una IA de internet ----------
+// Se detectan en este dispositivo, sin IA. Los números se validan (letra del DNI, IBAN, Luhn) para no avisar de más.
+const dniOk = (n, l) => 'TRWAGMYFPDXBNJZSQVHLCKE'[n % 23] === l.toUpperCase();
+const luhn = (d) => { let t = 0; for (let i = 0; i < d.length; i++) { let x = +d[d.length - 1 - i]; if (i % 2) { x *= 2; if (x > 9) x -= 9; } t += x; } return t % 10 === 0; };
+const ibanOk = (v) => { const x = v.replace(/\s/g, '').toUpperCase(), y = (x.slice(4) + x.slice(0, 4)).replace(/[A-Z]/g, (c) => c.charCodeAt(0) - 55); let m = 0; for (const c of y) m = (m * 10 + +c) % 97; return m === 1; };
+const SENSITIVE = [
+  { type: 'clave API', tag: 'CLAVE', re: /\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}|gsk_[A-Za-z0-9]{20,}|nvapi-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g },
+  { type: 'contraseña', tag: 'CONTRASEÑA', re: /\b(contraseña|password|passwd|pwd|clave|pin)(\s*[:=]\s*)(\S{4,})/gi, keep: (m) => `${m[1]}${m[2]}` },
+  { type: 'IBAN', tag: 'IBAN', re: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,3})?\b/g, ok: (m) => ibanOk(m[0]) },
+  { type: 'tarjeta', tag: 'TARJETA', re: /\b\d(?:[ -]?\d){12,18}\b/g, ok: (m) => luhn(m[0].replace(/\D/g, '')) },
+  { type: 'DNI/NIE', tag: 'DNI', re: /\b([XYZ]?)(\d{7,8})[- ]?([A-Z])\b/gi, ok: (m) => (m[1] ? m[2].length === 7 : m[2].length === 8) && dniOk(+(`${{ X: 0, Y: 1, Z: 2 }[m[1].toUpperCase()] ?? ''}${m[2]}`), m[3]) },
+  { type: 'teléfono', tag: 'TELÉFONO', re: /(?:\+34[ -]?)?\b[6789]\d{2}[ -]?\d{3}[ -]?\d{3}\b/g },
+  { type: 'correo', tag: 'CORREO', re: /\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g },
+];
+// Devuelve qué se encontró y el texto con cada dato sustituido por [TIPO].
+function scanSensitive(text) {
+  const found = new Map();
+  let out = String(text || '');
+  for (const s of SENSITIVE) {
+    out = out.replace(s.re, (...a) => {
+      const m = a.slice(0, -2);
+      if (s.ok && !s.ok(m)) return m[0];
+      found.set(s.type, (found.get(s.type) || 0) + 1);
+      return (s.keep ? s.keep(m) : '') + `[${s.tag}]`;
+    });
+  }
+  return { found, text: out };
+}
+let guardPending = null;
+// Antes de enviar: si hay datos sensibles y el hilo puede salir a internet, se pregunta qué hacer.
+function guardSend(text, files) {
+  const th = thread();
+  if (S.guard === false || th.private) return false;
+  const all = [text, ...files.filter((f) => f.kind === 'text').map((f) => f.text)].join('\n');
+  const { found } = scanSensitive(all);
+  if (!found.size) return false;
+  guardPending = { text, files };
+  const mine = targets().some(isMine);
+  const el = $('#skillHint');
+  el.hidden = false; el.className = 'hintbar guard'; el.dataset.kid = '';
+  el.innerHTML = `<b>🛡 Tu mensaje contiene datos sensibles:</b> ${[...found].map(([k, n]) => `${esc(k)}${n > 1 ? ` (${n})` : ''}`).join(', ')}. Se enviaría a una IA de internet.
+    <div class="row wrap"><button type="button" class="btn sm" data-guard="hide">OCULTARLOS Y ENVIAR</button>
+    ${mine ? '<button type="button" class="btn sm ghost" data-guard="private">🔒 SOLO A MI IA LOCAL</button>' : ''}
+    <button type="button" class="btn sm ghost" data-guard="send">ENVIAR IGUALMENTE</button><button type="button" class="btn sm ghost" data-guard="cancel">CANCELAR</button></div>
+    ${mine ? '' : '<span class="hint">Para enviarlos sin que salgan de casa, conecta tu IA local (⚙ → IA EN ESTE EQUIPO).</span>'}`;
+  return true;
+}
+function guardDecide(act) {
+  const g = guardPending, el = $('#skillHint');
+  guardPending = null; el.hidden = true; el.className = 'hintbar';
+  if (!g || act === 'cancel') { if (g) { input.value = g.text; attach = g.files; renderAttach(); input.dispatchEvent(new Event('input')); } return; }
+  let { text, files } = g;
+  if (act === 'hide') {
+    text = scanSensitive(text).text;
+    files = files.map((f) => (f.kind === 'text' ? { ...f, text: scanSensitive(f.text).text } : f));
+    toast('🛡 Datos sensibles sustituidos por [DNI], [IBAN]…');
+  }
+  if (act === 'private') {
+    // El dato quedará en el historial del hilo: el hilo entero pasa a privado para que no salga después.
+    const th = thread(); th.private = true; th.ts = Date.now(); save(); renderTargets();
+    toast('🔒 Hilo privado: este y los siguientes mensajes solo van a tus equipos');
+  }
+  send(text, files);
+}
+
 // ---------- búsqueda en internet con fuentes ----------
 // Buscador propio (⚙): SearXNG (gratis; en tu PC, privado) o Brave Search (clave gratuita). Si no hay, el del PC
 // emparejado a través del puente (herramienta web_search). Los resultados van con la pregunta y la IA debe citarlos.
@@ -1115,7 +1182,7 @@ async function webSearchRaw(q, th, signal) {
 }
 // Añade los resultados a la última pregunta (funciona con cualquier IA, también las que no usan herramientas).
 async function withSearch(th, userMsg, hist, signal) {
-  const q = String(userMsg.content || '').trim().slice(0, 300);
+  const q = String(userMsg.searchQuery || userMsg.content || '').trim().slice(0, 300);
   if (!q) return hist;
   let res;
   try { res = await webSearch(q, th, signal); }
@@ -1345,7 +1412,7 @@ function replyHTML(m) {
   const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
-    : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
+    : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-check="${m.id}" title="Revisa esta respuesta: qué es dudoso y cómo verificarlo (con fuentes de internet si tienes buscador)">🔎 COMPROBAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
   const skill = m.skill ? `<span class="chip skill">✦ ${esc(m.skill.name)} · v${m.skill.v}</span>` : '';
   const files = m.files?.length ? `<div class="files gen">${filesHTML(m)}</div>` : '';
   return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
@@ -1355,12 +1422,34 @@ function sourcesHTML(m) {
   if (!m.sources?.length) return '';
   return `<details class="sources"><summary>🌐 ${m.sources.length} fuentes de internet</summary><ol>${m.sources.map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)}</a> <small>${esc(hostOf(x.url))}</small></li>`).join('')}</ol></details>`;
 }
+// Ajustes de un toque bajo la última respuesta: se envían como un mensaje normal (y se ve qué se pidió).
+const ADJUST = [
+  ['✂ Más corta', 'Hazla más corta: quédate solo con lo esencial.'],
+  ['🧒 Más sencilla', 'Explícalo de forma más sencilla, sin tecnicismos, para alguien que empieza.'],
+  ['💡 Con ejemplos', 'Añade 2 o 3 ejemplos concretos.'],
+  ['▦ En tabla', 'Ponlo en una tabla.'],
+  ['👔 Más formal', 'Reescríbela con un tono más formal y profesional.'],
+  ['➕ Continúa', 'Continúa donde lo dejaste.'],
+];
+const adjustHTML = () => `<div class="adjust" role="group" aria-label="Ajustar la respuesta">${ADJUST.map(([l], i) => `<button type="button" data-adjust="${i}">${l}</button>`).join('')}</div>`;
+// La habilidad «Comprobar una respuesta» (de inicio) se usa aunque no esté instalada.
+const CHECK_SKILL = () => liveSkills().find((k) => k.name === 'Comprobar una respuesta') || { id: 'check', name: 'Comprobar una respuesta', version: 1, ...STARTERS.find((k) => k.name === 'Comprobar una respuesta') };
+function checkReply(id) {
+  const th = thread(), m = th.messages.find((x) => x.id === id);
+  if (!m?.content || busy) return;
+  const q = m.content.replace(/\s+/g, ' ').slice(0, 200);
+  send(`Comprueba esta respuesta${m.label ? ` (de ${m.label})` : ''}:\n\n«${m.content.slice(0, 8000)}»`, [], {
+    display: `🔎 Comprueba la respuesta${m.label ? ` de ${m.label}` : ''}`, skill: JSON.parse(JSON.stringify(CHECK_SKILL())), web: searchReady(th), searchQuery: q });
+}
 function msgHTML(m) {
-  if (m.role === 'user') return `<div class="msg user">${sourcesHTML(m)}<div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
+  if (m.role === 'user') return `<div class="msg user">${sourcesHTML(m)}<div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.display ?? m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
   return `<div class="msg">${replyHTML(m)}</div>`;
 }
 function logHTML(th) {
   const msgs = th.messages, out = [batchHTML(th)];
+  const lastReply = [...msgs].reverse().find((m) => m.role === 'assistant' && m.content && !m.error && !m.pending && !m.group)?.id;
+  // Solo si es lo último del hilo (si después hay una pregunta tuya, ya no aplica).
+  const lastOk = msgs[msgs.length - 1]?.id === lastReply;
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.group) {
@@ -1369,7 +1458,7 @@ function logHTML(th) {
       i--;
       const answers = g.filter((x) => !x.synth), synth = g.find((x) => x.synth);
       out.push(`<div class="msg council"><div class="tag">⚖ CONSEJO · ${answers.length} IAs</div><div class="cgrid">${answers.map(replyHTML).join('')}</div>${synth ? replyHTML(synth) : ''}</div>`);
-    } else out.push(msgHTML(m));
+    } else out.push(msgHTML(m).replace(/<\/div>$/, m.id === lastReply && lastOk && !busy && !th.batch ? `${adjustHTML()}</div>` : '</div>'));
     if (th.summary?.upto === m.id && i < msgs.length - 1) {
       out.push(`<details class="note"><summary>🗜 Lo anterior se resumió para ahorrar tokens · VER RESUMEN</summary><div class="txt">${md(th.summary.text)}</div></details>`);
     }
@@ -1866,6 +1955,9 @@ function renderSettings() {
     <p class="hint">Comprueba cuáles de tus IAs funcionan ahora y por qué fallan las demás. Hace una petición mínima a cada una (cuenta en su cuota).</p>
     <div class="row wrap"><button class="btn sm" id="diagRun">PROBAR TODAS MIS IAs</button><label class="auto"><input type="checkbox" id="diagAll"> TODOS LOS MODELOS</label></div>
     <div id="diagOut"></div>
+    <h3>🛡 DATOS SENSIBLES</h3>
+    <label class="auto"><input type="checkbox" id="guardOn" ${S.guard !== false ? 'checked' : ''}> AVISAR ANTES DE ENVIARLOS A INTERNET</label>
+    <p class="hint">DNI/NIE, IBAN, tarjetas, teléfonos, correos, contraseñas y claves API. Se detectan en tu dispositivo, sin IA, y puedes ocultarlos, mandarlos solo a tu IA local o enviarlos igualmente.</p>
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
@@ -2471,6 +2563,7 @@ function renderSkillHint() {
 }
 $('#input').addEventListener('input', () => { clearTimeout(hintT); hintT = setTimeout(renderSkillHint, 300); });
 $('#skillHint').addEventListener('click', (e) => {
+  if (e.target.dataset.guard) return guardDecide(e.target.dataset.guard);
   const act = e.target.dataset.hint; if (!act) return;
   const th = thread(), id = $('#skillHint').dataset.kid;
   if (act === 'use') th.skill = id; else th.noSuggest = [...(th.noSuggest || []), id];
@@ -2715,6 +2808,7 @@ $('#composer').onsubmit = (e) => {
   if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
   input.value = ''; input.style.height = 'auto';
+  if (guardSend(text, files)) return;
   send(text, files);
 };
 $('#attachBtn').onclick = () => $('#fileIn').click();
@@ -2728,6 +2822,8 @@ $('#log').addEventListener('click', (e) => {
   const { copy, speak: sp, skillify } = e.target.dataset || {};
   if (e.target.id === 'batchGo') return runBatch();
   if (e.target.dataset?.vote) return vote(e.target.dataset.vote);
+  if (e.target.dataset?.check) return checkReply(e.target.dataset.check);
+  if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(t); }
   if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);
@@ -2795,6 +2891,7 @@ $('#settings').addEventListener('change', (e) => {
   }
   if (e.target.id === 'searchType') { S.search = { ...S.search, type: e.target.value, url: S.search?.url || (e.target.value === 'searxng' ? 'http://127.0.0.1:8080' : '') }; save(); renderSettings(); renderTargets(); }
   if (e.target.id === 'searchUrl' || e.target.id === 'searchKey') { S.search = { ...S.search, [e.target.id === 'searchUrl' ? 'url' : 'key']: e.target.value.trim() }; save(); renderTargets(); toast('BUSCADOR GUARDADO'); }
+  if (e.target.id === 'guardOn') { S.guard = e.target.checked; save(); }
   if (e.target.id === 'routeOn') { S.routing = { ...S.routing, on: e.target.checked }; save(); renderSettings(); }
   if (e.target.dataset.route) { S.routing = { ...S.routing, rules: { ...S.routing?.rules, [e.target.dataset.route]: e.target.value } }; save(); toast('ENRUTADO GUARDADO'); }
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }

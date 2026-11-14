@@ -303,3 +303,7 @@ ul.hint{margin:4px 0;padding-left:18px}
 .card.ext{border-left-color:var(--orange)}
 .card.batch progress{width:100%;accent-color:var(--green)}
 #auditOut{margin-top:10px}
+.hintbar.guard{display:flex;flex-direction:column;gap:6px;color:#ffe0b3;border-top:1px solid var(--orange);background:rgba(255,122,0,.1)}
+.adjust{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.adjust button{font:12px var(--cond);letter-spacing:.04em;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:4px 10px;cursor:pointer}
+.adjust button:hover,.adjust button:focus-visible{border-color:var(--orange);color:var(--orange2)}
