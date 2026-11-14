@@ -200,10 +200,10 @@ ipcMain.handle('save-pdf', async (_e, name) => {
   fs.writeFileSync(r.filePath, pdf);
   return r.filePath;
 });
-ipcMain.handle('save-file', async (_e, name, text) => {
+ipcMain.handle('save-file', async (_e, name, text, encoding) => {
   const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('documents'), String(name).replace(/[\\/:*?"<>|]/g, '_')) });
   if (r.canceled || !r.filePath) return null;
-  fs.writeFileSync(r.filePath, String(text));
+  fs.writeFileSync(r.filePath, encoding === 'base64' ? Buffer.from(String(text), 'base64') : String(text));
   return r.filePath;
 });
 

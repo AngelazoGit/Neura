@@ -29,7 +29,7 @@ test('rechaza peticiones sin token o con token falso', async () => {
 });
 test('acepta el token correcto', async () => {
   const r = await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'threads_sync']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'image_generate', 'threads_sync']);
 });
 test('/health no revela datos del equipo', async () => {
   assert.deepEqual(await (await fetch(`${BASE}/health`)).json(), { ok: true });
@@ -112,8 +112,33 @@ writeFileSync(join(shared, 'sub', 'codigo.js'), 'function suma(a, b) { return a 
 writeFileSync(join(shared, '.oculta', 'clave.txt'), 'secreto oculto');
 writeFileSync(join(outside, 'secreto.txt'), 'secreto de fuera');
 symlinkSync(outside, join(shared, 'enlace'));
+// Generadores de imágenes simulados: AUTOMATIC1111/Forge (/sdapi) y ComfyUI (/prompt, /history, /view).
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const imgSeen = [];
+const a1111 = http.createServer((req, res) => {
+  let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/sdapi/v1/sd-models') return res.end('[{"title":"sdxl"}]');
+    if (req.url === '/sdapi/v1/txt2img') { imgSeen.push({ a1111: JSON.parse(b) }); return res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })); }
+    res.statusCode = 404; res.end('{}');
+  });
+});
+let comfyPolls = 0;
+const comfy = http.createServer((req, res) => {
+  let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+    if (req.url === '/system_stats') return res.end('{}');
+    if (req.url === '/object_info/CheckpointLoaderSimple') return res.end(JSON.stringify({ CheckpointLoaderSimple: { input: { required: { ckpt_name: [['dreamshaper.safetensors', 'otro.safetensors']] } } } }));
+    if (req.url === '/prompt') { imgSeen.push({ comfy: JSON.parse(b) }); comfyPolls = 0; return res.end('{"prompt_id":"p1"}'); }
+    if (req.url === '/history/p1') return res.end(++comfyPolls < 2 ? '{}' : JSON.stringify({ p1: { status: { status_str: 'success' }, outputs: { 9: { images: [{ filename: 'neura_0001.png', subfolder: '', type: 'output' }] } } } }));
+    if (req.url.startsWith('/view?filename=neura_0001.png')) { res.setHeader('content-type', 'image/png'); return res.end(PNG); }
+    res.statusCode = 404; res.end('{}');
+  });
+});
+await Promise.all([a1111, comfy].map((x) => new Promise((r) => x.listen(0, '127.0.0.1', r))));
+after(() => { a1111.close(); comfy.close(); });
 const cfgFile = join(base, 'config.json');
-writeFileSync(cfgFile, JSON.stringify({ backends: [{ id: 'ollama', type: 'ollama', url: `http://127.0.0.1:${ollama.address().port}` }], folders: [shared] }));
+writeFileSync(cfgFile, JSON.stringify({ backends: [{ id: 'ollama', type: 'ollama', url: `http://127.0.0.1:${ollama.address().port}` }], folders: [shared],
+  images: [{ id: 'forge', type: 'a1111', url: `http://127.0.0.1:${a1111.address().port}` }, { id: 'comfy', type: 'comfyui', url: `http://127.0.0.1:${comfy.address().port}` }, { id: 'apagado', type: 'comfyui', url: 'http://127.0.0.1:9' }] }));
 
 const PORT2 = 18788, BASE2 = `http://127.0.0.1:${PORT2}`;
 const srv2 = spawn(process.execPath, [fileURLToPath(new URL('server.mjs', import.meta.url))], {
@@ -129,7 +154,7 @@ const call = async (name, args) => (await (await rpc2({ jsonrpc: '2.0', id: 1, m
 
 test('con carpetas aparecen las herramientas de archivos', async () => {
   const r = await (await rpc2({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'image_generate', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
 });
 test('list_dir, search_files y read_file', async () => {
   assert.deepEqual((await call('list_dir', {})).structuredContent.entries, [{ name: 'docs', type: 'dir' }]);
@@ -408,4 +433,31 @@ test('Gateway: caché opcional de peticiones idénticas (texto y streaming); se 
   await configure({ enabled: true, providers });
   const c2 = calls(); await ask('cache-2'); await ask('cache-2'); assert.equal(calls(), c2 + 2, 'sin caché, siempre se pregunta');
   await configure({ enabled: false });
+});
+
+test('imágenes: list_models indica qué generadores están encendidos', async () => {
+  const r = await call('list_models', {});
+  assert.deepEqual(r.structuredContent.images.map((i) => `${i.id}:${i.online}`), ['forge:true', 'comfy:true', 'apagado:false']);
+});
+test('imágenes: Forge/AUTOMATIC1111 devuelve la imagen como contenido MCP (con prompt negativo y valores acotados)', async () => {
+  const r = await call('image_generate', { prompt: 'un faro', negative: 'texto', steps: 999, width: 100 });
+  assert.equal(r.isError, undefined);
+  const img = r.content.find((c) => c.type === 'image');
+  assert.equal(img.mimeType, 'image/png'); assert.deepEqual(Buffer.from(img.data, 'base64'), PNG);
+  assert.match(r.content.find((c) => c.type === 'text').text, /forge · sdxl-base/);
+  const sent = imgSeen.at(-1).a1111;
+  assert.equal(sent.prompt, 'un faro'); assert.equal(sent.negative_prompt, 'texto'); assert.equal(sent.steps, 80); assert.equal(sent.width, 256);
+  assert.equal(r.structuredContent.image, undefined, 'la imagen no se duplica en los datos estructurados');
+});
+test('imágenes: ComfyUI con un flujo básico y el primer modelo instalado', async () => {
+  const r = await call('image_generate', { prompt: 'un gato astronauta', negative: 'borroso', backend: 'comfy', seed: 7 });
+  assert.deepEqual(Buffer.from(r.content.find((c) => c.type === 'image').data, 'base64'), PNG);
+  const wf = imgSeen.at(-1).comfy.prompt;
+  assert.equal(wf[4].inputs.ckpt_name, 'dreamshaper.safetensors');
+  assert.equal(wf[6].inputs.text, 'un gato astronauta'); assert.equal(wf[7].inputs.text, 'borroso'); assert.equal(wf[3].inputs.seed, 7);
+  assert.match(r.structuredContent.text, /comfy · dreamshaper/);
+});
+test('imágenes: sin ningún generador encendido, explica cómo conseguir uno', async () => {
+  const r = (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'image_generate', arguments: { prompt: 'x' } } })).json()).result;
+  assert.equal(r.isError, true); assert.match(r.content[0].text, /ComfyUI.*Forge/);
 });

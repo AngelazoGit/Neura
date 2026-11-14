@@ -291,3 +291,7 @@ ol.learn li span{display:block;margin-left:16px}
   pre,code{white-space:pre-wrap!important;word-break:break-word}
   a{text-decoration:underline}
 }
+.files.gen{margin:6px 0}
+.files.gen .thumb{max-width:100%;max-height:520px;width:auto;height:auto}
+ul.hint{margin:4px 0;padding-left:18px}
+.okc{color:var(--green)}

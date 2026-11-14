@@ -52,6 +52,17 @@ const BACKENDS = cfg.backends?.length ? cfg.backends : [
   { id: 'lmstudio', type: 'openai', url: 'http://127.0.0.1:1234/v1' },
 ];
 
+// Generadores de imágenes en este equipo: AUTOMATIC1111 / Forge / SD.Next (API /sdapi) y ComfyUI.
+// Se detectan en sus puertos habituales; en config.json, "images": [{ "id", "type": "a1111"|"comfyui", "url", "workflow"? }].
+const IMAGES = (() => {
+  let list = cfg.images;
+  if (process.env.NEURA_IMAGES) try { list = JSON.parse(process.env.NEURA_IMAGES); } catch { console.error('NEURA_IMAGES no es JSON válido'); }
+  return Array.isArray(list) ? list : [
+    { id: 'forge', type: 'a1111', url: 'http://127.0.0.1:7860' },
+    { id: 'comfyui', type: 'comfyui', url: 'http://127.0.0.1:8188' },
+  ];
+})();
+
 // ---------- backends ----------
 const trim = (u) => u.replace(/\/+$/, '');
 const headers = (b) => ({ 'Content-Type': 'application/json', ...(b.apiKey ? { Authorization: `Bearer ${b.apiKey}` } : {}) });
@@ -99,6 +110,88 @@ function isThisMachine(b) {
   try { h = new URL(b.url).hostname.replace(/^\[|\]$/g, ''); } catch { return false; }
   return h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
+// ---------- imágenes ----------
+async function imageStatus() {
+  return Promise.all(IMAGES.map(async (g) => {
+    try {
+      if (g.type === 'comfyui') await getJSON(`${trim(g.url)}/system_stats`, { timeout: 3000 });
+      else await getJSON(`${trim(g.url)}/sdapi/v1/sd-models`, { timeout: 3000 });
+      return { id: g.id, type: g.type, online: true };
+    } catch { return { id: g.id, type: g.type, online: false }; }
+  }));
+}
+// Rellena %PROMPT%, %NEGATIVE%, %SEED%, %WIDTH%, %HEIGHT%, %STEPS% en un flujo de ComfyUI (formato API) propio.
+function fillWorkflow(node, vars) {
+  if (typeof node === 'string') {
+    const m = node.match(/^%([A-Z]+)%$/);
+    if (m && m[1] in vars) return vars[m[1]];
+    return node.replace(/%([A-Z]+)%/g, (x, k) => (k in vars ? String(vars[k]) : x));
+  }
+  if (Array.isArray(node)) return node.map((x) => fillWorkflow(x, vars));
+  if (node && typeof node === 'object') return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, fillWorkflow(v, vars)]));
+  return node;
+}
+async function comfyGenerate(g, a, signal) {
+  const base = trim(g.url);
+  let wf;
+  if (g.workflow) wf = fillWorkflow(JSON.parse(readFileSync(g.workflow, 'utf8')), { PROMPT: a.prompt, NEGATIVE: a.negative, SEED: a.seed, WIDTH: a.width, HEIGHT: a.height, STEPS: a.steps });
+  else {
+    // Flujo básico de texto a imagen con el primer modelo (checkpoint) instalado, o el de config.
+    const info = await getJSON(`${base}/object_info/CheckpointLoaderSimple`, { timeout: 10000, signal });
+    const ckpt = g.checkpoint || info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0]?.[0];
+    if (!ckpt) throw new Error('ComfyUI no tiene ningún modelo (checkpoint) instalado en models/checkpoints');
+    wf = {
+      3: { class_type: 'KSampler', inputs: { seed: a.seed, steps: a.steps, cfg: 7, sampler_name: 'euler', scheduler: 'normal', denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+      4: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
+      5: { class_type: 'EmptyLatentImage', inputs: { width: a.width, height: a.height, batch_size: 1 } },
+      6: { class_type: 'CLIPTextEncode', inputs: { text: a.prompt, clip: ['4', 1] } },
+      7: { class_type: 'CLIPTextEncode', inputs: { text: a.negative, clip: ['4', 1] } },
+      8: { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+      9: { class_type: 'SaveImage', inputs: { filename_prefix: 'neura', images: ['8', 0] } },
+    };
+    g = { ...g, model: ckpt };
+  }
+  const { prompt_id: id } = await getJSON(`${base}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: 'neura' }), timeout: 30000, signal });
+  if (!id) throw new Error('ComfyUI no aceptó el flujo');
+  const end = Date.now() + TIMEOUT;
+  while (Date.now() < end) {
+    if (signal?.aborted) throw new Error('Cancelado');
+    const h = (await getJSON(`${base}/history/${encodeURIComponent(id)}`, { timeout: 10000, signal }))[id];
+    if (h?.status?.status_str === 'error') throw new Error('ComfyUI falló al generar la imagen');
+    const img = Object.values(h?.outputs || {}).flatMap((o) => o.images || [])[0];
+    if (img) {
+      const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: img.type || 'output' });
+      const r = await fetch(`${base}/view?${q}`, { signal: signalFor(30000, signal) });
+      if (!r.ok) throw new Error(`ComfyUI: HTTP ${r.status} al descargar la imagen`);
+      return { data: Buffer.from(await r.arrayBuffer()).toString('base64'), mime: r.headers.get('content-type') || 'image/png', model: g.model || 'flujo propio' };
+    }
+    await new Promise((res) => setTimeout(res, 700));
+  }
+  throw new Error('ComfyUI tardó demasiado');
+}
+async function a1111Generate(g, a, signal) {
+  const d = await getJSON(`${trim(g.url)}/sdapi/v1/txt2img`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+    body: JSON.stringify({ prompt: a.prompt, negative_prompt: a.negative, width: a.width, height: a.height, steps: a.steps, seed: a.seed }) });
+  if (!d.images?.[0]) throw new Error('El generador no devolvió ninguna imagen');
+  let model = '';
+  try { model = JSON.parse(d.info || '{}').sd_model_name || ''; } catch {}
+  return { data: d.images[0].replace(/^data:[^,]+,/, ''), mime: 'image/png', model };
+}
+const clampInt = (v, lo, hi, def) => (Number.isFinite(+v) ? Math.min(hi, Math.max(lo, Math.round(+v))) : def);
+async function imageGenerate(args, { signal } = {}) {
+  const prompt = String(args.prompt || '').trim().slice(0, 4000);
+  if (!prompt) throw new Error('Falta el prompt');
+  const a = { prompt, negative: String(args.negative || '').slice(0, 2000), steps: clampInt(args.steps, 1, 80, 25),
+    width: clampInt(args.width, 256, 2048, 1024) & ~7, height: clampInt(args.height, 256, 2048, 1024) & ~7, seed: clampInt(args.seed, 0, 2 ** 31, Math.floor(Math.random() * 2 ** 31)) };
+  const online = (await imageStatus()).filter((x) => x.online).map((x) => IMAGES.find((g) => g.id === x.id));
+  const g = online.find((x) => x.id === args.backend) || online[0];
+  if (!g) throw new Error('No hay ningún generador de imágenes encendido en este equipo. Instala y abre ComfyUI (puerto 8188) o Forge / AUTOMATIC1111 con la opción --api (puerto 7860).');
+  const t0 = Date.now();
+  const out = await (g.type === 'comfyui' ? comfyGenerate : a1111Generate)(g, a, signal);
+  const seconds = Math.round((Date.now() - t0) / 100) / 10;
+  return { image: out, text: `Imagen generada en ${seconds} s con ${g.id}${out.model ? ` · ${out.model}` : ''} · semilla ${a.seed}`, backend: g.id, model: out.model, seconds, seed: a.seed };
+}
+
 async function listModels() {
   const backends = await Promise.all(BACKENDS.map(async (b) => {
     try {
@@ -109,7 +202,7 @@ async function listModels() {
     }
   }));
   const models = backends.flatMap((b) => b.models.map((name) => ({ id: `${b.id}/${name}`, backend: b.id, name })));
-  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })) };
+  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })), images: await imageStatus() };
 }
 
 const asText = (c) => typeof c === 'string' ? c
@@ -565,6 +658,11 @@ const TOOLS = [
   { name: 'system_info', title: 'Estado del equipo',
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
     inputSchema: { type: 'object', properties: {} } },
+  { name: 'image_generate', title: 'Generar una imagen en este equipo',
+    description: 'Genera una imagen con el generador local (ComfyUI o Forge/AUTOMATIC1111). Gratis y privado: no sale del equipo.',
+    inputSchema: { type: 'object', required: ['prompt'], properties: {
+      prompt: { type: 'string' }, negative: { type: 'string', description: 'lo que no debe aparecer' },
+      width: { type: 'integer' }, height: { type: 'integer' }, steps: { type: 'integer' }, seed: { type: 'integer' }, backend: { type: 'string' } } } },
   ...(SYNC ? [{ name: 'threads_sync', title: 'Sincronizar hilos',
     description: 'Guarda en este equipo los hilos de chat (y las colecciones skills y projects) y devuelve lo que cambió desde la revisión since.',
     inputSchema: { type: 'object', properties: {
@@ -575,7 +673,7 @@ const TOOLS = [
 ];
 const TOOL_IMPL = { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs, system_info: systemInfo };
 const CHAT_TOOLS = [...FILE_TOOLS, TOOLS.find((t) => t.name === 'system_info')];
-const IMPL = { list_models: listModels, chat, system_info: systemInfo, ...(SYNC ? { threads_sync: threadsSync } : {}),
+const IMPL = { list_models: listModels, chat, system_info: systemInfo, image_generate: imageGenerate, ...(SYNC ? { threads_sync: threadsSync } : {}),
   ...(FOLDERS.length ? { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs } : {}) };
 
 async function rpc(msg, session) {
@@ -599,6 +697,11 @@ async function rpc(msg, session) {
       if (!fn) return err(-32602, `Herramienta desconocida: ${params?.name}`);
       try {
         const data = await fn(params.arguments || {});
+        if (data.image) {
+          // Imagen como contenido MCP de tipo image (base64); el resto, como datos estructurados.
+          const { image, ...rest } = data;
+          return ok({ content: [{ type: 'image', data: image.data, mimeType: image.mime }, { type: 'text', text: data.text }], structuredContent: rest });
+        }
         const text = typeof data.text === 'string' ? data.text : params.name === 'threads_sync'
           ? `rev ${data.rev} · ${data.threads.length} hilos` : JSON.stringify(data, null, 2);
         return ok({ content: [{ type: 'text', text }], structuredContent: data });

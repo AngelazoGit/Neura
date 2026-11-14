@@ -364,7 +364,7 @@ const isCtxErr = (e) => e.status === 413 || /context.{0,20}(length|window|limit)
 const textOf = (c) => (typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n'));
 
 // Herramientas MCP disponibles para las IAs (todas menos las internas de Neura).
-const INTERNAL = new Set(['chat', 'list_models', 'threads_sync']);
+const INTERNAL = new Set(['chat', 'list_models', 'threads_sync', 'image_generate']);
 function toolbox() {
   const list = [], used = new Set();
   for (const s of S.mcp) if (s.status === 'on') for (const t of s.tools || []) {
@@ -624,6 +624,7 @@ async function mcpConnect(s, quiet) {
       if (!data) try { data = JSON.parse(r.content?.[0]?.text || '{}'); } catch { data = {}; }
       s.models = (data.models || []).map((m) => (typeof m === 'string' ? m : m.id));
       s.backends = data.backends || [];
+      s.images = data.images || [];
     }
     s.status = 'on'; s.error = null;
     if (!quiet) toast(`${s.name}: CONECTADO · ${s.models.length} modelos`);
@@ -928,6 +929,52 @@ function routingHTML() {
     ${rt.on ? `<div class="routes">${[...TASKS, { id: 'general' }].map((t) => `<label class="field">${taskName(t.id)}<select data-route="${t.id}">${opts(t.id)}</select></label>`).join('')}</div>` : ''}`;
 }
 
+// ---------- imágenes en tu equipo: /imagen <prompt> ----------
+// Las genera el puente de tu PC con ComfyUI o Forge/AUTOMATIC1111: gratis, sin cuentas y sin salir de tu equipo.
+const imageServers = (th) => S.mcp.filter((s) => s.status === 'on' && (s.tools || []).some((t) => t.name === 'image_generate') && (!th.private || s.local || s.mine))
+  .sort((a, b) => (b.images || []).some((i) => i.online) - (a.images || []).some((i) => i.online));
+async function sendImage(raw) {
+  const th = thread(), msgs = th.messages;
+  if (!msgs.length) th.title = raw.slice(0, 48);
+  th.ts = Date.now();
+  msgs.push({ id: uid(), role: 'user', content: raw, ts: Date.now() });
+  // «Evitar:» en una línea aparte = prompt negativo (como lo escribe la habilidad «Prompt para imagen»).
+  const [prompt, negative = ''] = raw.replace(/^\/imagen\s*/i, '').split(/\n\s*Evitar:\s*/i);
+  const srv = imageServers(th)[0];
+  const fail = (error) => msgs.push({ id: uid(), role: 'assistant', label: '🖼 IMAGEN', error, ts: Date.now() });
+  if (!prompt.trim()) fail('Escribe qué imagen quieres después de /imagen. Ejemplo: /imagen un faro al atardecer, acuarela');
+  else if (!srv) fail(th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos con imágenes conectado (⬡).' : 'Para crear imágenes gratis hace falta Neura para PC (o el puente) con ComfyUI o Forge en ese equipo. Mira ⬡ → 🖼 IMÁGENES EN ESTE PC.');
+  else {
+    setBusy(true);
+    const msg = { id: uid(), role: 'assistant', label: `🖼 ${srv.name}`, content: '', pending: true, ts: Date.now() };
+    msgs.push(msg); save(); renderLog();
+    try {
+      const t0 = performance.now();
+      const r = await mcpRpc(srv, 'tools/call', { name: 'image_generate', arguments: { prompt: prompt.trim(), negative: negative.trim() } }, { signal: abortCtl.signal });
+      const txt = (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+      if (r.isError) throw new Error(txt.replace(/^Error:\s*/, ''));
+      const img = (r.content || []).find((c) => c.type === 'image');
+      if (!img?.data) throw new Error('El equipo no devolvió ninguna imagen');
+      Object.assign(msg, { pending: false, content: txt, ms: Math.round(performance.now() - t0), label: `🖼 ${srv.name} / ${r.structuredContent?.backend || 'imagen'}`,
+        files: [{ kind: 'image', name: `${safeName(prompt)}.png`, data: `data:${img.mimeType || 'image/png'};base64,${img.data}` }] });
+      await persistFiles();
+    } catch (e) { Object.assign(msg, { pending: false, error: e.name === 'AbortError' ? 'Cancelado' : e.message }); }
+    setBusy(false);
+  }
+  th.ts = Date.now(); save(); renderLog(); syncAll();
+}
+async function saveImage(id) {
+  const f = thread().messages.find((m) => m.id === id)?.files?.find((x) => x.kind === 'image' && x.data);
+  if (!f) return;
+  if (DESK) { const p = await DESK.saveFile(f.name, f.data.split(',')[1], 'base64'); if (p) toast('GUARDADO: ' + p); return; }
+  const blob = toBlob(f.data), file = new File([blob], f.name, { type: blob.type });
+  if (CAP && navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: f.name }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = f.name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
 function councilMembers(first, needs = {}) {
   const chosen = S.councilKeys.map(findT).filter((t) => t && !cooling(t.key) && allowed(t) && capable(t, needs));
@@ -994,9 +1041,10 @@ function replyHTML(m) {
   const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
-    : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
+    : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
   const skill = m.skill ? `<span class="chip skill">✦ ${esc(m.skill.name)} · v${m.skill.v}</span>` : '';
-  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}<div class="txt">${md(m.content)}</div></div>`;
+  const files = m.files?.length ? `<div class="files gen">${filesHTML(m)}</div>` : '';
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
 }
 function msgHTML(m) {
   if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
@@ -1423,6 +1471,53 @@ function usageSumHTML() {
   const x = spent();
   return `Gasto de hoy: <b>${eur(x.day)}</b> · este mes: <b>${eur(x.month)}</b>${overBudget() ? ' · <b class="red">TOPE ALCANZADO: solo IAs gratuitas y tus equipos</b>' : ''}`;
 }
+// ---------- diagnóstico: probar todas mis IAs ----------
+// Una petición mínima a cada IA (o a cada modelo) para saber cuáles funcionan ahora y por qué fallan las demás.
+let diagRunning = false;
+async function diagnose(allModels) {
+  if (diagRunning) return;
+  diagRunning = true;
+  const el = () => document.getElementById('diagOut');
+  const rows = [];
+  const groups = [
+    ...S.providers.filter((p) => p.enabled !== false).map((p) => ({ name: p.name, list: (allModels ? p.models : p.models.filter((m) => S.health[`${p.id}::${m}`]?.reason !== 'RETIRADO').slice(0, 1)).map((m) => findT(`${p.id}::${m}`)).filter(Boolean), noKey: !p.apiKey && p.preset !== 'custom', empty: !p.models.length })),
+    ...S.mcp.map((s) => ({ name: `⬡ ${s.name}`, list: (allModels ? s.models || [] : (s.models || []).slice(0, 1)).map((m) => findT(`mcp:${s.id}::${m}`)).filter(Boolean), off: s.status !== 'on' && (s.error || 'sin conexión') })),
+  ];
+  const paint = () => {
+    const okN = rows.filter((x) => x.ok).length, done = rows.filter((x) => x.ok != null).length;
+    if (el()) el().innerHTML = `<p class="hint">${diagRunning ? `Probando… ${done}/${rows.length}` : `<b>${okN} de ${rows.length}</b> funcionan ahora.`}</p>
+      <table class="usage"><thead><tr><th>IA</th><th>RESULTADO</th></tr></thead><tbody>${rows.map((x) => `<tr><td>${esc(x.label)}</td><td>${x.ok == null ? '…' : x.ok ? `<span class="okc">✓ ${(x.ms / 1000).toFixed(1)} s</span>` : `<span class="red">✕ ${esc(x.why)}</span>`}</td></tr>`).join('')}</tbody></table>`;
+  };
+  for (const g of groups) {
+    if (g.off) rows.push({ label: g.name, ok: false, why: `no conecta: ${g.off}` });
+    else if (g.noKey) rows.push({ label: g.name, ok: false, why: 'falta la clave API' });
+    else if (g.empty) rows.push({ label: g.name, ok: false, why: 'sin modelos: pulsa ESCANEAR MODELOS' });
+    else for (const t of g.list) rows.push({ label: t.label, t });
+  }
+  paint();
+  // Proveedores en paralelo; los modelos de un mismo proveedor, de uno en uno (para no provocar límites por minuto).
+  const byProv = new Map();
+  for (const x of rows.filter((x) => x.t)) { const k = x.t.pid || x.t.sid; byProv.set(k, [...(byProv.get(k) || []), x]); }
+  await Promise.all([...byProv.values()].map(async (list) => {
+    for (const x of list) {
+      const t = x.t;
+      if (!allowed(t)) { Object.assign(x, { ok: false, why: `no se prueba: ${notAllowedWhy(t)}` }); paint(); continue; }
+      if (S.health[t.key]?.reason === 'LÍMITE' && cooling(t.key)) { Object.assign(x, { ok: false, why: 'ha llegado a tu límite diario' }); paint(); continue; }
+      const t0 = performance.now(), sig = AbortSignal.timeout(45000);
+      try {
+        await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, sig);
+        Object.assign(x, { ok: true, ms: Math.round(performance.now() - t0) }); noteOk(t, x.ms);
+      } catch (e) {
+        noteFail(t, e);
+        Object.assign(x, { ok: false, why: sig.aborted ? 'no respondió en 45 s' : `${friendly(e)}${e.status ? ` [${e.status}]` : ''}` });
+      }
+      paint();
+    }
+  }));
+  diagRunning = false;
+  paint(); save(); renderTargets();
+}
+
 // Lo que ha pasado hoy y este mes por el Gateway del PC (lo cuenta el puente).
 async function refreshGwUsage() {
   if (!DESK) return;
@@ -1456,6 +1551,10 @@ function renderSettings() {
     <label class="auto"><input type="checkbox" id="freeOnly" ${S.freeOnly ? 'checked' : ''}> SOLO GRATIS</label>
     <p class="hint">Neura solo usará IAs del nivel gratuito (en OpenRouter, modelos <b>:free</b>) y tus equipos. Las de pago o de coste desconocido (⛔) no se usan ni en AUTO-SALTO, ni en CONSEJO, ni para resumir.</p>
     <div id="usagePanel">${usageHTML()}</div>
+    <h3>🩺 DIAGNÓSTICO</h3>
+    <p class="hint">Comprueba cuáles de tus IAs funcionan ahora y por qué fallan las demás. Hace una petición mínima a cada una (cuenta en su cuota).</p>
+    <div class="row wrap"><button class="btn sm" id="diagRun">PROBAR TODAS MIS IAs</button><label class="auto"><input type="checkbox" id="diagAll"> TODOS LOS MODELOS</label></div>
+    <div id="diagOut"></div>
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
@@ -1485,6 +1584,7 @@ function renderMcp() {
       ${s.error ? `<div class="mono red">${esc(s.error)}</div>` : ''}
       ${(s.backends || []).length ? `<div class="chips">${s.backends.map((b) => `<span class="chip ${b.online ? '' : 'off'}">${esc(b.id)} ${b.online ? '● ' + b.count : '○'}</span>`).join('')}</div>` : ''}
       ${(s.models || []).length ? `<div class="chips">${s.models.map((m) => `<span class="chip">${esc(m)}</span>`).join('')}</div>` : ''}
+      ${(s.images || []).some((i) => i.online) ? `<div class="chips">${s.images.filter((i) => i.online).map((i) => `<span class="chip">🖼 ${esc(i.id)} ●</span>`).join('')}<span class="hint">Escribe <b>/imagen</b> y lo que quieras ver.</span></div>` : ''}
       ${(s.tools || []).length ? `<div class="chips">${s.tools.map((t) => `<span class="chip tool" title="${esc(t.description || '')}">ƒ ${esc(t.name)}</span>`).join('')}</div>` : ''}
       ${(s.tools || []).some((t) => t.name === 'threads_sync') ? `<label class="auto"><input type="checkbox" data-act="sync" ${s.sync !== false ? 'checked' : ''}> SINCRONIZAR HILOS
         <span class="mono">${s.syncError ? `<span class="red">${esc(s.syncError)}</span>` : s.syncedAt ? '· ' + hhmm(s.syncedAt) : ''}</span></label>` : ''}
@@ -1558,6 +1658,13 @@ function localBridgeHTML() {
         : `<button class="btn sm" data-act="tson">ACTIVAR HTTPS CON TAILSCALE</button>`}
         ${ts.error ? `<div class="mono red">${esc(ts.error)}</div>` : ''}`}
     ${S.level === 'basic' ? '' : gatewayHTML(b)}
+    <h4>🖼 IMÁGENES EN ESTE PC</h4>
+    ${(S.mcp.find((x) => x.local)?.images || []).some((i) => i.online)
+      ? '<div class="hint">Generador detectado. En el chat, escribe <b>/imagen</b> seguido de lo que quieres ver (también desde el móvil conectado a este PC). Gratis, sin cuentas y sin que la imagen salga de tu equipo.</div>'
+      : `<div class="hint">Crea imágenes gratis en tu PC instalando uno de estos programas (necesitas una tarjeta gráfica con 6 GB o más; sin ella funciona, pero tarda varios minutos):</div>
+        <ul class="hint"><li><b>ComfyUI</b> (recomendado): instálalo, descarga un modelo en <i>models/checkpoints</i> y ábrelo. <a href="https://www.comfy.org/download" target="_blank" rel="noopener">▸ descargar</a></li>
+        <li><b>Forge / AUTOMATIC1111</b>: ábrelo con la opción <b>--api</b>. <a href="https://github.com/lllyasviel/stable-diffusion-webui-forge" target="_blank" rel="noopener">▸ Forge</a></li></ul>
+        <div class="hint">Después pulsa RECONECTAR. Revisa la licencia del modelo que descargues.</div>`}
     <h4>📁 CARPETAS PARA LA IA</h4>
     <div class="hint">La IA podrá buscar y leer (nunca modificar) estos documentos con ƒ HERRAMIENTAS. Cualquiera con el token puede leerlos.</div>
     ${(b.folders || []).map((f) => `<div class="mono folder">${esc(f)} <button class="btn sm red" data-act="rmfolder" data-path="${esc(f)}">✕</button></div>`).join('')}
@@ -1640,12 +1747,14 @@ async function readZip(file) {
   const out = [];
   for (let k = 0, n = 0; n < count && k + 46 <= cd.length; n++) {
     if (dv.getUint32(k, true) !== 0x02014b50) break;
-    const method = dv.getUint16(k + 10, true), size = dv.getUint32(k + 20, true), nl = dv.getUint16(k + 28, true), xl = dv.getUint16(k + 30, true), cl = dv.getUint16(k + 32, true), off = dv.getUint32(k + 42, true);
+    const method = dv.getUint16(k + 10, true), size = dv.getUint32(k + 20, true), full = dv.getUint32(k + 24, true), nl = dv.getUint16(k + 28, true), xl = dv.getUint16(k + 30, true), cl = dv.getUint16(k + 32, true), off = dv.getUint32(k + 42, true);
     const name = dec.decode(cd.subarray(k + 46, k + 46 + nl));
     out.push({ name, read: async () => {
       const h = new DataView((await u8(off, off + 30)).buffer);
       const start = off + 30 + h.getUint16(26, true) + h.getUint16(28, true);
       const blob = file.slice(start, start + size);
+      // Un archivo de texto de más de 400 MB no es una exportación razonable (y no cabría en memoria).
+      if (full > 400 * 2 ** 20) throw new Error(`${name} es demasiado grande para importarlo`);
       if (method === 0) return blob.text();
       if (method !== 8) throw new Error(`Compresión no admitida en ${name}`);
       return new Response(blob.stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
@@ -2262,6 +2371,7 @@ $('#composer').onsubmit = (e) => {
   if (busy) { abortCtl?.abort(); return; }
   const text = input.value.trim();
   if (!text && !attach.length) return;
+  if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
   input.value = ''; input.style.height = 'auto';
   send(text, files);
@@ -2276,6 +2386,7 @@ $('#app').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransf
 $('#log').addEventListener('click', (e) => {
   const { copy, speak: sp, skillify } = e.target.dataset || {};
   if (e.target.dataset?.vote) return vote(e.target.dataset.vote);
+  if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);
   const { branch: br, edit } = e.target.dataset || {};
@@ -2349,6 +2460,7 @@ $('#settings').addEventListener('change', (e) => {
   if (k) { S.councilKeys = e.target.checked ? [...new Set([...S.councilKeys, k])] : S.councilKeys.filter((x) => x !== k); save(); }
 });
 $('#settings').addEventListener('click', async (e) => {
+  if (e.target.id === 'diagRun') diagnose($('#diagAll').checked);
   if (e.target.id === 'addStarters') { const n = installStarters([...STARTERS, ...EXTRA_STARTERS]); toast(n ? `${n} habilidades añadidas (✦)` : 'Ya las tienes'); }
   if (e.target.dataset.level) setTimeout(renderSettings, 0);
   if (e.target.id === 'vaultOn') {

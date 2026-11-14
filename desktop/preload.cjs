@@ -23,6 +23,6 @@ contextBridge.exposeInMainWorld('neuraDesktop', {
   addFolder: () => ipcRenderer.invoke('add-folder'),
   removeFolder: (dir) => ipcRenderer.invoke('remove-folder', dir),
   tailscale: (on) => ipcRenderer.invoke('tailscale', on),
-  saveFile: (name, text) => ipcRenderer.invoke('save-file', name, text),
+  saveFile: (name, text, encoding) => ipcRenderer.invoke('save-file', name, text, encoding),
   savePdf: (name) => ipcRenderer.invoke('save-pdf', name),
 });
