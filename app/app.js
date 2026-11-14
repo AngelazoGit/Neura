@@ -113,8 +113,9 @@ function gatewayPayload() {
   const ordered = [first, ...[...cloud, ...mine].sort((a, b) => score(b) - score(a))]
     .filter((t, i, a) => t && usable.has(t.key) && a.findIndex((x) => x?.key === t.key) === i);
   return {
-    enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly, unknownAsAuto: !!g.unknownAsAuto,
-    providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model }; }),
+    enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly, unknownAsAuto: !!g.unknownAsAuto, cache: !!g.cache,
+    budget: { day: +S.budget?.day || 0, month: +S.budget?.month || 0 }, appSpent: { date: today(), ...spent().app },
+    providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model, free: isFree(t), price: priced(p) ? { in: +p.price.in || 0, out: +p.price.out || 0 } : null }; }),
     order: ordered.map((t) => (t.pid ? name(t) : t.model)),
   };
 }
@@ -229,7 +230,7 @@ const untilMidnightUTC = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 
 const isGone = (e) => !isNoVision(e) && (e.status === 404 || /not found|no longer available|not supported for|does not exist|decommissioned|has been deprecated|model_not_found/i.test(e.message || ''));
 // Gemini y otras devuelven 400 (no 401) con una clave inválida.
 const isKeyErr = (e) => e.status === 401 || e.status === 403 || (e.status === 400 && /api.?key|unauthori[sz]ed|invalid.{0,12}(key|token|credential)/i.test(e.message || ''));
-function noteOk(t, ms) { Object.assign(H(t.key), { coolUntil: 0, reason: null, streak: 0 }); const h = H(t.key); h.ok++; h.ms = h.ms ? Math.round(h.ms * 0.7 + ms * 0.3) : ms; }
+function noteOk(t, ms) { if (!(H(t.key).reason === 'LÍMITE' && cooling(t.key))) Object.assign(H(t.key), { coolUntil: 0, reason: null, streak: 0 }); const h = H(t.key); h.ok++; h.ms = h.ms ? Math.round(h.ms * 0.7 + ms * 0.3) : ms; }
 // El modelo rechazó la imagen: sirve para texto, pero no hay que mandarle fotos.
 const isNoVision = (e) => e.status === 400 && /image|vision|multimodal|modalit/i.test(e.message || '');
 const capable = (t, needs = {}) => !(needs.vision && S.health[t.key]?.noVision);
@@ -257,6 +258,55 @@ function score(t) {
   const rate = ((h.ok || 0) + 1) / ((h.ok || 0) + (h.fail || 0) + 2);
   return rate - 0.3 * (h.ms ? Math.min(h.ms, 60000) / 60000 : 0.3);
 }
+// ---------- consumo: peticiones, tokens y gasto (solo en este dispositivo) ----------
+// Los tokens se estiman por caracteres (≈3,5 por token) y el gasto con el precio que pongas a cada IA: es orientativo.
+const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const monthOf = (day) => day.slice(0, 7);
+const provOf = (t) => (t.pid ? S.providers.find((p) => p.id === t.pid) : null);
+const priced = (p) => !!p?.price && (+p.price.in > 0 || +p.price.out > 0);
+const costOf = (p, inT, outT) => (priced(p) ? ((+p.price.in || 0) * inT + (+p.price.out || 0) * outT) / 1e6 : 0);
+const localMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); return +d; };
+// Peticiones de hoy a un proveedor (las rechazadas por cuota no cuentan: el proveedor no las atendió).
+const provToday = (p) => Object.entries(S.usage?.[today()] || {}).reduce((n, [k, v]) => n + (k.startsWith(p.id + '::') ? v.n + (v.err || 0) : 0), 0);
+let usageRev = 0;
+function recordUse(t, messages, out, e) {
+  if (e && (e.name === 'AbortError' || e.status === 429)) return;
+  const day = ((S.usage ||= {})[today()] ||= {});
+  const u = (day[t.key] ||= { n: 0, in: 0, out: 0, eur: 0, err: 0 });
+  if (e) u.err++;
+  else {
+    const i = tokens(messages), o = Math.ceil(String(out || '').length / 3.5);
+    u.n++; u.in += i; u.out += o; u.eur += costOf(provOf(t), i, o);
+  }
+  usageRev++;
+  const days = Object.keys(S.usage).sort();
+  while (days.length > 62) delete S.usage[days.shift()];
+  // Límite diario que pones tú: al 80 % avisa; al llegar, se deja de usar hasta medianoche (salvo que no quede otra).
+  const p = provOf(t), lim = +p?.dailyLimit;
+  if (!lim) return;
+  const used = provToday(p);
+  if (used >= lim) {
+    for (const x of targets()) if (x.pid === p.id) Object.assign(H(x.key), { coolUntil: localMidnight(), reason: 'LÍMITE' });
+  } else if (used >= lim * 0.8) {
+    if (S.warned?.date !== today()) S.warned = { date: today(), ids: [] };
+    if (!S.warned.ids.includes(p.id)) { S.warned.ids.push(p.id); toast(`📊 ${p.name}: ${used} de ${lim} peticiones de hoy (80 %)`); }
+  }
+}
+// Gasto de hoy y del mes: el de esta app más el del Gateway de este PC (si lo hay).
+let spentMemo = { rev: -1 };
+function spent() {
+  const day = today(), rev = `${usageRev}|${day}|${JSON.stringify(S.gwSpent || null)}`;
+  if (spentMemo.rev === rev) return spentMemo.v;
+  let d = 0, m = 0;
+  for (const [k, v] of Object.entries(S.usage || {})) for (const x of Object.values(v)) { if (k === day) d += x.eur; if (monthOf(k) === monthOf(day)) m += x.eur; }
+  const g = S.gwSpent && monthOf(S.gwSpent.date) === monthOf(day) ? S.gwSpent : null;
+  const v = { day: d + (g?.date === day ? g.day : 0), month: m + (g ? g.month : 0), app: { day: d, month: m } };
+  spentMemo = { rev, v };
+  return v;
+}
+const overBudget = () => { const b = S.budget || {}, x = spent(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
+const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
+
 // ---------- política de destinos: gasto y privacidad ----------
 // "Gratis" solo si es comprobable: proveedor del nivel gratuito (en OpenRouter, variantes :free) o un equipo tuyo.
 // Backend del puente que atiende un modelo MCP; el puente indica si es local (tu equipo o tu red privada).
@@ -270,8 +320,8 @@ function isFree(t) {
 }
 // "Privado": un equipo tuyo (puente de este PC o marcado como tuyo) y además con backend local.
 const isMine = (t) => t.kind === 'mcp' && localBackend(t) && S.mcp.some((s) => s.id === t.sid && (s.local || s.mine));
-const allowed = (t) => (!S.freeOnly || isFree(t)) && (!thread().private || isMine(t));
-const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : 'es de pago o de coste desconocido y tienes SOLO GRATIS activado');
+const allowed = (t) => ((!S.freeOnly && !overBudget()) || isFree(t)) && (!thread().private || isMine(t));
+const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : S.freeOnly ? 'es de pago o de coste desconocido y tienes SOLO GRATIS activado' : 'has llegado a tu tope de gasto: hasta que se renueve solo se usan IAs gratuitas');
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
 // Nunca incluye destinos que la política de gasto o privacidad no permite.
 // needs.vision: el mensaje lleva imágenes; se evitan los modelos que ya las rechazaron.
@@ -289,6 +339,7 @@ function coolText(k) {
   const h = S.health[k];
   if (h.reason === 'CLAVE') return 'CLAVE RECHAZADA';
   if (h.reason === 'RETIRADO') return 'YA NO DISPONIBLE';
+  if (h.reason === 'LÍMITE') return 'LÍMITE DIARIO · hasta mañana';
   const until = new Date(h.coolUntil);
   return `${h.reason} · hasta ${until.toDateString() === new Date().toDateString() ? hhmm(h.coolUntil) : until.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
 }
@@ -457,6 +508,10 @@ async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
 }
 
 async function callTarget(t, messages, onDelta, signal, opt = {}) {
+  try { const out = await callTargetRaw(t, messages, onDelta, signal, opt); recordUse(t, messages, out); return out; }
+  catch (e) { recordUse(t, messages, null, e); throw e; }
+}
+async function callTargetRaw(t, messages, onDelta, signal, opt = {}) {
   if (t.kind === 'mcp') {
     const s = S.mcp.find((x) => x.id === t.sid);
     if (!s) throw new Error('Servidor MCP eliminado');
@@ -766,6 +821,7 @@ async function send(text, files = []) {
   save();
   setBusy(true);
   const signal = abortCtl.signal;
+  if (DESK && (+S.budget?.day || +S.budget?.month)) await refreshGwUsage();
   try {
     const skill = activeSkill() && JSON.parse(JSON.stringify(activeSkill()));
     // El presupuesto cuenta toda la petición (instrucciones, memoria del proyecto y habilidad) y deja sitio para la respuesta.
@@ -780,7 +836,7 @@ async function send(text, files = []) {
     if (first && allowed(first) && !capable(first, needs)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: '📷 no admite imágenes', skipped: true, ts: Date.now() });
     if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
     if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
-    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
+    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
     else if (S.council) await sendCouncil(th, hist, first, signal, needs, skill);
     else {
       let attempts = 0, ctxRetried = false;
@@ -1211,12 +1267,69 @@ function renderProviders() {
       <label>CLAVE API<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
       ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
       <label>MODELOS (separados por coma)<input data-f="models" value="${esc(p.models.join(', '))}"></label>
+      <div class="row2">
+        <label>LÍMITE DIARIO (peticiones)<input data-f="dailyLimit" type="number" min="0" step="1" inputmode="numeric" value="${esc(p.dailyLimit || '')}" placeholder="sin límite"></label>
+        ${p.tier === 'free' ? '' : `<label>€ / 1M TOKENS ENTRADA<input data-f="priceIn" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.price?.in ?? '')}" placeholder="?"></label>
+        <label>€ / 1M TOKENS SALIDA<input data-f="priceOut" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.price?.out ?? '')}" placeholder="?"></label>`}
+      </div>
       ${healthChips(p)}
       <div class="row"><button class="btn sm" data-act="scan">ESCANEAR MODELOS</button><button class="btn sm ghost" data-act="test">PROBAR</button>${p.models.some((m) => cooling(`${p.id}::${m}`)) ? '<button class="btn sm ghost" data-act="reset">REINTENTAR YA</button>' : ''}</div>
     </div>`).join('') || '<p class="hint">Todavía no hay IAs. Elige una arriba y pulsa + AÑADIR.</p>';
   renderSettings();
 }
 
+// Panel de consumo: hoy y este mes por IA; aparte, lo que ha pasado por el Gateway de este PC.
+const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n));
+function usageHTML() {
+  const day = today(), U = S.usage || {}, b = S.budget || {};
+  const sum = (pred, onlyDay) => {
+    const a = { n: 0, err: 0, tok: 0, eur: 0 };
+    for (const [k, v] of Object.entries(U)) {
+      if (onlyDay ? k !== day : monthOf(k) !== monthOf(day)) continue;
+      for (const [key, u] of Object.entries(v)) if (pred(key)) { a.n += u.n; a.err += u.err || 0; a.tok += u.in + u.out; a.eur += u.eur; }
+    }
+    return a;
+  };
+  const money = (p, v) => (p && p.tier !== 'free' && !priced(p) ? '<span title="Pon su precio en su tarjeta para calcular el gasto">?</span>' : eur(v));
+  const row = (name, pred, p) => {
+    const d = sum(pred, true), m = sum(pred, false), lim = +p?.dailyLimit, used = d.n + d.err;
+    if (!used && !m.n && !lim) return '';
+    return `<tr><td>${esc(name)}${lim ? `<progress max="${lim}" value="${Math.min(used, lim)}"></progress>` : ''}</td><td>${used}${lim ? ` / ${lim}` : ''}</td><td>${fmtTok(d.tok)}</td><td>${money(p, d.eur)}</td><td>${money(p, m.eur)}</td></tr>`;
+  };
+  const rows = [...S.providers.map((p) => row(p.name, (k) => k.startsWith(p.id + '::'), p)), row('⬡ Tus equipos', (k) => k.startsWith('mcp:'), null)].join('');
+  const gw = S.gwUsage, gwRows = gw ? Object.entries(gw.today || {}).map(([id, u]) => `<tr><td>${esc(id)}</td><td>${u.n + (u.err || 0)}</td><td>${fmtTok(u.in + u.out)}</td><td>${eur(u.eur)}</td><td>${eur(gw.month?.[id]?.eur || 0)}</td></tr>`).join('') : '';
+  const unpriced = S.providers.filter((p) => p.enabled !== false && p.tier !== 'free' && !priced(p) && !(S.freeOnly));
+  const head = '<thead><tr><th>IA</th><th>HOY</th><th>TOKENS</th><th>€ HOY</th><th>€ MES</th></tr></thead>';
+  return `<h3>📊 CONSUMO</h3>
+    <p class="hint" id="usageSum">${usageSumHTML()}</p>
+    ${rows ? `<table class="usage">${head}<tbody>${rows}</tbody></table>` : '<p class="hint">Aún no has usado ninguna IA hoy.</p>'}
+    ${gwRows ? `<h4>🔌 POR EL GATEWAY (otras herramientas)</h4><table class="usage">${head}<tbody>${gwRows}</tbody></table>${gw.cache?.hits ? `<p class="hint">Caché: ${gw.cache.hits} respuestas repetidas servidas sin llamar a ninguna IA.</p>` : ''}` : ''}
+    ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente.</p>` : ''}
+    <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
+    <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
+    <p class="hint">Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Los tokens y el gasto son una estimación por caracteres; la factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+}
+function usageSumHTML() {
+  const x = spent();
+  return `Gasto de hoy: <b>${eur(x.day)}</b> · este mes: <b>${eur(x.month)}</b>${overBudget() ? ' · <b class="red">TOPE ALCANZADO: solo IAs gratuitas y tus equipos</b>' : ''}`;
+}
+// Lo que ha pasado hoy y este mes por el Gateway del PC (lo cuenta el puente).
+async function refreshGwUsage() {
+  if (!DESK) return;
+  try {
+    const b = DESK.bridge();
+    const r = await xfetch(`http://127.0.0.1:${b.port}/neura/gateway`, { headers: { Authorization: 'Bearer ' + b.token } });
+    if (!r.ok) return;
+    const j = await r.json();
+    S.gwUsage = { today: j.today, month: j.month, cache: j.cache };
+    S.gwSpent = { date: j.date, day: j.spent.day, month: j.spent.month };
+  } catch {}
+}
+// Si estás escribiendo en el panel, solo se actualiza el resumen (para no borrar el campo que editas).
+const repaintUsage = () => {
+  const el = document.getElementById('usagePanel'); if (!el) return;
+  if (!el.contains(document.activeElement)) el.innerHTML = usageHTML(); else $('#usageSum').innerHTML = usageSumHTML();
+};
 function renderSettings() {
   const all = targets();
   const sec = DESK?.secure?.();
@@ -1231,6 +1344,7 @@ function renderSettings() {
     <h3>GASTO</h3>
     <label class="auto"><input type="checkbox" id="freeOnly" ${S.freeOnly ? 'checked' : ''}> SOLO GRATIS</label>
     <p class="hint">Neura solo usará IAs del nivel gratuito (en OpenRouter, modelos <b>:free</b>) y tus equipos. Las de pago o de coste desconocido (⛔) no se usan ni en AUTO-SALTO, ni en CONSEJO, ni para resumir.</p>
+    <div id="usagePanel">${usageHTML()}</div>
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
@@ -1246,6 +1360,7 @@ function renderSettings() {
         <div class="row"><input type="password" id="pinNew" inputmode="numeric" autocomplete="new-password" placeholder="PIN (mín. 4)"><button class="btn sm" id="vaultOn">ACTIVAR PIN</button></div>`}
     <p class="hint">Las claves nunca se sincronizan entre dispositivos: solo viajan los hilos.</p>`;
   renderLocalAI();
+  refreshGwUsage().then(repaintUsage);
 }
 
 function renderMcp() {
@@ -1279,6 +1394,8 @@ function gatewayHTML(b) {
     ${!g.enabled ? '' : `<label class="auto"><input type="checkbox" data-act="gwlocal" ${g.localOnly ? 'checked' : ''}> SOLO MODELOS DE ESTE EQUIPO</label>
     <label class="auto"><input type="checkbox" data-act="gwunknown" ${g.unknownAsAuto ? 'checked' : ''}> USAR «auto» PARA NOMBRES DE MODELO DESCONOCIDOS</label>
     <div class="hint">Sin esta opción, un nombre que Neura no conoce (por ejemplo, una errata) da error y no se envía a ninguna IA.</div>
+    <label class="auto"><input type="checkbox" data-act="gwcache" ${g.cache ? 'checked' : ''}> CACHÉ DE RESPUESTAS REPETIDAS (10 min)</label>
+    <div class="hint">Si una herramienta repite exactamente la misma petición, se responde con la respuesta guardada sin gastar cuota. «Regenerar» con la misma petición devolverá la misma respuesta mientras dure.</div>
     <div class="mono">TOKEN DEL GATEWAY: <span class="secret">${esc(t)}</span> <button class="btn sm red" data-act="regengw" title="Si se filtra">REGENERAR</button></div>
     <div class="hint">Es distinto del token del puente: solo sirve para pedir respuestas y ver los modelos, no da acceso a tus hilos, archivos ni ajustes.</div>
     <div class="mono">Compatible con OpenAI: ${esc(base)}/v1 · con Anthropic: ${esc(base)} · clave: el token del Gateway · modelo: <b>auto</b> (o uno concreto de /v1/models)</div>
@@ -1961,6 +2078,8 @@ const resetHealth = (p) => p.models.forEach((m) => delete S.health[`${p.id}::${m
 $('#provList').addEventListener('change', (e) => {
   const card = e.target.closest('[data-pid]'), f = e.target.dataset.f; if (!card || !f) return;
   const p = S.providers.find((x) => x.id === card.dataset.pid);
+  if (f === 'dailyLimit') { p.dailyLimit = Math.max(0, Math.floor(+e.target.value || 0)) || null; save(); return; }
+  if (f === 'priceIn' || f === 'priceOut') { p.price = { ...p.price, [f === 'priceIn' ? 'in' : 'out']: Math.max(0, +e.target.value || 0) }; save(); return; }
   p[f] = f === 'models' ? e.target.value.split(',').map((s) => s.trim()).filter(Boolean) : e.target.value.trim();
   if (f === 'apiKey' || f === 'baseUrl') { resetHealth(p); refreshed.delete(p.id); refreshModels(p); }
   if (f === 'apiKey' && vault.locked) toast('Las claves están bloqueadas con PIN: desbloquéalas para guardar cambios', true);
@@ -1987,6 +2106,10 @@ $('#provList').addEventListener('click', async (e) => {
   save(); renderProviders(); renderTargets(); renderLog();
 });
 $('#settings').addEventListener('change', (e) => {
+  if (e.target.id === 'budgetDay' || e.target.id === 'budgetMonth') {
+    S.budget = { ...S.budget, [e.target.id === 'budgetDay' ? 'day' : 'month']: Math.max(0, +e.target.value || 0) };
+    save(); renderTargets(); repaintUsage(); toast('TOPE DE GASTO GUARDADO');
+  }
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }
   if (e.target.id === 'freeOnly') { S.freeOnly = e.target.checked; save(); renderTargets(); }
   if (e.target.id === 'instructions') { S.instructions = e.target.value; save(); toast('INSTRUCCIONES GUARDADAS'); }
@@ -2035,8 +2158,8 @@ $('#mcpList').addEventListener('change', async (e) => {
   const s = S.mcp.find((x) => x.id === card.dataset.sid);
   if (act === 'sync') { s.sync = e.target.checked; save(); syncWith(s); }
   if (act === 'trust') { s.trustTools = e.target.checked; save(); }
-  if (act === 'gw' || act === 'gwlocal' || act === 'gwunknown') {
-    S.gateway = { ...S.gateway, [{ gw: 'enabled', gwlocal: 'localOnly', gwunknown: 'unknownAsAuto' }[act]]: e.target.checked };
+  if (act === 'gw' || act === 'gwlocal' || act === 'gwunknown' || act === 'gwcache') {
+    S.gateway = { ...S.gateway, [{ gw: 'enabled', gwlocal: 'localOnly', gwunknown: 'unknownAsAuto', gwcache: 'cache' }[act]]: e.target.checked };
     save(); renderMcp();
     if (act === 'gw') toast(e.target.checked ? '🔌 Gateway activo: copia la configuración de tu herramienta' : 'Gateway desactivado');
   }

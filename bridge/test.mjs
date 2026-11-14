@@ -361,3 +361,51 @@ test('Gateway: dos clientes a la vez no mezclan sus respuestas', async () => {
   assert.equal(a, 'primer-cliente'); assert.equal(b, 'SEGUNDO-CLIENTE');
   await configure({ enabled: false });
 });
+test('Gateway: cuenta el consumo por destino y día, con el gasto según el precio', async () => {
+  await configure({ enabled: true, providers: [{ ...prov('pago/bueno', 'bueno'), price: { in: 1000000, out: 2000000 } }, { ...prov('gratis/eco', 'eco'), free: true }] });
+  const u0 = await (await gw('/neura/gateway')).json();
+  const n0 = u0.today['pago/bueno']?.n || 0, e0 = u0.today['pago/bueno']?.eur || 0;
+  await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'hola' }] });
+  await new Promise((r) => setTimeout(r, 50));
+  const u = await (await gw('/neura/gateway')).json();
+  assert.match(u.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(u.today['pago/bueno'].n, n0 + 1);
+  // El proveedor dio 5 tokens de entrada y 3 de salida: 5 × 1 € + 3 × 2 € = 11 € (precio por millón).
+  assert.equal(Math.round((u.today['pago/bueno'].eur - e0) * 100) / 100, 11);
+  assert.ok(u.spent.day >= 11 && u.month['pago/bueno'].n >= 1);
+  assert.equal((await fetch(`${BASE}/neura/gateway`, { headers: { Authorization: `Bearer ${GWT}` } })).status, 403, 'el token del Gateway no ve el consumo');
+});
+test('Gateway: al llegar al tope de gasto solo usa IAs gratuitas (cuenta también lo gastado en la app)', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 1, out: 1 } }, { ...prov('gratis/eco', 'eco'), free: true }];
+  const ids = async () => (await (await gw('/v1/models')).json()).data.map((m) => m.id);
+  await configure({ enabled: true, providers, budget: { day: 1e9 } });
+  assert.ok((await ids()).includes('pago/bueno'), 'por debajo del tope, la de pago está');
+  const d = new Date(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  await configure({ enabled: true, providers, budget: { day: 1e9 }, appSpent: { date: day, day: 1e9, month: 1e9 } });
+  const l = await ids();
+  assert.ok(!l.includes('pago/bueno') && l.includes('gratis/eco'), 'con el gasto de la app ya en el tope, solo la gratuita');
+  assert.equal((await (await gw('/neura/gateway')).json()).over, true);
+  await configure({ enabled: true, providers, budget: { month: 1e9 }, appSpent: { date: '2000-01-01', day: 1e9, month: 1e9 } });
+  assert.ok((await ids()).includes('pago/bueno'), 'el gasto de otro mes no cuenta');
+});
+test('Gateway: caché opcional de peticiones idénticas (texto y streaming); se vacía al cambiar la configuración', async () => {
+  const providers = [prov('p/bueno', 'bueno')];
+  await configure({ enabled: true, providers, cache: true });
+  const ask = (q, stream) => gw('/v1/chat/completions', { model: 'p/bueno', stream, messages: [{ role: 'user', content: q }] });
+  const calls = () => gwSeen.filter((x) => x.body.model === 'bueno').length;
+  const c0 = calls();
+  const a = await ask('cache-1'); assert.equal(a.headers.get('x-neura-cache'), null); const ta = await a.text();
+  await new Promise((r) => setTimeout(r, 50));
+  const b = await ask('cache-1'); assert.equal(b.headers.get('x-neura-cache'), 'hit'); assert.equal(await b.text(), ta);
+  assert.equal(calls(), c0 + 1, 'la repetida no llega al proveedor');
+  await ask('cache-2'); assert.equal(calls(), c0 + 2, 'una distinta sí');
+  const s1 = await (await ask('cache-s', true)).text(); await new Promise((r) => setTimeout(r, 50));
+  const s2 = await ask('cache-s', true); assert.equal(s2.headers.get('x-neura-cache'), 'hit'); assert.equal(await s2.text(), s1);
+  const m = await (await gw('/v1/messages', { model: 'p/bueno', max_tokens: 10, messages: [{ role: 'user', content: 'cache-1' }] })).json();
+  assert.equal(m.content[0].text, 'respuesta de bueno', 'también por la API de Anthropic');
+  await configure({ enabled: true, providers, cache: true, localOnly: false, freeOnly: true });
+  const c1 = calls(); await ask('cache-1'); assert.equal(calls(), c1 + 1, 'tras cambiar la configuración se vuelve a preguntar');
+  await configure({ enabled: true, providers });
+  const c2 = calls(); await ask('cache-2'); await ask('cache-2'); assert.equal(calls(), c2 + 2, 'sin caché, siempre se pregunta');
+  await configure({ enabled: false });
+});

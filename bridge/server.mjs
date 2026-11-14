@@ -7,7 +7,7 @@ import os from 'node:os';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync, readdirSync, realpathSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, extname, normalize, dirname, sep, resolve, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const cfgPath = process.env.NEURA_CONFIG || join(HERE, 'config.json');
@@ -633,7 +633,86 @@ const authorizedGw = (req) => same(req.headers.authorization || '', `Bearer ${GW
 // Otras herramientas (Continue, Cline, Aider, Open WebUI…) usan Neura como proveedor: por detrás van los
 // backends de este puente y las IAs que la app de PC le pasa con las claves del propio usuario (solo en memoria).
 // Con el modelo «auto» (o uno desconocido) se aplica AUTO-SALTO: si una IA falla o agota su cuota, se prueba la siguiente.
-const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, providers: [], order: [] };
+const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, cache: false, budget: {}, appSpent: {}, providers: [], order: [] };
+
+// Consumo del Gateway por día y destino (se guarda en disco, 62 días). Tokens: los que dé el proveedor o una estimación.
+const pad2 = (n) => String(n).padStart(2, '0');
+const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const gwUsageFile = join(DATA_DIR, 'gateway-uso.json');
+const gwUsage = (() => { try { return JSON.parse(readFileSync(gwUsageFile, 'utf8')) || {}; } catch { return {}; } })();
+let gwSaveT;
+function gwRecord(t, inTok, outTok, failed) {
+  const u = ((gwUsage[dayKey()] ||= {})[t.id] ||= { n: 0, err: 0, in: 0, out: 0, eur: 0 });
+  if (failed) u.err++;
+  else { u.n++; u.in += inTok; u.out += outTok; u.eur += t.price ? ((+t.price.in || 0) * inTok + (+t.price.out || 0) * outTok) / 1e6 : 0; }
+  const days = Object.keys(gwUsage).sort();
+  while (days.length > 62) delete gwUsage[days.shift()];
+  clearTimeout(gwSaveT);
+  gwSaveT = setTimeout(() => {
+    try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(gwUsageFile + '.tmp', JSON.stringify(gwUsage)); renameSync(gwUsageFile + '.tmp', gwUsageFile); } catch {}
+  }, 1000);
+}
+function gwSpent() {
+  const day = dayKey();
+  let d = 0, m = 0;
+  for (const [k, v] of Object.entries(gwUsage)) for (const u of Object.values(v)) { if (k === day) d += u.eur; if (k.slice(0, 7) === day.slice(0, 7)) m += u.eur; }
+  return { day: d, month: m };
+}
+// Tope de gasto: lo del Gateway más lo que la app de este PC ha gastado por su cuenta.
+function gwOver() {
+  const b = gateway.budget || {}, s = gwSpent(), a = gateway.appSpent || {}, day = dayKey();
+  const ad = a.date === day ? +a.day || 0 : 0, am = String(a.date || '').slice(0, 7) === day.slice(0, 7) ? +a.month || 0 : 0;
+  return (b.day > 0 && s.day + ad >= b.day) || (b.month > 0 && s.month + am >= b.month);
+}
+// Caché opcional: la misma petición exacta en 10 minutos se responde sin llamar a ninguna IA.
+const gwCache = new Map();
+let gwCacheHits = 0;
+const GW_CACHE_TTL = 10 * 60e3;
+const gwCacheKey = (model, body) => createHash('sha256').update(JSON.stringify([model || 'auto', body])).digest('hex');
+function gwCacheGet(k) {
+  const v = gwCache.get(k);
+  if (v && Date.now() - v.at <= GW_CACHE_TTL) return v;
+  gwCache.delete(k);
+  return null;
+}
+function gwCachePut(k, v) {
+  gwCache.delete(k); gwCache.set(k, { ...v, at: Date.now() });
+  while (gwCache.size > 200) gwCache.delete(gwCache.keys().next().value);
+}
+// Se lee una copia de la respuesta mientras llega al cliente: cuenta tokens y, si terminó bien, la guarda en caché.
+function gwTap(r, t, body, key) {
+  const [a, b] = r.body.tee();
+  const ct = r.headers.get('content-type') || '';
+  (async () => {
+    const chunks = [];
+    let complete = true;
+    try { for await (const c of b) chunks.push(Buffer.from(c)); } catch { complete = false; }
+    const buf = Buffer.concat(chunks), txt = buf.toString('utf8');
+    let inTok = Math.ceil(JSON.stringify(body.messages || []).length / 4), outTok = 0;
+    if (/event-stream/.test(ct)) {
+      let chars = 0, done = false;
+      for (const l of txt.split('\n')) {
+        const d = l.startsWith('data:') ? l.slice(5).trim() : '';
+        if (!d) continue;
+        if (d === '[DONE]') { done = true; continue; }
+        try {
+          const j = JSON.parse(d), ch = j.choices?.[0];
+          if (j.usage) { inTok = j.usage.prompt_tokens || inTok; outTok = j.usage.completion_tokens || outTok; }
+          if (ch?.finish_reason) done = true;
+          chars += (ch?.delta?.content || '').length + (ch?.delta?.tool_calls || []).reduce((n, x) => n + (x.function?.arguments || '').length, 0);
+        } catch {}
+      }
+      if (!outTok) outTok = Math.ceil(chars / 4);
+      complete &&= done;
+    } else {
+      try { const j = JSON.parse(txt); inTok = j.usage?.prompt_tokens || inTok; outTok = j.usage?.completion_tokens || Math.ceil(JSON.stringify(j.choices?.[0]?.message || '').length / 4); }
+      catch { complete = false; }
+    }
+    gwRecord(t, inTok, outTok, false);
+    if (key && complete) gwCachePut(key, { ct, buf, t });
+  })();
+  return new Response(a, { status: r.status, headers: r.headers });
+}
 const gwCool = new Map(); // id → hasta cuándo no se usa
 const backendCache = { at: 0, list: [] };
 async function gwTargets() {
@@ -649,9 +728,11 @@ async function gwTargets() {
     }
     Object.assign(backendCache, { at: Date.now(), list: out });
   }
-  const cloud = gateway.localOnly ? [] : gateway.providers.map((p) => ({ ...p, local: false }));
+  // Con el tope de gasto alcanzado, solo IAs gratuitas (como SOLO GRATIS).
+  const over = gwOver();
+  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => !over || p.free).map((p) => ({ ...p, local: false }));
   // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
-  const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !gateway.freeOnly)), ...cloud];
+  const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !(gateway.freeOnly || over))), ...cloud];
   const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };
   return all.sort((a, b) => rank(a) - rank(b));
 }
@@ -678,6 +759,9 @@ function gwFail(t, status, headers) {
 }
 // Llama al primer destino que responda bien; devuelve la respuesta todavía sin leer (para poder reenviar el streaming).
 async function gwCall(model, body, signal) {
+  const key = gateway.cache ? gwCacheKey(model, body) : null;
+  const hit = key && gwCacheGet(key);
+  if (hit) { gwCacheHits++; return { r: new Response(hit.buf, { status: 200, headers: { 'content-type': hit.ct } }), t: hit.t, cached: true }; }
   const plan = await gwPlan(model);
   if (!plan.length) throw Object.assign(new Error('No hay modelos disponibles en Neura Gateway'), { status: 503 });
   let last;
@@ -692,13 +776,14 @@ async function gwCall(model, body, signal) {
         headers: { 'Content-Type': 'application/json', ...(t.apiKey ? { Authorization: `Bearer ${t.apiKey}` } : {}) },
         body: JSON.stringify({ ...body, model: t.model }),
       });
-      if (r.ok) { gwCool.delete(t.id); return { r, t }; }
+      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, body, key), t }; }
       gwFail(t, r.status, r.headers);
+      if (r.status !== 429) gwRecord(t, 0, 0, true);
       last = Object.assign(new Error(`${t.id}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
       if (r.status === 400) break; // petición mal formada: otra IA no lo arreglará
     } catch (e) {
       if (signal?.aborted) throw e;
-      gwFail(t, 0); last = e;
+      gwFail(t, 0); gwRecord(t, 0, 0, true); last = e;
     }
   }
   throw last || new Error('Sin respuesta');
@@ -715,8 +800,9 @@ async function gwModels(res) {
 async function gwOpenAI(req, res, body) {
   const ctl = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
-  let r, t;
-  try { ({ r, t } = await gwCall(body.model, body, ctl.signal)); } catch (e) { return gwError(res, e); }
+  let r, t, cached;
+  try { ({ r, t, cached } = await gwCall(body.model, body, ctl.signal)); } catch (e) { return gwError(res, e); }
+  if (cached) res.setHeader('x-neura-cache', 'hit');
   if (!body.stream) {
     const d = await r.json();
     return send(res, 200, { ...d, model: body.model || t.id });
@@ -779,8 +865,9 @@ const msgId = () => 'msg_' + randomBytes(12).toString('hex');
 async function gwAnthropic(req, res, body) {
   const ctl = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
-  let r;
-  try { ({ r } = await gwCall(body.model, anthropicToOpenAI(body), ctl.signal)); } catch (e) { return gwError(res, e, true); }
+  let r, cached;
+  try { ({ r, cached } = await gwCall(body.model, anthropicToOpenAI(body), ctl.signal)); } catch (e) { return gwError(res, e, true); }
+  if (cached) res.setHeader('x-neura-cache', 'hit');
   if (!body.stream) {
     const d = await r.json();
     const m = d.choices?.[0]?.message || {};
@@ -890,15 +977,27 @@ async function handle(req, res) {
   if (path === '/health') return send(res, 200, { ok: true });
 
   // Configuración del Gateway: solo la app de este mismo equipo (con token) puede pasarle las IAs y claves.
-  if (path === '/neura/gateway' && req.method === 'POST') {
+  if (path === '/neura/gateway' && (req.method === 'POST' || req.method === 'GET')) {
     const ip = req.socket.remoteAddress || '';
     if (!authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
+    if (req.method === 'GET') {
+      // Consumo del Gateway para el panel de la app: hoy por destino, el mes acumulado, gasto y caché.
+      const day = dayKey(), month = {};
+      for (const [k, v] of Object.entries(gwUsage)) if (k.slice(0, 7) === day.slice(0, 7)) for (const [id, u] of Object.entries(v)) { const m = (month[id] ||= { n: 0, eur: 0 }); m.n += u.n; m.eur += u.eur; }
+      return send(res, 200, { date: day, today: gwUsage[day] || {}, month, spent: gwSpent(), over: gwOver(), cache: { enabled: !!gateway.cache, hits: gwCacheHits, entries: gwCache.size } });
+    }
     let c; try { c = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
-    const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model) });
+    const num = (x) => Math.max(0, +x || 0);
+    const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model), free: !!p.free,
+      price: p.price ? { in: num(p.price.in), out: num(p.price.out) } : null });
     // Si cambió la configuración de un destino (p. ej. la clave), se puede reintentar ya: se quita su pausa.
     const sig = (p) => `${p.url} ${p.apiKey} ${p.model}`;
     const before = new Map(gateway.providers.map((p) => [p.id, sig(p)]));
-    Object.assign(gateway, { enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto,
+    // Si cambia algo más que el gasto de la app, la caché se vacía (p. ej. al activar «solo modelos de este equipo»).
+    const confSig = JSON.stringify({ ...c, appSpent: null });
+    if (confSig !== gateway.confSig) gwCache.clear();
+    Object.assign(gateway, { confSig, enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto, cache: !!c.cache,
+      budget: { day: num(c.budget?.day), month: num(c.budget?.month) }, appSpent: c.appSpent && typeof c.appSpent === 'object' ? { date: String(c.appSpent.date || ''), day: num(c.appSpent.day), month: num(c.appSpent.month) } : {},
       providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
       order: Array.isArray(c.order) ? c.order.map(String) : [] });
     for (const p of gateway.providers) if (before.get(p.id) !== sig(p)) gwCool.delete(p.id);
