@@ -1110,13 +1110,13 @@ function scanSensitive(text) {
 }
 let guardPending = null;
 // Antes de enviar: si hay datos sensibles y el hilo puede salir a internet, se pregunta qué hacer.
-function guardSend(text, files) {
+function guardSend(text, files, opt = {}) {
   const th = thread();
   if (S.guard === false || th.private) return false;
   const all = [text, ...files.filter((f) => f.kind === 'text').map((f) => f.text)].join('\n');
   const { found } = scanSensitive(all);
   if (!found.size) return false;
-  guardPending = { text, files };
+  guardPending = { text, files, opt };
   const mine = targets().some(isMine);
   const el = $('#skillHint');
   el.hidden = false; el.className = 'hintbar guard'; el.dataset.kid = '';
@@ -1142,8 +1142,72 @@ function guardDecide(act) {
     const th = thread(); th.private = true; th.ts = Date.now(); save(); renderTargets();
     toast('🔒 Hilo privado: este y los siguientes mensajes solo van a tus equipos');
   }
-  send(text, files);
+  send(text, files, g.opt);
 }
+
+// ---------- ayuda mientras escribes: consejos, ✨ ESTRUCTURAR y aviso de actualidad ----------
+// Los consejos y el aviso se calculan en el dispositivo, sin IA. ESTRUCTURAR sí usa una IA (la elegida, con AUTO-SALTO).
+const REQ = W('escribe|escríbeme|redacta|haz|hazme|crea|créame|genera|explica|explícame|resume|resúmeme|analiza|dame|prepara|traduce|mejora|corrige|revisa|ayúdame|necesito|quiero|planifica|organiza|compara');
+const HAS_FORMAT = W('lista|tabla|pasos|viñetas|puntos|párrafos?|resumen|esquema|palabras|líneas|frases|breve|corto|largo|detallado|correo|email|código|json|markdown');
+const HAS_WHO = W('para|dirigido|destinatario|soy|somos|mi jefe|cliente|alumnos|niños|principiante|experto|nivel');
+const WRITING = W('redacta|escribe|escríbeme|correo|email|carta|mensaje|publicación|post|anuncio|discurso');
+const HAS_TONE = W('formal|informal|cercano|tono|serio|amable|divertido|profesional|neutro|persuasivo');
+const RECENT = W('hoy|ayer|esta semana|este mes|este año|ahora mismo|actualmente|actualidad|últimas noticias|última versión|precio|precios|cotización|bolsa|quién ganó|resultado del partido|el tiempo en|clima|202[5-9]');
+function promptTips(t) {
+  const n = nWords(t);
+  if (n < 3 || t.startsWith('/') || !REQ.test(t)) return [];
+  const tips = [];
+  if (n < 12 && !HAS_WHO.test(t)) tips.push('di para quién o para qué es');
+  if (!HAS_FORMAT.test(t)) tips.push('di el formato (lista, tabla, nº de palabras…)');
+  if (WRITING.test(t) && !HAS_TONE.test(t)) tips.push('indica el tono (formal, cercano…)');
+  return tips.slice(0, 2);
+}
+let assistWeb = false, structUndo = null;
+function renderAssist() {
+  const t = $('#input').value, el = $('#skillHint');
+  if (guardPending) return;
+  el.className = 'hintbar';
+  const k = suggestSkill(t);
+  if (k) { renderSkillHint(); return; }
+  const th = thread(), recent = !S.web && !assistWeb && RECENT.test(t) && nWords(t) >= 3;
+  const tips = S.tipsOff ? [] : promptTips(t);
+  if (structUndo != null && t) {
+    el.hidden = false;
+    el.innerHTML = `✨ Petición estructurada. Rellena los <b>[completa: …]</b> y envíala. <button type="button" class="btn sm ghost" data-assist="undo">↩ DESHACER</button>`;
+  } else if (recent) {
+    el.hidden = false;
+    el.innerHTML = `📅 Parece algo reciente: las IAs no saben lo último y pueden inventarlo. ${searchReady(th) ? '<button type="button" class="btn sm" data-assist="web">🌐 BUSCAR EN INTERNET</button>' : '<span class="hint">Configura un buscador en ⚙ → BÚSQUEDA EN INTERNET.</span>'} <button type="button" class="btn sm ghost" data-assist="hide">✕</button>`;
+  } else if (tips.length) {
+    el.hidden = false;
+    el.innerHTML = `💡 Para una respuesta mejor: ${tips.map(esc).join(' · ')}. <button type="button" class="btn sm" data-assist="struct">✨ ESTRUCTURAR</button> <button type="button" class="btn sm ghost" data-assist="off" title="No mostrar más consejos (se reactivan en ⚙ → NIVEL)">✕</button>`;
+  } else { el.hidden = !assistWeb; if (assistWeb) el.innerHTML = '🌐 Este mensaje se buscará en internet. <button type="button" class="btn sm ghost" data-assist="noweb">NO BUSCAR</button>'; }
+}
+const STRUCT_PROMPT = `Eres un experto en escribir peticiones (prompts) para IAs. Reescribe la petición del usuario como una petición profesional y bien estructurada, en su mismo idioma, con estos apartados en negrita (omite los que no apliquen):
+**Rol:** qué experto debe ser la IA.
+**Objetivo:** qué se quiere conseguir y para qué.
+**Contexto:** situación, público y datos de partida.
+**Tarea:** pasos concretos que debe seguir.
+**Formato de la respuesta:** estructura, extensión y tono.
+**Criterios de calidad:** cómo comprobar que está bien; que pregunte o lo diga si le falta información, en vez de inventar.
+Conserva todo lo que dijo el usuario, sin cambiar sus datos. Si falta algo importante, déjalo como [completa: …] para que lo rellene. No respondas a la petición: devuelve SOLO la petición reescrita, sin explicaciones ni comillas.`;
+async function structurePrompt() {
+  const t = input.value.trim(), th = thread();
+  if (!t) return toast('Escribe primero lo que quieres pedir');
+  // No se envían datos sensibles a una IA de internet solo para reescribir la petición.
+  if (!th.private && S.guard !== false && scanSensitive(t).found.size) return toast('Quita los datos sensibles antes de estructurar (o usa un hilo 🔒 PRIVADO)', true);
+  const btn = $('#structBtn'); btn.disabled = true; btn.classList.add('busy');
+  toast('✨ Estructurando tu petición…');
+  try {
+    const { text } = await ask([{ role: 'system', content: STRUCT_PROMPT }, { role: 'user', content: t }], AbortSignal.timeout(60000), false, 'estructurar petición');
+    structUndo = t;
+    input.value = text.replace(/^```\w*\n?|\n?```$/g, '').trim();
+    input.dispatchEvent(new Event('input')); input.focus();
+    renderAssist();
+  } catch (e) { toast(`No se pudo estructurar: ${friendly(e)}`, true); }
+  btn.disabled = false; btn.classList.remove('busy');
+}
+
+function openTemplates() { toast('Escribe lo que quieres pedir y pulsa ✨ para estructurarlo'); }
 
 // ---------- búsqueda en internet con fuentes ----------
 // Buscador propio (⚙): SearXNG (gratis; en tu PC, privado) o Brave Search (clave gratuita). Si no hay, el del PC
@@ -1942,6 +2006,7 @@ function renderSettings() {
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
+    <label class="auto"><input type="checkbox" id="tipsOn" ${S.tipsOff ? '' : 'checked'}> CONSEJOS MIENTRAS ESCRIBES</label>
     <details class="learnSet"><summary>🎓 RUTA DE APRENDIZAJE · ${learnState().filter((x) => x.ok).length}/${LEARN.length}</summary>${learnHTML(false)}</details>
     ${DESK ? `<h3>💻 IA EN ESTE EQUIPO</h3>${localAIHTML()}` : ''}
     <h3>INSTRUCCIONES PARA TODAS LAS IAs</h3>
@@ -2561,9 +2626,19 @@ function renderSkillHint() {
   el.hidden = !k;
   if (k) { el.dataset.kid = k.id; el.innerHTML = `✦ ¿Usar la habilidad <b>${esc(k.name)}</b> en este hilo? <button type="button" class="btn sm" data-hint="use">USAR</button><button type="button" class="btn sm ghost" data-hint="no">NO</button>`; }
 }
-$('#input').addEventListener('input', () => { clearTimeout(hintT); hintT = setTimeout(renderSkillHint, 300); });
+$('#input').addEventListener('input', () => { if (!$('#input').value) { structUndo = null; } clearTimeout(hintT); hintT = setTimeout(renderAssist, 300); });
 $('#skillHint').addEventListener('click', (e) => {
   if (e.target.dataset.guard) return guardDecide(e.target.dataset.guard);
+  const as = e.target.dataset.assist;
+  if (as) {
+    if (as === 'struct') return structurePrompt();
+    if (as === 'undo') { input.value = structUndo || ''; structUndo = null; input.dispatchEvent(new Event('input')); }
+    if (as === 'web') { assistWeb = true; toast('🌐 Este mensaje se buscará en internet antes de responder'); }
+    if (as === 'noweb') assistWeb = false;
+    if (as === 'off') { S.tipsOff = true; save(); toast('Consejos desactivados: se reactivan en ⚙ → NIVEL'); }
+    if (as === 'hide') $('#skillHint').hidden = true; else renderAssist();
+    input.focus(); return;
+  }
   const act = e.target.dataset.hint; if (!act) return;
   const th = thread(), id = $('#skillHint').dataset.kid;
   if (act === 'use') th.skill = id; else th.noSuggest = [...(th.noSuggest || []), id];
@@ -2806,12 +2881,17 @@ $('#composer').onsubmit = (e) => {
   const text = input.value.trim();
   if (!text && !attach.length) return;
   if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
+  // Una petición estructurada con huecos sin rellenar suele dar una respuesta genérica.
+  if (/\[completa:/i.test(text) && !confirm('Quedan huecos [completa: …] sin rellenar. ¿Enviar igualmente?')) return;
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
   input.value = ''; input.style.height = 'auto';
-  if (guardSend(text, files)) return;
-  send(text, files);
+  const opt = assistWeb ? { web: true } : {};
+  assistWeb = false; structUndo = null;
+  if (guardSend(text, files, opt)) return;
+  send(text, files, opt);
 };
 $('#attachBtn').onclick = () => $('#fileIn').click();
+$('#structBtn').onclick = () => (input.value.trim() ? structurePrompt() : openTemplates());
 $('#fileIn').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
 $('#attachBar').addEventListener('click', (e) => { const i = e.target.dataset.unattach; if (i != null) { attach.splice(+i, 1); renderAttach(); } });
 $('#mic').hidden = !(SR || (navigator.mediaDevices?.getUserMedia && window.MediaRecorder));
@@ -2892,6 +2972,7 @@ $('#settings').addEventListener('change', (e) => {
   if (e.target.id === 'searchType') { S.search = { ...S.search, type: e.target.value, url: S.search?.url || (e.target.value === 'searxng' ? 'http://127.0.0.1:8080' : '') }; save(); renderSettings(); renderTargets(); }
   if (e.target.id === 'searchUrl' || e.target.id === 'searchKey') { S.search = { ...S.search, [e.target.id === 'searchUrl' ? 'url' : 'key']: e.target.value.trim() }; save(); renderTargets(); toast('BUSCADOR GUARDADO'); }
   if (e.target.id === 'guardOn') { S.guard = e.target.checked; save(); }
+  if (e.target.id === 'tipsOn') { S.tipsOff = !e.target.checked; save(); }
   if (e.target.id === 'routeOn') { S.routing = { ...S.routing, on: e.target.checked }; save(); renderSettings(); }
   if (e.target.dataset.route) { S.routing = { ...S.routing, rules: { ...S.routing?.rules, [e.target.dataset.route]: e.target.value } }; save(); toast('ENRUTADO GUARDADO'); }
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }

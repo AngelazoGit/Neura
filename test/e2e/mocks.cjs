@@ -41,6 +41,7 @@ const openai = http.createServer(async (req, res) => {
   const sk = /Habilidad activa: «([^»]+)» \(v([^)]+)\)/.exec(j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n'));
   if (sk && j.model !== 'cuota') return reply(res, j.stream, `Aplicando ${sk[1]} v${sk[2]} con ${j.model}: ${q.slice(0, 30)}`);
   if (/Conversación a resumir/.test(q)) return reply(res, j.stream, 'RESUMEN: el usuario habló de números largos.');
+  if (j.messages.some((m) => m.role === 'system' && /experto en escribir peticiones/.test(textOf(m.content)))) return reply(res, j.stream, `**Rol:** redactor profesional.\n**Objetivo:** ${q}\n**Formato de la respuesta:** correo breve.\n**Contexto:** [completa: para quién es]`);
   if (/Respuestas de varias IAs/.test(q)) return reply(res, j.stream, 'SÍNTESIS FINAL combinada');
   switch (j.model) {
     case 'gemini-2.5-flash':

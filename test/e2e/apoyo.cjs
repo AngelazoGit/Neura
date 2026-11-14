@@ -60,6 +60,37 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   ok(/Comprueba esta respuesta/.test(ch.q) && /Habilidad activa: «Comprobar una respuesta»/.test(ch.system.join(' ')), '🔎 COMPROBAR envía la respuesta con la habilidad «Comprobar una respuesta» (aunque no esté instalada)');
   ok(/🔎 Comprueba la respuesta de MOCK/.test(await w.$$eval('#log .msg.user', (u) => u.at(-1).innerText)) && !(await w.evaluate(() => thread().skill)), 'en el chat se ve una línea corta y la habilidad no queda activada en el hilo');
 
+  // ---- 4. Consejos mientras escribes y ✨ ESTRUCTURAR ----
+  await w.evaluate(() => { S.active = null; save(); renderLog(); });
+  await w.fill('#input', 'escribe un correo');
+  await w.waitForFunction(() => /Para una respuesta mejor/.test(document.querySelector('#skillHint').textContent) && !document.querySelector('#skillHint').hidden);
+  const tip = await w.textContent('#skillHint');
+  ok(/para quién/.test(tip) && /tono/.test(tip), 'mientras escribes una petición vaga, sugiere qué añadir (sin usar IA) · ' + tip.replace(/\s+/g, ' ').slice(0, 90));
+  const before = mocks.log.length;
+  await w.click('[data-assist=struct]');
+  await w.waitForFunction(() => /\*\*Rol:\*\*/.test(document.querySelector('#input').value), null, { timeout: 15000 });
+  ok(/\[completa: para quién es\]/.test(await w.inputValue('#input')) && mocks.log.length === before + 1 && (await w.evaluate(() => thread().messages.length)) === 0,
+    '✨ ESTRUCTURAR convierte la petición en una profesional (Rol, Objetivo, Formato…) en la caja, sin enviarla');
+  ok(/DESHACER/.test(await w.textContent('#skillHint')), 'avisa de rellenar los huecos y deja DESHACER');
+  await w.click('[data-assist=undo]');
+  ok(await w.inputValue('#input') === 'escribe un correo', 'DESHACER recupera lo que habías escrito');
+  await w.fill('#input', 'escribe un correo con mi DNI 12345678Z');
+  await w.click('#structBtn');
+  ok(/Quita los datos sensibles/.test(await w.textContent('#toast')) && mocks.log.length === before + 1, 'no estructura (no envía a la IA) si hay datos sensibles');
+  await w.fill('#input', 'Redacta un correo formal para mi jefe en 5 líneas pidiendo vacaciones');
+  await w.waitForTimeout(500);
+  ok(await w.isHidden('#skillHint'), 'una petición completa no muestra consejos');
+
+  // ---- 5. Aviso de actualidad ----
+  await w.evaluate(() => { S.search = { type: 'searxng', url: 'http://127.0.0.1:9' }; renderTargets(); });
+  await w.fill('#input', '¿Cuál es el precio del bitcoin hoy?');
+  await w.waitForFunction(() => /Parece algo reciente/.test(document.querySelector('#skillHint').textContent));
+  ok(!!(await w.$('[data-assist=web]')), 'si preguntas por algo reciente, avisa y ofrece buscar en internet');
+  await w.click('[data-assist=web]'); await w.click('#send'); await idle();
+  ok(/Sin búsqueda:/.test(await w.textContent('#log')), '…y ese mensaje intenta buscar (aquí el buscador está apagado y se avisa)');
+  ok(!(await w.evaluate(() => S.web)), 'solo ese mensaje: 🌐 WEB no queda activado');
+  await w.evaluate(() => { S.search = {}; renderTargets(); });
+
   await app.close();
   console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
