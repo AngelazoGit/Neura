@@ -178,9 +178,15 @@ async function a1111Generate(g, a, signal) {
   return { data: d.images[0].replace(/^data:[^,]+,/, ''), mime: 'image/png', model };
 }
 const clampInt = (v, lo, hi, def) => (Number.isFinite(+v) ? Math.min(hi, Math.max(lo, Math.round(+v))) : def);
+let imageBusy = false; // una imagen a la vez: cancelar en la app no para el generador, así no se acumulan trabajos
 async function imageGenerate(args, { signal } = {}) {
   const prompt = String(args.prompt || '').trim().slice(0, 4000);
   if (!prompt) throw new Error('Falta el prompt');
+  if (imageBusy) throw new Error('El generador del PC aún está terminando la imagen anterior. Espera a que acabe y vuelve a intentarlo.');
+  imageBusy = true;
+  try { return await imageGenerateNow(prompt, args, signal); } finally { imageBusy = false; }
+}
+async function imageGenerateNow(prompt, args, signal) {
   const a = { prompt, negative: String(args.negative || '').slice(0, 2000), steps: clampInt(args.steps, 1, 80, 25),
     width: clampInt(args.width, 256, 2048, 1024) & ~7, height: clampInt(args.height, 256, 2048, 1024) & ~7, seed: clampInt(args.seed, 0, 2 ** 31, Math.floor(Math.random() * 2 ** 31)) };
   const online = (await imageStatus()).filter((x) => x.online).map((x) => IMAGES.find((g) => g.id === x.id));
@@ -833,7 +839,9 @@ async function gwTargets() {
   }
   // Con el tope de gasto alcanzado, solo IAs gratuitas (como SOLO GRATIS).
   const over = gwOver();
-  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => !over || p.free).map((p) => ({ ...p, local: false }));
+  // Con un tope activo, una de pago sin precio tampoco: su gasto no se podría contar.
+  const capped = gateway.budget?.day > 0 || gateway.budget?.month > 0;
+  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => p.free || (!over && !(capped && !p.price))).map((p) => ({ ...p, local: false }));
   // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
   const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !(gateway.freeOnly || over))), ...cloud];
   const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };

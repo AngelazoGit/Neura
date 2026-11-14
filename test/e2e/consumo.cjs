@@ -33,7 +33,10 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   ok(/CONSUMO/.test(panel) && /PAGO/.test(panel) && /Gasto de hoy/.test(panel), 'el panel de consumo muestra cada IA y el gasto de hoy y del mes');
   await w.evaluate(() => { S.providers.find((p) => p.id === 'ds').enabled = true; renderProviders(); });
   ok(/SINPRECIO: de pago sin precio/.test(await w.textContent('#usagePanel')), 'avisa de las IAs de pago sin precio (su gasto no se puede contar)');
-  await w.evaluate(() => { S.providers.find((p) => p.id === 'ds').enabled = false; renderProviders(); });
+  await w.evaluate(() => { S.budget = { month: 1e12 }; });
+  ok(await w.evaluate(() => !allowed(findT('ds::otro')) && /sin precio y tienes un tope/.test(notAllowedWhy(findT('ds::otro'))) && allowed(findT('oa::caro'))),
+    'con un tope activo, una IA de pago sin precio no se usa (su gasto no se podría contar); la de pago con precio sí');
+  await w.evaluate(() => { S.budget = {}; S.providers.find((p) => p.id === 'ds').enabled = false; renderProviders(); });
   ok(await w.$eval('#provList [data-pid=oa] input[data-f=priceIn]', (e) => e.value) === '1000000' && !(await w.$('#provList [data-pid=m] input[data-f=priceIn]')), 'el precio se pone en la tarjeta de las IAs de pago (no en las gratuitas)');
 
   // Tope de gasto: por debajo, la de pago se usa; al llegar, solo gratuitas.

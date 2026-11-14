@@ -119,7 +119,7 @@ const a1111 = http.createServer((req, res) => {
   let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/sdapi/v1/sd-models') return res.end('[{"title":"sdxl"}]');
-    if (req.url === '/sdapi/v1/txt2img') { imgSeen.push({ a1111: JSON.parse(b) }); return res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })); }
+    if (req.url === '/sdapi/v1/txt2img') { const j = JSON.parse(b); imgSeen.push({ a1111: j }); return setTimeout(() => res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })), j.prompt === 'lenta' ? 400 : 0); }
     res.statusCode = 404; res.end('{}');
   });
 });
@@ -460,4 +460,43 @@ test('imágenes: ComfyUI con un flujo básico y el primer modelo instalado', asy
 test('imágenes: sin ningún generador encendido, explica cómo conseguir uno', async () => {
   const r = (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'image_generate', arguments: { prompt: 'x' } } })).json()).result;
   assert.equal(r.isError, true); assert.match(r.content[0].text, /ComfyUI.*Forge/);
+});
+
+test('imágenes: una a la vez (cancelar en la app no para el generador, así no se acumulan trabajos)', async () => {
+  const [a, b] = await Promise.all([call('image_generate', { prompt: 'lenta' }), new Promise((r) => setTimeout(r, 100)).then(() => call('image_generate', { prompt: 'otra' }))]);
+  assert.equal(a.isError, undefined);
+  assert.equal(b.isError, true); assert.match(b.content[0].text, /imagen anterior/);
+  assert.equal((await call('image_generate', { prompt: 'después' })).isError, undefined, 'al terminar, acepta la siguiente');
+});
+test('Gateway: la clave de la caché incluye todo lo que cambia la respuesta (modelo, instrucciones, historial, imagen, herramientas, parámetros)', async () => {
+  await configure({ enabled: true, providers: [prov('p/bueno', 'bueno'), prov('p/eco', 'eco')], cache: true });
+  const calls = () => gwSeen.length;
+  const base = { model: 'p/bueno', messages: [{ role: 'user', content: [{ type: 'text', text: 'resume esto' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }] };
+  const ask = async (b) => { const n = calls(); await (await gw('/v1/chat/completions', b)).text(); await new Promise((r) => setTimeout(r, 30)); return calls() - n; };
+  assert.equal(await ask(base), 1); assert.equal(await ask(base), 0, 'idéntica: de la caché');
+  const variants = {
+    'otra imagen': { ...base, messages: [{ role: 'user', content: [{ type: 'text', text: 'resume esto' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,BBBB' } }] }] },
+    'otro modelo': { ...base, model: 'p/eco' },
+    'auto en vez del modelo': { ...base, model: 'auto' },
+    instrucciones: { ...base, messages: [{ role: 'system', content: 'sé breve' }, ...base.messages] },
+    historial: { ...base, messages: [{ role: 'user', content: 'antes' }, { role: 'assistant', content: 'vale' }, ...base.messages] },
+    herramientas: { ...base, tools: [{ type: 'function', function: { name: 'leer', parameters: { type: 'object' } } }] },
+    temperatura: { ...base, temperature: 0.2 },
+  };
+  for (const [name, b] of Object.entries(variants)) assert.equal(await ask(b), 1, `${name}: no puede salir de la caché`);
+  const anth = { model: 'p/bueno', max_tokens: 50, messages: [{ role: 'user', content: 'hola caché' }] };
+  const askA = async (b) => { const n = calls(); await (await gw('/v1/messages', b)).text(); await new Promise((r) => setTimeout(r, 30)); return calls() - n; };
+  assert.equal(await askA(anth), 1); assert.equal(await askA(anth), 0);
+  assert.equal(await askA({ ...anth, system: 'otro sistema' }), 1, 'Anthropic: otro system no sale de la caché');
+  await configure({ enabled: false });
+});
+test('Gateway: con un tope activo, una IA de pago sin precio no se usa (su gasto no se podría contar)', async () => {
+  const providers = [{ ...prov('pago/sinprecio', 'bueno') }, { ...prov('gratis/eco', 'eco'), free: true }];
+  const ids = async () => (await (await gw('/v1/models')).json()).data.map((m) => m.id);
+  await configure({ enabled: true, providers });
+  assert.ok((await ids()).includes('pago/sinprecio'), 'sin tope, se usa');
+  await configure({ enabled: true, providers, budget: { month: 50 } });
+  const l = await ids();
+  assert.ok(!l.includes('pago/sinprecio') && l.includes('gratis/eco'));
+  await configure({ enabled: false });
 });

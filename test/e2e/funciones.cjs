@@ -1,5 +1,5 @@
 // Importar historial (ChatGPT, Claude, Gemini), enrutado por tarea, votos en el CONSEJO y exportar a PDF.
-const { _electron } = require('playwright'); const fs = require('fs'), path = require('path'), os = require('os');
+const { _electron } = require('playwright'); const fs = require('fs'), path = require('path'), os = require('os'), http = require('http'), zlib = require('zlib');
 const mocks = require('./mocks.cjs');
 const ROOT = path.join(__dirname, '../../desktop');
 const FX = path.join(__dirname, 'fixtures');
@@ -10,8 +10,27 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   mcp: [], threads: [], target: 'm::rapido', autoSkip: true, level: 'pro', wizardDone: true,
 }));
 
+// ZIP mínimo con entradas deflate de N MB de ceros; «declara» permite mentir sobre el tamaño descomprimido.
+function zipOfZeros(file, entries) {
+  const out = [], central = []; let off = 0;
+  const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; }, u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n >>> 0); return b; };
+  for (const { name, mb, declara } of entries) {
+    const all = zlib.deflateRawSync(Buffer.alloc(mb * 2 ** 20));
+    const nm = Buffer.from(name), size = declara ?? mb * 2 ** 20;
+    const head = [u16(20), u16(0), u16(8), u16(0), u16(0), u32(0), u32(all.length), u32(size), u16(nm.length), u16(0)];
+    out.push(u32(0x04034b50), ...head, nm, all);
+    central.push(u32(0x02014b50), u16(20), ...head, u16(0), u16(0), u16(0), u32(0), u32(off), nm);
+    off += 30 + nm.length + all.length;
+  }
+  const cd = Buffer.concat(central);
+  fs.writeFileSync(file, Buffer.concat([...out, cd, u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length), u32(cd.length), u32(off), u16(0)]));
+}
+const hits = [];
+const spy = http.createServer((q, res) => { hits.push(q.url); res.end(''); });
+
 (async () => {
   await mocks.start();
+  await new Promise((r) => spy.listen(5604, '127.0.0.1', r));
   const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
@@ -21,7 +40,9 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   const imp = async (f) => { await w.setInputFiles('#importFile', path.join(FX, f)); await w.waitForTimeout(800); return w.textContent('#toast'); };
 
   // ---- 7. Importar historial ----
-  ok(/1 hilos importados de ChatGPT/.test(await imp('chatgpt-export.zip')), 'importa la exportación de ChatGPT directamente desde el .zip');
+  const t1 = await imp('chatgpt-export.zip');
+  ok(/1 hilos importados de ChatGPT/.test(t1), 'importa la exportación de ChatGPT directamente desde el .zip');
+  ok(/1 adjuntos no se importan \(solo el texto\)/.test(t1), 'avisa de los adjuntos que no se importan (no hay pérdida silenciosa)');
   const gpt = await w.evaluate(() => S.threads.find((t) => t.id === 'gpt-c-paella'));
   ok(gpt?.title === 'Receta de paella' && gpt.messages.map((m) => m.content).join('|') === '¿Cómo hago una paella valenciana?|Necesitas arroz bomba, pollo y conejo.|¿Y el sofrito?|Tomate rallado y pimentón.',
     'ChatGPT: sigue la rama visible (sin mensajes ocultos ni respuestas descartadas) y toma el texto de los mensajes con imagen');
@@ -35,6 +56,20 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   ok(gem.length === 1 && gem[0].title.startsWith('Gemini · 2026-09-15') && gem[0].msgs.length === 4 && /calor/.test(gem[0].msgs[1]) && !/<b>|<img/.test(gem[0].msgs[1]),
     'Gemini: un hilo por día con cada pregunta y su respuesta en texto (sin registros que no son preguntas ni actividad de otros productos)');
   ok(await w.evaluate(() => !window.__pwned), 'el HTML importado no ejecuta nada');
+  await imp('gemini-red.json'); await w.waitForTimeout(1500);
+  ok(hits.length === 0 && await w.evaluate(() => S.threads.some((t) => t.messages.some((m) => /^Texto seguro\nx\n<img src=/.test(m.content)))) && await w.evaluate(() => !window.__pwned),
+    `el HTML importado no hace ninguna petición de red (imágenes, iframes, estilos, vídeo, SVG, srcset…) y una etiqueta sin cerrar queda como texto: ${hits.length} peticiones`);
+  // ZIP con tamaño falso y ZIP que pasa del límite total: se rechazan sin tocar los hilos que ya había.
+  const prev = await w.evaluate(() => JSON.stringify(S.threads));
+  const bomb = path.join(UD, 'mentiroso.zip'), many = path.join(UD, 'muchos.zip');
+  zipOfZeros(bomb, [{ name: 'conversations.json', mb: 410, declara: 100 }]);
+  zipOfZeros(many, [{ name: 'conversations-000.json', mb: 250 }, { name: 'conversations-001.json', mb: 250 }]);
+  for (const [f, what] of [[bomb, 'un archivo que miente sobre su tamaño'], [many, 'varios archivos que juntos pasan de 400 MB']]) {
+    await w.setInputFiles('#importFile', f);
+    await w.waitForFunction(() => /demasiado grande/.test(document.querySelector('#toast').textContent), null, { timeout: 60000 })
+      .then(() => ok(true, `ZIP con ${what}: se corta al pasar de 400 MB descomprimidos`), () => ok(false, `ZIP con ${what}`));
+  }
+  ok(await w.evaluate((b) => JSON.stringify(S.threads) === b, prev) && (await w.evaluate(() => 1 + 1)) === 2, '…y los hilos que ya había quedan intactos y la app sigue respondiendo');
   await w.click('#btnThreads');
   ok(/↘ ChatGPT/.test(await w.textContent('#threadList')) && /↘ Claude/.test(await w.textContent('#threadList')), 'la lista de hilos indica de dónde viene cada uno');
   await w.click('#newThread');

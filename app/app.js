@@ -304,6 +304,8 @@ function spent() {
   spentMemo = { rev, v };
   return v;
 }
+const hasBudget = () => +S.budget?.day > 0 || +S.budget?.month > 0;
+const unpricedPaid = (t) => { const p = provOf(t); return !!p && p.tier !== 'free' && !priced(p); };
 const overBudget = () => { const b = S.budget || {}, x = spent(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
 const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
 
@@ -320,8 +322,8 @@ function isFree(t) {
 }
 // "Privado": un equipo tuyo (puente de este PC o marcado como tuyo) y además con backend local.
 const isMine = (t) => t.kind === 'mcp' && localBackend(t) && S.mcp.some((s) => s.id === t.sid && (s.local || s.mine));
-const allowed = (t) => ((!S.freeOnly && !overBudget()) || isFree(t)) && (!thread().private || isMine(t));
-const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : S.freeOnly ? 'es de pago o de coste desconocido y tienes SOLO GRATIS activado' : 'has llegado a tu tope de gasto: hasta que se renueve solo se usan IAs gratuitas');
+const allowed = (t) => ((!S.freeOnly && !overBudget() && !(hasBudget() && unpricedPaid(t))) || isFree(t)) && (!thread().private || isMine(t));
+const notAllowedWhy = (t) => (thread().private && !isMine(t) ? 'no es un equipo tuyo y este hilo es 🔒 PRIVADO' : S.freeOnly ? 'es de pago o de coste desconocido y tienes SOLO GRATIS activado' : unpricedPaid(t) && !overBudget() ? 'es de pago sin precio y tienes un tope de gasto: pon su precio en ⚙ para usarla' : 'has llegado a tu tope de gasto: hasta que se renueve solo se usan IAs gratuitas');
 // Orden de intento: la elegida, luego las disponibles por calidad (otros proveedores primero) y al final las agotadas.
 // Nunca incluye destinos que la política de gasto o privacidad no permite.
 // needs.vision: el mensaje lleva imágenes; se evitan los modelos que ya las rechazaron.
@@ -958,7 +960,7 @@ async function sendImage(raw) {
       Object.assign(msg, { pending: false, content: txt, ms: Math.round(performance.now() - t0), label: `🖼 ${srv.name} / ${r.structuredContent?.backend || 'imagen'}`,
         files: [{ kind: 'image', name: `${safeName(prompt)}.png`, data: `data:${img.mimeType || 'image/png'};base64,${img.data}` }] });
       await persistFiles();
-    } catch (e) { Object.assign(msg, { pending: false, error: e.name === 'AbortError' ? 'Cancelado' : e.message }); }
+    } catch (e) { Object.assign(msg, { pending: false, error: e.name === 'AbortError' ? 'Has dejado de esperar. El generador del PC puede seguir hasta terminar esta imagen; mientras tanto no aceptará otra.' : e.message }); }
     setBusy(false);
   }
   th.ts = Date.now(); save(); renderLog(); syncAll();
@@ -1458,10 +1460,10 @@ function usageHTML() {
     <p class="hint" id="usageSum">${usageSumHTML()}</p>
     ${rows ? `<table class="usage">${head}<tbody>${rows}</tbody></table>` : '<p class="hint">Aún no has usado ninguna IA hoy.</p>'}
     ${gwRows ? `<h4>🔌 POR EL GATEWAY (otras herramientas)</h4><table class="usage">${head}<tbody>${gwRows}</tbody></table>${gw.cache?.hits ? `<p class="hint">Caché: ${gw.cache.hits} respuestas repetidas servidas sin llamar a ninguna IA.</p>` : ''}` : ''}
-    ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente.</p>` : ''}
+    ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
     <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
     <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
-    <p class="hint">Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Los tokens y el gasto son una estimación por caracteres; la factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+    <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Es un <b>tope aproximado</b>: se basa en estimaciones por caracteres, cuenta solo lo que pasa por Neura y las peticiones que ya estaban en marcha al llegar al tope pueden terminar. La factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
 }
 function usageSumHTML() {
   const x = spent();
@@ -1731,7 +1733,9 @@ async function download(name, text, type) {
 const safeName = (s) => String(s).replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 40) || 'hilo';
 // ---------- importar: copias de Neura y exportaciones oficiales de ChatGPT, Claude y Gemini ----------
 // Lector de ZIP mínimo: lee solo el índice y los archivos que interesan (las exportaciones pueden pesar mucho).
+const ZIP_MAX = 400 * 2 ** 20; // por archivo y en total: una exportación de texto mayor no cabría en memoria
 async function readZip(file) {
+  let total = 0;
   const u8 = async (a, b) => new Uint8Array(await file.slice(a, b).arrayBuffer());
   const tail = await u8(Math.max(0, file.size - 65558), file.size);
   let e = -1;
@@ -1749,26 +1753,38 @@ async function readZip(file) {
       const h = new DataView((await u8(off, off + 30)).buffer);
       const start = off + 30 + h.getUint16(26, true) + h.getUint16(28, true);
       const blob = file.slice(start, start + size);
-      // Un archivo de texto de más de 400 MB no es una exportación razonable (y no cabría en memoria).
-      if (full > 400 * 2 ** 20) throw new Error(`${name} es demasiado grande para importarlo`);
-      if (method === 0) return blob.text();
-      if (method !== 8) throw new Error(`Compresión no admitida en ${name}`);
-      return new Response(blob.stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+      const tooBig = () => new Error(`${name} es demasiado grande para importarlo (más de 400 MB)`);
+      if (full > ZIP_MAX) throw tooBig();
+      if (method !== 0 && method !== 8) throw new Error(`Compresión no admitida en ${name}`);
+      // Se cuentan los bytes que salen de verdad (el tamaño de la cabecera puede ser falso) y se corta al pasar el límite.
+      const rd = (method === 0 ? blob.stream() : blob.stream().pipeThrough(new DecompressionStream('deflate-raw'))).getReader();
+      const parts = [];
+      for (let n = 0; ;) {
+        const { done, value } = await rd.read();
+        if (done) break;
+        n += value.length; total += value.length;
+        if (n > ZIP_MAX || total > ZIP_MAX) { rd.cancel().catch(() => {}); throw tooBig(); }
+        parts.push(value);
+      }
+      return new Blob(parts).text();
     } });
     k += 46 + nl + xl + cl;
   }
   return out;
 }
-// DOMParser: documento inerte (no ejecuta scripts ni carga imágenes del HTML importado).
-const htmlText = (h) => new DOMParser().parseFromString(String(h || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h\d)>/gi, '\n'), 'text/html').body.textContent.replace(/\n{3,}/g, '\n\n').trim();
+// Primero se quitan todas las etiquetas (y cualquier «<» suelto): DOMParser solo recibe texto y entidades,
+// así que no puede crear imágenes, iframes ni nada que descargue o ejecute algo.
+const htmlText = (h) => new DOMParser().parseFromString(String(h || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h\d)>/gi, '\n').replace(/<[^>]*>/g, '').replace(/</g, '&lt;'), 'text/html').body.textContent.replace(/\n{3,}/g, '\n\n').trim();
 const tsOf = (x) => (typeof x === 'number' ? (x < 1e12 ? x * 1000 : x) : Date.parse(x) || Date.now());
 // ChatGPT: cada conversación es un árbol (mapping); se sigue la rama visible, desde el último mensaje hacia atrás.
+let skippedParts = 0; // adjuntos que no se importan (solo texto); se avisa al terminar
 function fromChatGPT(list) {
   return list.map((c) => {
     const msgs = [];
     for (let id = c.current_node; id && c.mapping?.[id]; id = c.mapping[id].parent) {
       const m = c.mapping[id].message, role = m?.author?.role;
       if (!m || !['user', 'assistant'].includes(role) || m.metadata?.is_visually_hidden_from_conversation || (m.recipient && m.recipient !== 'all')) continue;
+      skippedParts += (m.content?.parts || []).filter((x) => typeof x !== 'string').length;
       const text = (m.content?.parts || []).filter((x) => typeof x === 'string').join('\n').trim() || (typeof m.content?.text === 'string' ? m.content.text.trim() : '');
       if (!text) continue;
       msgs.unshift({ id: 'gpt-' + (m.id || id), role, content: text, ts: tsOf(m.create_time || c.create_time), ...(role === 'assistant' ? { label: `ChatGPT${m.metadata?.model_slug ? ' / ' + m.metadata.model_slug : ''}` } : {}) });
@@ -1779,7 +1795,7 @@ function fromChatGPT(list) {
 function fromClaude(list) {
   return list.map((c) => ({
     id: 'claude-' + (c.uuid || uid()), title: c.name || 'Claude', source: 'Claude', ts: tsOf(c.updated_at || c.created_at),
-    messages: (c.chat_messages || []).map((m) => ({
+    messages: (c.chat_messages || []).map((m) => (skippedParts += (m.attachments?.length || 0) + (m.files?.length || 0), {
       id: 'claude-' + (m.uuid || uid()), role: m.sender === 'human' ? 'user' : 'assistant', ts: tsOf(m.created_at),
       content: (m.text || (m.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n')).trim(),
       ...(m.sender === 'human' ? {} : { label: 'Claude' }),
@@ -1818,10 +1834,12 @@ function parseExport(data) {
 async function importThreads(file) {
   try {
     let sources;
+    skippedParts = 0;
     if (/\.zip$/i.test(file.name) || (await file.slice(0, 2).text()) === 'PK') {
       const want = (await readZip(file)).filter((z) => /(^|\/)conversations(-\d+)?\.json$/i.test(z.name) || /(gemini|bard)[^/]*\/[^/]*\.json$/i.test(z.name));
       if (!want.length) throw new Error('En el ZIP no hay conversations.json (ChatGPT o Claude) ni la actividad de Gemini en JSON');
-      sources = await Promise.all(want.map((z) => z.read()));
+      sources = [];
+      for (const z of want) sources.push(await z.read()); // de uno en uno: el límite total se aplica en orden
     } else sources = [await file.text()];
     const found = [];
     for (const txt of sources) { const r = parseExport(JSON.parse(txt)); if (r) found.push(r); }
@@ -1844,7 +1862,7 @@ async function importThreads(file) {
     }
     save(); await persistFiles(); renderThreads(); renderLog(); syncAll();
     const kinds = [...new Set(found.map((f) => f.kind))].join(' y ');
-    toast(`${n} hilos importados de ${kinds}${left ? ` · ${left} más antiguos no caben aquí: impórtalos en Neura para PC` : ''}`);
+    toast(`${n} hilos importados de ${kinds}${left ? ` · ${left} más antiguos no caben aquí: impórtalos en Neura para PC` : ''}${skippedParts ? ` · ${skippedParts} adjuntos no se importan (solo el texto)` : ''}`);
   } catch (e) { toast('Importar: ' + e.message, true); }
 }
 
