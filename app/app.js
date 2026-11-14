@@ -831,7 +831,7 @@ async function send(text, files = []) {
     let hist = await fitContext(th, buildHistory(th), budget, signal);
     renderLog();
     const task = taskOf(text), routed = routeFor(task);
-    const userMsg = msgs.findLast((m) => m.role === 'user');
+    const userMsg = [...msgs].reverse().find((m) => m.role === 'user');
     userMsg.task = task;
     if (routed && routed.key !== S.target) userMsg.routed = routed.label;
     const first = routed || findT(S.target);
@@ -881,8 +881,8 @@ async function send(text, files = []) {
 // ---------- enrutado por tipo de tarea y votos ----------
 // Neura reconoce el tipo de petición por sus palabras y usa la IA que hayas asignado a ese tipo
 // (o la que más has votado como mejor en el CONSEJO). Si no está disponible, sigue la elegida arriba.
-// Palabras completas también con tildes (\b de JavaScript no reconoce «é» como letra).
-const W = (words) => new RegExp(`(?<![\\p{L}\\p{N}])(${words})(?![\\p{L}\\p{N}])`, 'iu');
+// Palabras completas también con tildes (\b de JavaScript no reconoce «é» como letra). Sin «lookbehind»: iOS antiguos no lo admiten.
+const W = (words) => new RegExp(`(^|[^\\p{L}\\p{N}])(${words})(?![\\p{L}\\p{N}])`, 'iu');
 const TASKS = [
   { id: 'codigo', name: '💻 Código', re: /```/, words: W('código|codigo|programa|script|funci[oó]n|bug|compila\\w*|python|javascript|typescript|java|sql|html|css|regex|json|depura\\w*|refactori[zc]a\\w*|stack ?trace') },
   { id: 'resumen', name: '📝 Resumir', words: W('resume|resúmeme|resumen|resumir|sintetiza|tl;?dr|puntos clave|en pocas palabras') },
