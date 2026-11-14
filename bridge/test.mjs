@@ -407,18 +407,19 @@ test('Gateway: cuenta el consumo por destino y día, con el gasto según el prec
   assert.ok(u.spent.day >= 11 && u.month['pago/bueno'].n >= 1);
   assert.equal((await fetch(`${BASE}/neura/gateway`, { headers: { Authorization: `Bearer ${GWT}` } })).status, 403, 'el token del Gateway no ve el consumo');
 });
-test('Gateway: al llegar al tope de gasto solo usa IAs gratuitas (cuenta también lo gastado en la app)', async () => {
+test('Gateway: al llegar al tope de gasto solo usa IAs gratuitas (cuenta también lo que la app liquidó en el saldo único)', async () => {
   const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 1, out: 1 } }, { ...prov('gratis/eco', 'eco'), free: true }];
   const ids = async () => (await (await gw('/v1/models')).json()).data.map((m) => m.id);
-  await configure({ enabled: true, providers, budget: { day: 1e9 } });
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 10 } });
   assert.ok((await ids()).includes('pago/bueno'), 'por debajo del tope, la de pago está');
-  const d = new Date(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  await configure({ enabled: true, providers, budget: { day: 1e9 }, appSpent: { date: day, day: 1e9, month: 1e9 } });
+  const { id } = await (await gw('/neura/budget/reserve', { eur: 10, budget: { day: total0 + 10 } })).json();
+  assert.equal((await gw('/neura/budget/settle', { id, eur: 10, in: 5, out: 5 })).status, 200);
   const l = await ids();
-  assert.ok(!l.includes('pago/bueno') && l.includes('gratis/eco'), 'con el gasto de la app ya en el tope, solo la gratuita');
-  assert.equal((await (await gw('/neura/gateway')).json()).over, true);
-  await configure({ enabled: true, providers, budget: { month: 1e9 }, appSpent: { date: '2000-01-01', day: 1e9, month: 1e9 } });
-  assert.ok((await ids()).includes('pago/bueno'), 'el gasto de otro mes no cuenta');
+  assert.ok(!l.includes('pago/bueno') && l.includes('gratis/eco'), 'con lo gastado por la app el tope se alcanza: solo la gratuita');
+  const g = await (await gw('/neura/gateway')).json();
+  assert.equal(g.over, true); assert.equal(g.today.app, undefined, 'el gasto de la app no aparece como uso del Gateway');
+  await configure({ enabled: false, budget: {} });
 });
 test('Gateway: caché opcional de peticiones idénticas (texto y streaming); se vacía al cambiar la configuración', async () => {
   const providers = [prov('p/bueno', 'bueno')];
@@ -519,9 +520,8 @@ test('imágenes: si se agota la espera, el turno sigue ocupado hasta que el gene
 test('Gateway: el tope reserva el coste estimado antes de enviar (dos peticiones a la vez no pueden pasarse)', async () => {
   // 1.000 €/M de salida → cada petición reserva 4.096 tokens × 1.000 € / 1M ≈ 4,10 €; el tope de 6 € solo deja una a la vez.
   const providers = [{ ...prov('pago/eco', 'eco'), price: { in: 0, out: 1000 } }];
-  const d = new Date(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const spent0 = (await (await gw('/neura/gateway')).json()).spent.day;
-  await configure({ enabled: true, providers, budget: { day: spent0 + 6 }, appSpent: { date: day, day: 0, month: 0 } });
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 6 } });
   const one = (q) => gw('/v1/chat/completions', { model: 'pago/eco', stream: true, messages: [{ role: 'user', content: q }] });
   const [r1, r2] = await Promise.all([one('primera-larga'), new Promise((r) => setTimeout(r, 50)).then(() => one('segunda'))]);
   const st = [r1.status, r2.status].sort();
@@ -530,4 +530,37 @@ test('Gateway: el tope reserva el coste estimado antes de enviar (dos peticiones
   await new Promise((r) => setTimeout(r, 100));
   const r3 = await one('tercera'); assert.equal(r3.status, 200, 'al terminar, la reserva se cambia por el gasto real (pequeño) y vuelve a caber'); await r3.text();
   await configure({ enabled: false });
+});
+
+test('Saldo único: la app y el Gateway no pueden reservar el mismo dinero', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 0, out: 200 } }]; // reserva del Gateway: 4.096 × 200 € / 1M ≈ 0,82 €
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day, budget = { day: total0 + 1 };
+  await configure({ enabled: true, providers, budget });
+  const res = await (await gw('/neura/budget/reserve', { eur: 0.8, budget })).json(); // la app reserva 0,80 € de 1 €
+  assert.ok(res.id);
+  const r = await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(r.status, 402, 'al Gateway solo le quedan 0,20 €: no cabe su reserva de 0,82 €');
+  assert.equal((await gw('/neura/budget/reserve', { eur: 0.3, budget })).status, 402, '…ni otra reserva de la app de 0,30 €');
+  assert.equal((await gw('/neura/budget/settle', { id: res.id, eur: 0, in: 0, out: 0 })).status, 200, 'la app liquida (su petición fue rechazada: 0 €)');
+  assert.equal((await gw('/neura/budget/settle', { id: res.id, eur: 0, in: 0, out: 0 })).status, 409, 'una reserva solo se liquida una vez');
+  assert.equal((await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'x' }] })).status, 200, 'liberado el saldo, el Gateway ya cabe');
+  assert.equal((await fetch(`${BASE}/neura/budget/reserve`, { method: 'POST', headers: { Authorization: `Bearer ${GWT}` }, body: '{"eur":1}' })).status, 403, 'el token del Gateway no puede reservar');
+  assert.equal((await gw('/neura/budget/reserve', { eur: -5 })).status, 400, 'importes inválidos se rechazan');
+  await configure({ enabled: false, budget: {} });
+});
+test('Gateway con tope: pide al proveedor un máximo de salida y, si la respuesta se corta, cobra lo reservado', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 0, out: 1000 } }, { ...prov('pago/corta', 'corta'), price: { in: 0, out: 1000 } }];
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 100 } });
+  await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'max' }] });
+  assert.equal(gwSeen.at(-1).body.max_tokens, 4096, 'sin max_tokens del cliente, se envía el máximo reservado');
+  await gw('/v1/chat/completions', { model: 'pago/bueno', max_tokens: 50, messages: [{ role: 'user', content: 'max' }] });
+  assert.equal(gwSeen.at(-1).body.max_tokens, 50, 'el del cliente se respeta');
+  const before = (await (await gw('/neura/gateway')).json()).total.day;
+  await (await gw('/v1/chat/completions', { model: 'pago/corta', stream: true, messages: [{ role: 'user', content: 'x' }] })).text();
+  await new Promise((r) => setTimeout(r, 300));
+  const after = await (await gw('/neura/gateway')).json();
+  assert.ok(Math.abs(after.total.day - before - 4.096) < 0.01, `corte sin datos de consumo → se cobra lo reservado (4,096 €): ${after.total.day - before}`);
+  assert.equal(after.reserved, 0, 'no queda ninguna reserva colgando');
+  await configure({ enabled: false, budget: {} });
 });

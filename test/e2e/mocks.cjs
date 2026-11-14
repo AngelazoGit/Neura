@@ -31,7 +31,7 @@ const openai = http.createServer(async (req, res) => {
   }
   const j = JSON.parse(raw.toString() || '{}');
   calls[j.model] = (calls[j.model] || 0) + 1;
-  log.push({ model: j.model, n: j.messages.length, tools: !!j.tools, stream: j.stream, system: j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)) });
+  log.push({ model: j.model, n: j.messages.length, tools: !!j.tools, stream: j.stream, max: j.max_tokens ?? j.max_completion_tokens, system: j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)) });
   const last = j.messages[j.messages.length - 1];
   const q = textOf(last.content);
   log.at(-1).q = q;

@@ -114,7 +114,7 @@ function gatewayPayload() {
     .filter((t, i, a) => t && usable.has(t.key) && a.findIndex((x) => x?.key === t.key) === i);
   return {
     enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly, unknownAsAuto: !!g.unknownAsAuto, cache: !!g.cache,
-    budget: { day: +S.budget?.day || 0, month: +S.budget?.month || 0 }, appSpent: { date: today(), ...spent().app },
+    budget: { day: +S.budget?.day || 0, month: +S.budget?.month || 0 },
     providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model, free: isFree(t), price: priced(p) ? { in: +p.price.in || 0, out: +p.price.out || 0 } : null }; }),
     order: ordered.map((t) => (t.pid ? name(t) : t.model)),
   };
@@ -269,14 +269,15 @@ const localMidnight = () => { const d = new Date(); d.setHours(24, 0, 0, 0); ret
 // Peticiones de hoy a un proveedor (las rechazadas por cuota no cuentan: el proveedor no las atendió).
 const provToday = (p) => Object.entries(S.usage?.[today()] || {}).reduce((n, [k, v]) => n + (k.startsWith(p.id + '::') ? v.n + (v.err || 0) : 0), 0);
 let usageRev = 0, gwUse = null, gwSpentNow = null, reserved = 0; // lo que cuenta el puente del PC (se pide al abrir ⚙ y antes de enviar)
-function recordUse(t, messages, out, e) {
-  if (e && (e.name === 'AbortError' || e.status === 429 || e.budget)) return;
+// eur: lo cobrado contra el tope (si hay tope); sin tope, se estima por el precio.
+function recordUse(t, messages, out, e, eur) {
+  if (e && (e.name === 'AbortError' || e.status === 429 || e.budget) && !(eur > 0)) return;
   const day = ((S.usage ||= {})[today()] ||= {});
   const u = (day[t.key] ||= { n: 0, in: 0, out: 0, eur: 0, err: 0 });
-  if (e) u.err++;
+  if (e) { u.err++; u.eur += eur || 0; }
   else {
     const i = tokens(messages), o = Math.ceil(String(out || '').length / 3.5);
-    u.n++; u.in += i; u.out += o; u.eur += costOf(provOf(t), i, o);
+    u.n++; u.in += i; u.out += o; u.eur += eur ?? costOf(provOf(t), i, o);
   }
   usageRev++;
   const days = Object.keys(S.usage).sort();
@@ -300,14 +301,19 @@ function spent() {
   let d = 0, m = 0;
   for (const [k, v] of Object.entries(S.usage || {})) for (const x of Object.values(v)) { if (k === day) d += x.eur; if (monthOf(k) === monthOf(day)) m += x.eur; }
   const g = gwSpentNow && monthOf(gwSpentNow.date) === monthOf(day) ? gwSpentNow : null;
-  const v = { day: d + reserved + (g?.date === day ? g.day : 0), month: m + reserved + (g ? g.month : 0), app: { day: d + reserved, month: m + reserved } };
+  const v = { day: d + reserved + (g?.date === day ? g.day : 0), month: m + reserved + (g ? g.month : 0) };
   spentMemo = { rev, v };
   return v;
 }
 const hasBudget = () => +S.budget?.day > 0 || +S.budget?.month > 0;
 const unpricedPaid = (t) => { const p = provOf(t); return !!p && p.tier !== 'free' && !priced(p); };
-const budgetLeft = () => { const b = S.budget || {}, x = spent(); return Math.min(+b.day > 0 ? b.day - x.day : Infinity, +b.month > 0 ? b.month - x.month : Infinity); };
-const overBudget = () => { const b = S.budget || {}, x = spent(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
+// En el PC manda el saldo del puente (app + Gateway + reservas); aquí, para avisar y filtrar, el mayor de los dos.
+function budgetUsed() {
+  const x = spent(), t = DESK && gwSpentNow?.date === today() ? gwSpentNow.total : null;
+  return { day: Math.max(x.day, t?.day || 0), month: Math.max(x.month, t?.month || 0) };
+}
+const budgetLeft = () => { const b = S.budget || {}, x = budgetUsed(); return Math.min(+b.day > 0 ? b.day - x.day : Infinity, +b.month > 0 ? b.month - x.month : Infinity); };
+const overBudget = () => { const b = S.budget || {}, x = budgetUsed(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
 const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
 
 // ---------- política de destinos: gasto y privacidad ----------
@@ -455,16 +461,22 @@ async function callOpenAI(p, model, messages, onDelta, signal, opt = {}) {
   for (let round = 0; ; round++) {
     const body = { model, messages: msgs, stream: STREAM };
     if (tools.length && round < 6) body.tools = tools;
-    let r = await post(body);
-    if (!r.ok && body.tools && r.status === 400) {
-      const t = await r.text();
-      if (!/tool|function/i.test(t)) throw httpErr(400, t, r.headers);
-      tools = []; delete body.tools; // el modelo no admite herramientas: se responde sin ellas y se recuerda
-      H(`${p.id}::${model}`).noTools = true;
-      r = await post(body);
-    }
-    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
-    const { text, calls } = await readOpenAI(r, (x) => onDelta(prefix + x));
+    const { text, calls } = await paidRound(p, body, opt.bill, async () => {
+      let r = await post(body);
+      if (!r.ok && r.status === 400 && (body.tools || body.max_tokens)) {
+        const t = await r.text();
+        if (body.max_tokens && /max_tokens/.test(t)) {
+          // Algunos modelos (p. ej. de razonamiento de OpenAI) solo aceptan max_completion_tokens.
+          body.max_completion_tokens = body.max_tokens; delete body.max_tokens;
+        } else if (body.tools && /tool|function/i.test(t)) {
+          tools = []; delete body.tools; // el modelo no admite herramientas: se responde sin ellas y se recuerda
+          H(`${p.id}::${model}`).noTools = true;
+        } else throw httpErr(400, t, r.headers);
+        r = await post(body);
+      }
+      if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+      return readOpenAI(r, (x) => onDelta(prefix + x));
+    }, (res) => res.text + JSON.stringify(res.calls));
     if (!calls.length || !body.tools) return prefix + text;
     if (text) prefix += text + '\n\n';
     msgs.push({ role: 'assistant', content: text || null, tool_calls: calls });
@@ -491,15 +503,17 @@ async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
   const { system, msgs } = toAnthropic(messages);
   let prefix = '';
   for (let round = 0; ; round++) {
-    const body = { model, max_tokens: 4096, messages: msgs };
+    const body = { model, max_tokens: MAX_OUT, messages: msgs };
     if (system) body.system = system;
     if (tools.length && round < 6) body.tools = tools;
-    const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
-      method: 'POST', signal, body: JSON.stringify(body),
-      headers: { 'content-type': 'application/json', 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    });
-    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
-    const j = await r.json();
+    const j = await paidRound(p, body, opt.bill, async () => {
+      const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/messages', {
+        method: 'POST', signal, body: JSON.stringify(body),
+        headers: { 'content-type': 'application/json', 'x-api-key': p.apiKey || '', 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      });
+      if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+      return r.json();
+    }, (res) => JSON.stringify(res.content || []));
     const txt = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const uses = (j.content || []).filter((b) => b.type === 'tool_use');
     onDelta(prefix + txt);
@@ -512,14 +526,67 @@ async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
   }
 }
 
-// Con tope, cada petición a una IA de pago reserva su coste estimado (entrada + hasta 4.096 tokens de salida)
-// antes de enviarse; así varias a la vez (CONSEJO, reintentos) no pueden pasar del tope sin contarse.
 async function callTarget(t, messages, onDelta, signal, opt = {}) {
-  const est = hasBudget() ? costOf(provOf(t), tokens(messages), 4096) : 0;
-  if (est && budgetLeft() < est) throw Object.assign(new Error('No cabe en tu tope de gasto'), { budget: true });
-  reserved += est; usageRev++;
-  try { const out = await callTargetRaw(t, messages, onDelta, signal, opt); reserved -= est; usageRev++; recordUse(t, messages, out); return out; }
-  catch (e) { reserved -= est; usageRev++; recordUse(t, messages, null, e); throw e; }
+  const bill = hasBudget() ? { eur: 0 } : null; // con tope: lo cobrado en cada llamada (ver paidRound)
+  try { const out = await callTargetRaw(t, messages, onDelta, signal, { ...opt, bill }); recordUse(t, messages, out, null, bill?.eur); return out; }
+  catch (e) { recordUse(t, messages, null, e, bill?.eur); throw e; }
+}
+// ---------- tope de gasto: reserva antes de cada llamada a una IA de pago ----------
+// Con tope, cada llamada HTTP a una IA de pago con precio:
+// 1) pide al proveedor un máximo de salida (MAX_OUT) que este respeta;
+// 2) reserva su coste máximo (entrada estimada a la alta + MAX_OUT) contra UN saldo: en el PC, el del puente,
+//    compartido con el Gateway (comprobar y reservar es indivisible); en la web y el móvil, el de ese dispositivo;
+// 3) al terminar, liquida una sola vez: lo estimado (nunca más de lo reservado), 0 si el proveedor rechazó la
+//    petición, o todo lo reservado si se cortó y no se sabe cuánto consumió.
+const MAX_OUT = 4096;
+function inTokHigh(x) {
+  let chars = 0, imgs = 0;
+  const walk = (v) => {
+    if (typeof v === 'string') chars += v.length;
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') { if (v.type === 'image_url' || v.type === 'image') imgs++; else Object.values(v).forEach(walk); }
+  };
+  walk(x);
+  return Math.ceil(chars / 2) + imgs * 3000; // ~2 caracteres por token: a la alta
+}
+const budgetErr = () => Object.assign(new Error('No cabe en tu tope de gasto'), { budget: true });
+async function reserveBudget(eur) {
+  if (DESK) {
+    const b = DESK.bridge(), url = `http://127.0.0.1:${b.port}/neura/budget/`;
+    const call = (path, body) => xfetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + b.token }, body: JSON.stringify(body) });
+    let r = null;
+    try { r = await call('reserve', { eur, budget: S.budget }); } catch {}
+    if (r?.status === 402) throw budgetErr();
+    if (r?.ok) {
+      const { id } = await r.json();
+      return { settle: (charge, inT, outT) => call('settle', { id, eur: charge, in: inT, out: outT }).catch(() => {}) };
+    }
+    // Sin puente (no arrancó) tampoco hay Gateway: basta con el saldo de esta app.
+  }
+  if (budgetLeft() < eur) throw budgetErr();
+  reserved += eur; usageRev++;
+  let done = false;
+  return { settle: () => { if (!done) { done = true; reserved -= eur; usageRev++; } } };
+}
+async function paidRound(p, body, bill, run, outText) {
+  if (!bill || !priced(p)) return run();
+  body.max_tokens ??= MAX_OUT;
+  const inT = inTokHigh([body.messages, body.system, body.tools]);
+  const est = costOf(p, inT, body.max_tokens);
+  const ticket = await reserveBudget(est);
+  let charge = est, outT = body.max_tokens;
+  try {
+    const res = await run();
+    outT = Math.ceil(outText(res).length / 3.5);
+    charge = Math.min(est, costOf(p, Math.ceil(inT / 1.75), outT));
+    return res;
+  } catch (e) {
+    if (e.status >= 400) { charge = 0; outT = 0; } // el proveedor la rechazó: no generó nada
+    throw e;
+  } finally {
+    bill.eur += charge;
+    ticket.settle(charge, Math.ceil(inT / 1.75), outT);
+  }
 }
 async function callTargetRaw(t, messages, onDelta, signal, opt = {}) {
   if (t.kind === 'mcp') {
@@ -1473,7 +1540,7 @@ function usageHTML() {
     ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
     <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
     <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
-    <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de enviar a una IA de pago, Neura <b>reserva</b> su coste estimado (entrada + hasta 4.096 tokens de salida) y no la usa si no cabe. Es un tope sobre <b>estimaciones</b>: solo se pasa si una respuesta es más larga que lo reservado o los tokens reales difieren de la estimación, y cuenta solo lo que pasa por Neura. La factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+    <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de cada llamada a una IA de pago, Neura le pide como máximo 4.096 tokens de respuesta y <b>reserva</b> su coste máximo (con la entrada estimada a la alta)${DESK ? ' en un saldo único que comparten la app y el Gateway de este PC' : ' en el saldo de este dispositivo'}; si no cabe, no la usa. Si una petición se corta y no se sabe cuánto consumió, se cobra lo reservado. Los precios son los que pones tú y los tokens de entrada se estiman: la factura real la da cada proveedor. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
 }
 function usageSumHTML() {
   const x = spent();
@@ -1535,7 +1602,7 @@ async function refreshGwUsage() {
     if (!r.ok) return;
     const j = await r.json();
     gwUse = { today: j.today, month: j.month, cache: j.cache };
-    gwSpentNow = { date: j.date, day: j.spent.day, month: j.spent.month };
+    gwSpentNow = { date: j.date, day: j.spent.day, month: j.spent.month, total: j.total };
   } catch {}
 }
 // Si estás escribiendo en el panel, solo se actualiza el resumen (para no borrar el campo que editas).

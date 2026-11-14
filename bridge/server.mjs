@@ -769,7 +769,7 @@ const authorizedGw = (req) => same(req.headers.authorization || '', `Bearer ${GW
 // Otras herramientas (Continue, Cline, Aider, Open WebUI…) usan Neura como proveedor: por detrás van los
 // backends de este puente y las IAs que la app de PC le pasa con las claves del propio usuario (solo en memoria).
 // Con el modelo «auto» (o uno desconocido) se aplica AUTO-SALTO: si una IA falla o agota su cuota, se prueba la siguiente.
-const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, cache: false, budget: {}, appSpent: {}, providers: [], order: [] };
+const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, cache: false, budget: {}, providers: [], order: [] };
 
 // Consumo del Gateway por día y destino (se guarda en disco, 62 días). Tokens: los que dé el proveedor o una estimación.
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -777,10 +777,13 @@ const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}
 const gwUsageFile = join(DATA_DIR, 'gateway-uso.json');
 const gwUsage = (() => { try { return JSON.parse(readFileSync(gwUsageFile, 'utf8')) || {}; } catch { return {}; } })();
 let gwSaveT;
-function gwRecord(t, inTok, outTok, failed) {
+const priceOf = (t, inTok, outTok) => (t.price ? ((+t.price.in || 0) * inTok + (+t.price.out || 0) * outTok) / 1e6 : 0);
+// eur: lo que se cobra si ya se sabe (p. ej. lo reservado cuando una respuesta se corta); si no, por el precio y los tokens.
+function gwRecord(t, inTok, outTok, failed, eur) {
   const u = ((gwUsage[dayKey()] ||= {})[t.id] ||= { n: 0, err: 0, in: 0, out: 0, eur: 0 });
   if (failed) u.err++;
-  else { u.n++; u.in += inTok; u.out += outTok; u.eur += t.price ? ((+t.price.in || 0) * inTok + (+t.price.out || 0) * outTok) / 1e6 : 0; }
+  else { u.n++; u.in += inTok; u.out += outTok; }
+  u.eur += eur ?? (failed ? 0 : priceOf(t, inTok, outTok));
   const days = Object.keys(gwUsage).sort();
   while (days.length > 62) delete gwUsage[days.shift()];
   clearTimeout(gwSaveT);
@@ -788,28 +791,44 @@ function gwRecord(t, inTok, outTok, failed) {
     try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(gwUsageFile + '.tmp', JSON.stringify(gwUsage)); renameSync(gwUsageFile + '.tmp', gwUsageFile); } catch {}
   }, 1000);
 }
-// Coste reservado por las peticiones en curso: cuenta para el tope hasta que se conoce el consumo real.
-let gwReserved = 0;
-const RESERVE_OUT = 4096; // tokens de salida que se reservan si la petición no fija max_tokens
-const gwEstimate = (t, body) => (t.price ? ((+t.price.in || 0) * Math.ceil(JSON.stringify(body.messages || []).length / 4) + (+t.price.out || 0) * (+body.max_tokens || RESERVE_OUT)) / 1e6 : 0);
-function gwSpent() {
+// ---------- saldo único del tope de gasto (app de este PC + Gateway) ----------
+// Cada petición a una IA de pago reserva aquí su coste máximo estimado antes de enviarse y se liquida una sola vez al
+// terminar. Node atiende las peticiones de una en una, así que comprobar el saldo y reservar es indivisible: la app y
+// el Gateway nunca pueden reservar el mismo dinero. Lo que la app gasta se apunta con el id «app».
+const ledger = new Map(); // id de reserva → € reservados
+let ledgerSum = 0;
+const RESERVE_OUT = 4096; // máximo de tokens de salida que se pide al proveedor si la petición no fija otro
+const estimateIn = (body) => Math.ceil(JSON.stringify(body.messages || []).length / 2); // a la alta: ~2 caracteres por token
+function gwSpent(onlyGateway) {
   const day = dayKey();
-  let d = gwReserved, m = gwReserved;
-  for (const [k, v] of Object.entries(gwUsage)) for (const u of Object.values(v)) { if (k === day) d += u.eur; if (k.slice(0, 7) === day.slice(0, 7)) m += u.eur; }
+  let d = onlyGateway ? 0 : ledgerSum, m = d;
+  for (const [k, v] of Object.entries(gwUsage)) for (const [id, u] of Object.entries(v)) {
+    if (onlyGateway && id === 'app') continue;
+    if (k === day) d += u.eur;
+    if (k.slice(0, 7) === day.slice(0, 7)) m += u.eur;
+  }
   return { day: d, month: m };
 }
-// Tope de gasto: lo del Gateway más lo que la app de este PC ha gastado por su cuenta.
-// Lo que queda hasta el tope más cercano (día o mes), contando lo reservado y lo gastado en la app.
-function gwBudgetLeft() {
-  const b = gateway.budget || {}, s = gwSpent(), a = gateway.appSpent || {}, day = dayKey();
-  const ad = a.date === day ? +a.day || 0 : 0, am = String(a.date || '').slice(0, 7) === day.slice(0, 7) ? +a.month || 0 : 0;
-  return Math.min(b.day > 0 ? b.day - s.day - ad : Infinity, b.month > 0 ? b.month - s.month - am : Infinity);
+function budgetLeft() {
+  const b = gateway.budget || {}, s = gwSpent();
+  return Math.min(b.day > 0 ? b.day - s.day : Infinity, b.month > 0 ? b.month - s.month : Infinity);
 }
-function gwOver() {
-  const b = gateway.budget || {}, s = gwSpent(), a = gateway.appSpent || {}, day = dayKey();
-  const ad = a.date === day ? +a.day || 0 : 0, am = String(a.date || '').slice(0, 7) === day.slice(0, 7) ? +a.month || 0 : 0;
-  return (b.day > 0 && s.day + ad >= b.day) || (b.month > 0 && s.month + am >= b.month);
+const capped = () => gateway.budget?.day > 0 || gateway.budget?.month > 0;
+function reserve(eur) {
+  if (!(eur >= 0) || budgetLeft() < eur) return null;
+  const id = randomUUID();
+  ledger.set(id, eur); ledgerSum += eur;
+  return id;
 }
+// Liquida una reserva una sola vez: la quita del saldo comprometido y apunta lo cobrado.
+function settle(id, t, inTok, outTok, eur) {
+  const r = ledger.get(id);
+  if (r == null) return false;
+  ledger.delete(id); ledgerSum -= r;
+  gwRecord(t, inTok, outTok, false, eur);
+  return true;
+}
+const gwOver = () => budgetLeft() <= 0;
 // Caché opcional: la misma petición exacta en 10 minutos se responde sin llamar a ninguna IA.
 const gwCache = new Map();
 let gwCacheHits = 0;
@@ -826,7 +845,7 @@ function gwCachePut(k, v) {
   while (gwCache.size > 200) gwCache.delete(gwCache.keys().next().value);
 }
 // Se lee una copia de la respuesta mientras llega al cliente: cuenta tokens y, si terminó bien, la guarda en caché.
-function gwTap(r, t, body, key, est = 0) {
+function gwTap(r, t, body, key, ticket, est) {
   const [a, b] = r.body.tee();
   const ct = r.headers.get('content-type') || '';
   (async () => {
@@ -835,6 +854,7 @@ function gwTap(r, t, body, key, est = 0) {
     try { for await (const c of b) chunks.push(Buffer.from(c)); } catch { complete = false; }
     const buf = Buffer.concat(chunks), txt = buf.toString('utf8');
     let inTok = Math.ceil(JSON.stringify(body.messages || []).length / 4), outTok = 0;
+    let real = false; // tokens dados por el proveedor (no estimados)
     if (/event-stream/.test(ct)) {
       let chars = 0, done = false;
       for (const l of txt.split('\n')) {
@@ -843,7 +863,7 @@ function gwTap(r, t, body, key, est = 0) {
         if (d === '[DONE]') { done = true; continue; }
         try {
           const j = JSON.parse(d), ch = j.choices?.[0];
-          if (j.usage) { inTok = j.usage.prompt_tokens || inTok; outTok = j.usage.completion_tokens || outTok; }
+          if (j.usage) { inTok = j.usage.prompt_tokens || inTok; outTok = j.usage.completion_tokens || outTok; real = true; }
           if (ch?.finish_reason) done = true;
           chars += (ch?.delta?.content || '').length + (ch?.delta?.tool_calls || []).reduce((n, x) => n + (x.function?.arguments || '').length, 0);
         } catch {}
@@ -851,11 +871,12 @@ function gwTap(r, t, body, key, est = 0) {
       if (!outTok) outTok = Math.ceil(chars / 4);
       complete &&= done;
     } else {
-      try { const j = JSON.parse(txt); inTok = j.usage?.prompt_tokens || inTok; outTok = j.usage?.completion_tokens || Math.ceil(JSON.stringify(j.choices?.[0]?.message || '').length / 4); }
+      try { const j = JSON.parse(txt); real = !!j.usage; inTok = j.usage?.prompt_tokens || inTok; outTok = j.usage?.completion_tokens || Math.ceil(JSON.stringify(j.choices?.[0]?.message || '').length / 4); }
       catch { complete = false; }
     }
-    gwReserved -= est; // la reserva se cambia por el consumo real
-    gwRecord(t, inTok, outTok, false);
+    // Sin datos del proveedor y sin final correcto (corte, desconexión), no se sabe cuánto consumió: se cobra lo reservado.
+    const eur = !complete && !real && ticket ? est : undefined;
+    if (ticket) settle(ticket, t, inTok, outTok, eur); else gwRecord(t, inTok, outTok, false);
     if (key && complete) gwCachePut(key, { ct, buf, t });
   })();
   return new Response(a, { status: r.status, headers: r.headers });
@@ -878,8 +899,7 @@ async function gwTargets() {
   // Con el tope de gasto alcanzado, solo IAs gratuitas (como SOLO GRATIS).
   const over = gwOver();
   // Con un tope activo, una de pago sin precio tampoco: su gasto no se podría contar.
-  const capped = gateway.budget?.day > 0 || gateway.budget?.month > 0;
-  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => p.free || (!over && !(capped && !p.price))).map((p) => ({ ...p, local: false }));
+  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => p.free || (!over && !(capped() && !p.price))).map((p) => ({ ...p, local: false }));
   // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
   const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !(gateway.freeOnly || over))), ...cloud];
   const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };
@@ -919,25 +939,38 @@ async function gwCall(model, body, signal) {
     // Saltar lo que un fallo de esta misma petición acaba de pausar (p. ej. misma clave inválida);
     // si todo estaba ya en pausa al empezar, se prueba igualmente como último recurso.
     if (plan.length > 1 && gwCool.get(t.id) !== pausedBefore.get(t.id)) continue;
-    // Con tope: se reserva el coste estimado antes de enviar; si no cabe, se pasa a la siguiente IA.
-    const est = gwEstimate(t, body);
-    if (est && gwBudgetLeft() < est) { last = Object.assign(new Error(`${t.id}: no cabe en tu tope de gasto`), { status: 402 }); continue; }
-    gwReserved += est;
+    // Con tope y una IA de pago: se pide al proveedor un máximo de salida y se reserva su coste antes de enviar.
+    let send = body, ticket = null, est = 0;
+    if (capped() && t.price) {
+      send = body.max_tokens || body.max_completion_tokens ? body : { ...body, max_tokens: RESERVE_OUT };
+      est = priceOf(t, estimateIn(send), +(send.max_tokens || send.max_completion_tokens));
+      ticket = reserve(est);
+      if (!ticket) { last = Object.assign(new Error(`${t.id}: no cabe en tu tope de gasto`), { status: 402 }); continue; }
+    }
     try {
-      const r = await fetch(`${t.url}/chat/completions`, {
+      const post = (b) => fetch(`${t.url}/chat/completions`, {
         method: 'POST', signal: signalFor(TIMEOUT, signal),
         headers: { 'Content-Type': 'application/json', ...(t.apiKey ? { Authorization: `Bearer ${t.apiKey}` } : {}) },
-        body: JSON.stringify({ ...body, model: t.model }),
+        body: JSON.stringify({ ...b, model: t.model }),
       });
-      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, body, key, est), t }; }
-      gwReserved -= est;
+      let r = await post(send);
+      // Algunos modelos (p. ej. de razonamiento de OpenAI) solo aceptan max_completion_tokens.
+      if (r.status === 400 && send.max_tokens && !body.max_tokens) {
+        const txt = await r.text();
+        if (/max_tokens/.test(txt)) { const { max_tokens: mt, ...rest } = send; r = await post({ ...rest, max_completion_tokens: mt }); }
+        else r = new Response(txt, { status: 400 });
+      }
+      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, send, key, ticket, est), t }; }
+      // Error HTTP: el proveedor rechazó la petición sin generar nada; la reserva se libera sin cobro.
+      if (ticket) settle(ticket, t, 0, 0, 0);
       gwFail(t, r.status, r.headers);
       if (r.status !== 429) gwRecord(t, 0, 0, true);
       last = Object.assign(new Error(`${t.id}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
       if (r.status === 400) break; // petición mal formada: otra IA no lo arreglará
     } catch (e) {
-      if (signal?.aborted) { gwReserved -= est; throw e; }
-      gwReserved -= est;
+      // Corte de red o cancelación tras enviar: el proveedor pudo consumir; se cobra lo reservado.
+      if (ticket) settle(ticket, t, 0, 0, est);
+      if (signal?.aborted) throw e;
       gwFail(t, 0); gwRecord(t, 0, 0, true); last = e;
     }
   }
@@ -1132,14 +1165,32 @@ async function handle(req, res) {
   if (path === '/health') return send(res, 200, { ok: true });
 
   // Configuración del Gateway: solo la app de este mismo equipo (con token) puede pasarle las IAs y claves.
+  // Saldo único del tope: la app de este PC reserva y liquida aquí sus peticiones de pago.
+  if (path === '/neura/budget/reserve' || path === '/neura/budget/settle') {
+    const ip = req.socket.remoteAddress || '';
+    if (req.method !== 'POST' || !authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
+    let c; try { c = JSON.parse(await readBody(req, 4096)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
+    const eur = +c.eur;
+    if (!(eur >= 0 && eur < 1e6)) return send(res, 400, { error: 'importe inválido' });
+    if (path === '/neura/budget/reserve') {
+      // La app manda su tope actual: así no depende de que la configuración del Gateway ya haya llegado.
+      if (c.budget) gateway.budget = { day: Math.max(0, +c.budget.day || 0), month: Math.max(0, +c.budget.month || 0) };
+      const id = reserve(eur);
+      return id ? send(res, 200, { id }) : send(res, 402, { error: 'No cabe en tu tope de gasto', left: Math.max(0, budgetLeft()) });
+    }
+    const n = (x) => Math.max(0, Math.round(+x || 0));
+    return settle(String(c.id), { id: 'app' }, n(c.in), n(c.out), eur) ? send(res, 200, { ok: true }) : send(res, 409, { error: 'reserva ya liquidada o desconocida' });
+  }
   if (path === '/neura/gateway' && (req.method === 'POST' || req.method === 'GET')) {
     const ip = req.socket.remoteAddress || '';
     if (!authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
     if (req.method === 'GET') {
       // Consumo del Gateway para el panel de la app: hoy por destino, el mes acumulado, gasto y caché.
       const day = dayKey(), month = {};
-      for (const [k, v] of Object.entries(gwUsage)) if (k.slice(0, 7) === day.slice(0, 7)) for (const [id, u] of Object.entries(v)) { const m = (month[id] ||= { n: 0, eur: 0 }); m.n += u.n; m.eur += u.eur; }
-      return send(res, 200, { date: day, today: gwUsage[day] || {}, month, spent: gwSpent(), over: gwOver(), cache: { enabled: !!gateway.cache, hits: gwCacheHits, entries: gwCache.size } });
+      for (const [k, v] of Object.entries(gwUsage)) if (k.slice(0, 7) === day.slice(0, 7)) for (const [id, u] of Object.entries(v)) if (id !== 'app') { const m = (month[id] ||= { n: 0, eur: 0 }); m.n += u.n; m.eur += u.eur; }
+      const { app, ...todayGw } = gwUsage[day] || {};
+      // spent: solo el Gateway (para mostrarlo junto al de la app); total: todo lo que cuenta para el tope, con lo reservado.
+      return send(res, 200, { date: day, today: todayGw, month, spent: gwSpent(true), total: gwSpent(), reserved: ledgerSum, over: gwOver(), cache: { enabled: !!gateway.cache, hits: gwCacheHits, entries: gwCache.size } });
     }
     let c; try { c = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
     const num = (x) => Math.max(0, +x || 0);
@@ -1149,10 +1200,10 @@ async function handle(req, res) {
     const sig = (p) => `${p.url} ${p.apiKey} ${p.model}`;
     const before = new Map(gateway.providers.map((p) => [p.id, sig(p)]));
     // Si cambia algo más que el gasto de la app, la caché se vacía (p. ej. al activar «solo modelos de este equipo»).
-    const confSig = JSON.stringify({ ...c, appSpent: null });
+    const confSig = JSON.stringify(c);
     if (confSig !== gateway.confSig) gwCache.clear();
     Object.assign(gateway, { confSig, enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto, cache: !!c.cache,
-      budget: { day: num(c.budget?.day), month: num(c.budget?.month) }, appSpent: c.appSpent && typeof c.appSpent === 'object' ? { date: String(c.appSpent.date || ''), day: num(c.appSpent.day), month: num(c.appSpent.month) } : {},
+      budget: { day: num(c.budget?.day), month: num(c.budget?.month) },
       providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
       order: Array.isArray(c.order) ? c.order.map(String) : [] });
     for (const p of gateway.providers) if (before.get(p.id) !== sig(p)) gwCool.delete(p.id);

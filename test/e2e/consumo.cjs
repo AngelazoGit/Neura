@@ -72,8 +72,16 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   const lastTxt = await w.$$eval('#log .reply', (r) => r.map((x) => x.innerText).join('\n'));
   ok((mocks.calls.caro || 0) === caro0 && /No cabe en tu tope de gasto/.test(lastTxt) && /Hola desde rapido/.test(lastTxt), 'con tope, si la reserva de una IA de pago no cabe, no se envía y responde una gratuita');
   ok(await w.evaluate(() => !S.health['oa::caro']?.coolUntil), '…sin marcar esa IA como averiada');
-  ok(await w.evaluate(async () => { S.budget = { day: spent().day + 1e7 }; const before = spent().day; const p = callTarget(findT('oa::caro'), [{ role: 'user', content: 'x' }], () => {}); const during = spent().day; await p; return during - before > 4000 && spent().day - before < 4000; }),
-    'mientras una petición está en curso, su reserva cuenta en el gasto (otras a la vez la ven); al terminar se cambia por el gasto real');
+  // Saldo único en el PC: mientras la app espera a una IA de pago, su reserva está en el puente (el Gateway la ve).
+  const bi = await w.evaluate(() => window.neuraDesktop.bridge());
+  const gwInfo = async () => (await fetch(`http://127.0.0.1:${bi.port}/neura/gateway`, { headers: { Authorization: `Bearer ${bi.token}` } })).json();
+  await w.evaluate(() => { S.budget = { day: spent().day + 1e7 }; window.__p = callTarget(findT('oa::caro'), [{ role: 'user', content: 'reserva en curso' }], () => {}); });
+  const during = await gwInfo();
+  await w.evaluate(() => window.__p);
+  await w.waitForTimeout(300);
+  const afterR = await gwInfo();
+  ok(during.reserved > 4000 && afterR.reserved === 0 && mocks.log.at(-1).max === 4096,
+    `con tope, la app reserva en el saldo del puente (compartido con el Gateway), pide max_tokens 4096 al proveedor y liquida al terminar · reservado ${Math.round(during.reserved)} € → ${afterR.reserved} €`);
   await w.evaluate(() => { S.budget = {}; S.target = 'm::rapido'; save(); renderTargets(); });
 
   // Gateway: su consumo aparece aparte.

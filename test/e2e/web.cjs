@@ -72,6 +72,19 @@ const TOKEN = 'token-de-prueba-123456';
   await p2.setInputFiles('#importFile', file); await sleep(500);
   ok((await p2.$$eval('#threadList .chatItem span', (s) => s.map((x) => x.textContent))).includes('mensaje para exportar'), 'importar la copia en otro dispositivo');
 
+  // Web y móvil (sin puente de PC): el tope reserva contra el saldo de este dispositivo; dos a la vez no caben.
+  ok(await p2.evaluate(async () => {
+    S.budget = { day: 10 };
+    const prov = { tier: 'paid', price: { in: 0, out: 1000 } }, bill = { eur: 0 }; // reserva: 4.096 × 1.000 € / 1M ≈ 4,10 €
+    let release, during = 0;
+    const pr = paidRound(prov, { messages: [{ role: 'user', content: 'hola' }] }, bill, () => new Promise((res) => { during = spent().day; release = res; }), () => 'respuesta');
+    await new Promise((r) => setTimeout(r, 20));
+    let second = '';
+    try { await reserveBudget(7); second = 'admitida'; } catch (e) { second = e.budget ? 'no cabe' : e.message; }
+    release({}); await pr;
+    return during > 4 && second === 'no cabe' && reserved === 0 && bill.eur > 0 && bill.eur < 4.1;
+  }), 'web/móvil: la reserva cuenta mientras la petición está en curso, otra que no cabe se rechaza y al terminar se liquida por lo estimado');
+
   await p.keyboard.press('Escape'); await sleep(500);
   await p.screenshot({ path: SHOT + '/movil-chat.png' });
   await b.close(); br.kill();
