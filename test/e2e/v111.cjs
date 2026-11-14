@@ -15,7 +15,7 @@ const setT = (w, k) => w.evaluate((k) => { const s = document.querySelector('#ta
 const last = (w) => w.$$eval('#log .msg', (m) => m.at(-1).innerText);
 (async () => {
   await mocks.start();
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForFunction(() => [...document.querySelectorAll('#target option')].some((o) => o.textContent.includes('ESTE PC')), null, { timeout: 20000 });

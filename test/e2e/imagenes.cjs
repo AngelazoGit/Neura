@@ -30,7 +30,7 @@ const forge = http.createServer((req, res) => {
 (async () => {
   await mocks.start();
   await new Promise((r) => forge.listen(5603, '127.0.0.1', r));
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForFunction(() => typeof S !== 'undefined' && S.mcp[0]?.status === 'on', null, { timeout: 20000 });

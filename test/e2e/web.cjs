@@ -13,7 +13,7 @@ const TOKEN = 'token-de-prueba-123456';
   const br = spawn(process.execPath, [path.join(__dirname, '../../bridge/server.mjs')], { env: { ...process.env, PORT: '8790', HOST: '127.0.0.1', NEURA_TOKEN: TOKEN, NEURA_DATA: data, NEURA_CONFIG: '/nonexistent.json' } });
   await new Promise((r) => br.stdout.on('data', (d) => String(d).includes('Backends') && r()));
   const b = await chromium.launch();
-  const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, acceptDownloads: true });
+  const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, acceptDownloads: true, locale: 'es-ES' });
   const p = await ctx.newPage();
   p.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
 
@@ -66,7 +66,7 @@ const TOKEN = 'token-de-prueba-123456';
   const dl2 = p.waitForEvent('download');
   await p.click('#exportMd');
   ok(/# mensaje para exportar/.test(fs.readFileSync(await (await dl2).path(), 'utf8')), 'exportar el hilo a Markdown');
-  const p2 = await (await b.newContext()).newPage();
+  const p2 = await (await b.newContext({ locale: 'es-ES' })).newPage();
   await p2.goto('http://127.0.0.1:8790/');
   await p2.click('#btnThreads');
   await p2.setInputFiles('#importFile', file); await sleep(500);

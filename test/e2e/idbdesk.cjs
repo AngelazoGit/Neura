@@ -1,7 +1,7 @@
 const { _electron } = require('playwright'); const fs = require('fs'), path = require('path');
 const ROOT = path.join(__dirname, '../../desktop'); const UD = fs.mkdtempSync(path.join(require('os').tmpdir(), 'neura-ud-'));
 (async () => {
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow(); await w.waitForSelector('#target', { state: 'attached' });
   await w.setInputFiles('#fileIn', path.join(__dirname, 'fixtures/tabla.jpg')); await w.waitForSelector('#attachBar .chip');
   await w.waitForFunction(() => attach[0]?.ref, null, { timeout: 5000 }).catch(() => {});

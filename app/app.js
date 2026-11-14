@@ -59,12 +59,75 @@ const PRESETS = {
   custom:     { name: 'Otra (compatible OpenAI)', kind: 'openai', tier: 'other', baseUrl: '', models: [] },
 };
 
-const DEFAULT_INSTRUCTIONS = 'Responde siempre en español y solo en español: nunca repitas ni traduzcas la respuesta a otro idioma. Sé claro y conciso; da más detalle solo si te lo pido.';
+const DEFAULTS_BY_LANG = {
+  es: 'Responde siempre en español y solo en español: nunca repitas ni traduzcas la respuesta a otro idioma. Sé claro y conciso; da más detalle solo si te lo pido.',
+  en: 'Always answer in English only: never repeat or translate the answer into another language. Be clear and concise; give more detail only if I ask.',
+  zh: '请始终只用简体中文回答：不要用其他语言重复或翻译答案。回答要清晰简洁；只有在我要求时才提供更多细节。',
+  ru: 'Всегда отвечай только на русском языке: никогда не повторяй и не переводи ответ на другой язык. Будь ясным и кратким; подробнее — только если я попрошу.',
+};
+const DEFAULT_INSTRUCTIONS = DEFAULTS_BY_LANG.es;
 // ---------- estado ----------
 const S = Object.assign({
   providers: [], mcp: [], threads: [], active: null, target: null, autoSkip: true,
   health: {}, ctxTokens: 6000, instructions: DEFAULT_INSTRUCTIONS, council: false, councilKeys: [], useTools: false, vault: null, skills: [], projects: [], project: null, gateway: { enabled: false, localOnly: false },
 }, load());
+// ---------- idioma de la interfaz: español, inglés, chino y ruso ----------
+// La interfaz se escribe en español y se traduce al mostrarse (diccionarios en i18n.js, generados con tools/).
+// Nunca se traducen tus mensajes ni las respuestas de las IAs. Quien ya usaba Neura sigue en español.
+const LANGS = { es: 'Español', en: 'English', zh: '中文', ru: 'Русский' };
+if (!S.lang) S.lang = S.providers.length || S.threads.length ? 'es' : ({ es: 'es', en: 'en', zh: 'zh', ru: 'ru' }[(navigator.language || '').slice(0, 2)] || 'en');
+if (S.instructions === DEFAULT_INSTRUCTIONS && S.lang !== 'es') S.instructions = DEFAULTS_BY_LANG[S.lang];
+const LANG = LANGS[S.lang] ? S.lang : 'es';
+document.documentElement.lang = LANG;
+const DICT = LANG === 'es' ? null : window.NEURA_I18N?.[LANG] || null;
+// Trozos conocidos dentro de textos con partes variables («3 modelos», «Groq: CONECTADO»): de más largo a más corto.
+const SEG = DICT && new RegExp(`(^|[^\\p{L}\\p{N}])(${Object.keys(DICT).filter((k) => k.length > 1).sort((a, b) => b.length - a.length)
+  .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\p{L}\\p{N}])`, 'gu');
+function tr(str) {
+  if (!DICT || !str || typeof str !== 'string') return str;
+  const [, a, core, b] = str.match(/^(\s*)([\s\S]*?)(\s*)$/);
+  if (!core) return str;
+  const hit = DICT[core.replace(/\s+/g, ' ')];
+  if (hit != null) return a + hit + b;
+  return a + core.replace(SEG, (x, pre, k) => pre + (DICT[k] ?? k)) + b;
+}
+// Lo que es contenido (mensajes, respuestas, títulos de hilos, código, fuentes de internet) no se traduce.
+const NO_TR = '.txt, .msg.user .body, pre, code, .snip, textarea, .chatItem, .sources ol, #input, [data-noi18n]';
+const done18 = new WeakMap();
+function trNode(n) {
+  if (n.nodeType === 3) {
+    const p = n.parentElement;
+    if (!p || done18.get(n) === n.nodeValue || p.closest(NO_TR)) return;
+    const v = tr(n.nodeValue);
+    if (v !== n.nodeValue) n.nodeValue = v;
+    done18.set(n, v);
+  } else if (n.nodeType === 1 && !n.closest(NO_TR)) {
+    for (const at of ['placeholder', 'title', 'aria-label']) {
+      const v0 = n.getAttribute(at);
+      if (v0) { const v = tr(v0); if (v !== v0) n.setAttribute(at, v); }
+    }
+    for (const c of n.childNodes) trNode(c);
+  }
+}
+if (DICT) {
+  new MutationObserver((ms) => {
+    for (const m of ms) {
+      if (m.type === 'childList') m.addedNodes.forEach(trNode);
+      else if (m.type === 'characterData') trNode(m.target);
+      else if (!m.target.closest?.(NO_TR)) { const v0 = m.target.getAttribute(m.attributeName), v = tr(v0); if (v !== v0) m.target.setAttribute(m.attributeName, v); }
+    }
+  }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['placeholder', 'title', 'aria-label'] });
+  trNode(document.body);
+}
+const langSelect = (id) => `<select id="${id}" class="langSel" aria-label="Idioma / Language" data-noi18n>${Object.entries(LANGS).map(([k, v]) => `<option value="${k}" ${k === LANG ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+function setLang(l) {
+  if (!LANGS[l] || l === LANG) return;
+  // Si las instrucciones son las de serie, pasan al nuevo idioma (las respuestas también).
+  if (Object.values(DEFAULTS_BY_LANG).includes(S.instructions)) S.instructions = DEFAULTS_BY_LANG[l];
+  S.lang = l; save(); location.reload();
+}
+document.addEventListener('change', (e) => { if (e.target.classList?.contains('langSel')) setLang(e.target.value); });
+
 // Migración: el chat único de versiones anteriores pasa a ser el primer hilo.
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
 // Nivel de uso: los usuarios existentes siguen en profesional; los nuevos eligen al empezar.
@@ -1319,20 +1382,20 @@ const TPL = [
 ];
 function tplPrompt(t, v) {
   const val = (k) => (v[k] || '').trim();
-  const hole = (f) => `[completa: ${f[1].toLowerCase()}]`;
-  const ctx = t.fields.map((f) => (val(f[0]) ? `- ${f[1]}: ${val(f[0])}` : f[3] ? `- ${f[1]}: ${hole(f)}` : '')).filter(Boolean);
-  return `**Rol:** Actúa como ${t.role}.
-**Objetivo:** ${t.name}${val('objetivo') ? `: ${val('objetivo')}` : ''}.
-**Contexto:**
+  const hole = (f) => `[${tr('completa')}: ${tr(f[1]).toLowerCase()}]`;
+  const ctx = t.fields.map((f) => (val(f[0]) ? `- ${tr(f[1])}: ${val(f[0])}` : f[3] ? `- ${tr(f[1])}: ${hole(f)}` : '')).filter(Boolean);
+  return `**${tr('Rol')}:** ${tr('Actúa como')} ${tr(t.role)}.
+**${tr('Objetivo')}:** ${tr(t.name)}${val('objetivo') ? `: ${val('objetivo')}` : ''}.
+**${tr('Contexto')}:**
 ${ctx.join('\n')}
-**Tarea:**
-${t.steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}
-**Formato de la respuesta:** ${t.format}
-**Criterios de calidad:**
-${t.quality.map((x) => `- ${x}`).join('\n')}
-- Si te falta información importante, pregúntala antes de responder.`;
+**${tr('Tarea')}:**
+${t.steps.map((x, i) => `${i + 1}. ${tr(x)}`).join('\n')}
+**${tr('Formato de la respuesta')}:** ${tr(t.format)}
+**${tr('Criterios de calidad')}:**
+${t.quality.map((x) => `- ${tr(x)}`).join('\n')}
+- ${tr('Si te falta información importante, pregúntala antes de responder.')}`;
 }
-const tplSkill = (t) => `# ${t.name}\n\nActúa como ${t.role}.\n\n## Pasos\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n## Formato\n${t.format}\n\n## Calidad\n${t.quality.map((x) => `- ${x}`).join('\n')}\n- Si falta información importante, pregúntala antes de responder.`;
+const tplSkill = (t) => `# ${tr(t.name)}\n\n${tr('Actúa como')} ${tr(t.role)}.\n\n## ${tr('Pasos')}\n${t.steps.map((x, i) => `${i + 1}. ${tr(x)}`).join('\n')}\n\n## ${tr('Formato')}\n${tr(t.format)}\n\n## ${tr('Calidad')}\n${t.quality.map((x) => `- ${tr(x)}`).join('\n')}\n- ${tr('Si falta información importante, pregúntala antes de responder.')}`;
 let tplOpen = null;
 function renderTemplates() {
   const t = TPL.find((x) => x.id === tplOpen), typed = input.value.trim();
@@ -1356,9 +1419,9 @@ $('#sheetTpl').addEventListener('click', (e) => {
   if (a === 'make' || a === 'skill') {
     const v = Object.fromEntries([...document.querySelectorAll('#tplBody [data-f]')].map((x) => [x.dataset.f, x.value]));
     if (a === 'skill') {
-      if (liveSkills().some((k) => k.name === t.name)) return toast('Ya tienes esa habilidad (✦)');
-      S.skills.push({ id: uid() + uid(), name: t.name, description: `${t.desc} Usar para: ${t.name.toLowerCase()}.`, instructions: tplSkill(t), version: 1, updatedAt: Date.now() });
-      save(); syncAll(); return toast(`✦ Habilidad «${t.name}» guardada: actívala en ✦ HABILIDADES`);
+      if (liveSkills().some((k) => k.name === tr(t.name))) return toast('Ya tienes esa habilidad (✦)');
+      S.skills.push({ id: uid() + uid(), name: tr(t.name), description: `${tr(t.desc)} ${tr('Usar para:')} ${tr(t.name).toLowerCase()}.`, instructions: tplSkill(t), version: 1, updatedAt: Date.now() });
+      save(); syncAll(); return toast(`✦ ${tr('Habilidad')} «${tr(t.name)}» · ${tr('guardada: actívala en ✦ HABILIDADES')}`);
     }
     input.value = tplPrompt(t, v); input.dispatchEvent(new Event('input'));
     structUndo = null; closeSheets(); input.focus();
@@ -1656,13 +1719,13 @@ const ADJUST = [
 ];
 const adjustHTML = () => `<div class="adjust" role="group" aria-label="Ajustar la respuesta">${ADJUST.map(([l], i) => `<button type="button" data-adjust="${i}">${l}</button>`).join('')}</div>`;
 // La habilidad «Comprobar una respuesta» (de inicio) se usa aunque no esté instalada.
-const CHECK_SKILL = () => liveSkills().find((k) => k.name === 'Comprobar una respuesta') || { id: 'check', name: 'Comprobar una respuesta', version: 1, ...STARTERS.find((k) => k.name === 'Comprobar una respuesta') };
+const CHECK_SKILL = () => { const st = STARTERS.find((k) => k.name === 'Comprobar una respuesta'); return liveSkills().find((k) => k.name === tr(st.name) || k.name === st.name) || { id: 'check', version: 1, name: tr(st.name), description: tr(st.description), instructions: tr(st.instructions) }; };
 function checkReply(id) {
   const th = thread(), m = th.messages.find((x) => x.id === id);
   if (!m?.content || busy) return;
   const q = m.content.replace(/\s+/g, ' ').slice(0, 200);
-  send(`Comprueba esta respuesta${m.label ? ` (de ${m.label})` : ''}:\n\n«${m.content.slice(0, 8000)}»`, [], {
-    display: `🔎 Comprueba la respuesta${m.label ? ` de ${m.label}` : ''}`, skill: JSON.parse(JSON.stringify(CHECK_SKILL())), web: searchReady(th), searchQuery: q });
+  send(`${tr('Comprueba esta respuesta')}${m.label ? ` (${m.label})` : ''}:\n\n«${m.content.slice(0, 8000)}»`, [], {
+    display: `🔎 ${tr('Comprueba la respuesta')}${m.label ? ` · ${m.label}` : ''}`, skill: JSON.parse(JSON.stringify(CHECK_SKILL())), web: searchReady(th), searchQuery: q });
 }
 function msgHTML(m) {
   if (m.role === 'user') return `<div class="msg user">${sourcesHTML(m)}<div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.display ?? m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
@@ -1754,6 +1817,7 @@ function wizardHTML() {
       <span class="hint">Principiante muestra lo esencial, consejos y habilidades que enseñan a usarlas bien. Puedes cambiarlo en ⚙.</span>
     </div>`;
   return `<div class="card wizard">
+    <div class="row wrap wzLang">${langSelect('wzLang')}</div>
     <h4>EMPIEZA CON LA IA · GRATIS</h4>
     ${level}
     <div class="tabs">
@@ -1901,8 +1965,9 @@ const EXTRA_STARTERS = [
 ];
 function installStarters(list = STARTERS) {
   let n = 0;
-  for (const st of list) {
-    if (liveSkills().some((k) => k.name === st.name)) continue;
+  for (const st0 of list) {
+    const st = { name: tr(st0.name), description: tr(st0.description), instructions: tr(st0.instructions) };
+    if (liveSkills().some((k) => k.name === st.name || k.name === st0.name)) continue;
     S.skills.push({ id: uid() + uid(), ...st, version: 1, updatedAt: Date.now() }); n++;
   }
   if (n) { save(); syncAll(); }
@@ -1921,7 +1986,7 @@ const TIPS = [
 // ---------- ruta de aprendizaje: retos cortos que se completan usando Neura ----------
 // Se calculan a partir de tus hilos: no hay que marcar nada a mano.
 const nWords = (t) => String(t || '').trim().split(/\s+/).filter(Boolean).length;
-const usedSkill = (A, name) => A.replies.some((m) => m.skill?.name === name);
+const usedSkill = (A, name) => A.replies.some((m) => m.skill?.name === name || m.skill?.name === tr(name));
 const LEARN = [
   { id: 'first', t: 'Haz tu primera pregunta', how: 'Escribe lo que quieras abajo y pulsa ENVIAR.', ex: '¿Qué puedes hacer por mí? Explícamelo en 5 viñetas.',
     done: (A) => A.users.length > 0, tip: 'Es una conversación: puedes seguir preguntando sobre lo que te responda.' },
@@ -2163,6 +2228,8 @@ function renderSettings() {
   const all = targets();
   const sec = DESK?.secure?.();
   $('#settings').innerHTML = `
+    <h3>🌐 IDIOMA · LANGUAGE</h3>
+    ${langSelect('langSel')}
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
@@ -3065,7 +3132,7 @@ $('#log').addEventListener('click', (e) => {
   const tq = e.target.closest('[data-tplq]'); if (tq) return openTemplates(tq.dataset.tplq || null);
   if (e.target.dataset?.vote) return vote(e.target.dataset.vote);
   if (e.target.dataset?.check) return checkReply(e.target.dataset.check);
-  if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(t); }
+  if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(tr(t)); }
   if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);

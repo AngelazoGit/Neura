@@ -19,7 +19,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
 
 const launch = () => _electron.launch({
   executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT,
-  args: [ROOT, '--user-data-dir=' + UD, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+  args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
 });
 const idle = (w) => w.waitForFunction(() => !document.querySelector('.reply.pending') && document.querySelector('#send').textContent.includes('ENVIAR'), null, { timeout: 30000 });
 async function send(w, text) { await w.fill('#input', text); await w.click('#send'); await idle(w); }

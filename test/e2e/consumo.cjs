@@ -16,7 +16,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
 
 (async () => {
   await mocks.start();
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForSelector('#target option', { state: 'attached' });

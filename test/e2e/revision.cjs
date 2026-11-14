@@ -31,7 +31,7 @@ const optText = (w, k) => w.$eval('#target', (s, k) => [...s.options].find((o) =
   const other = spawn(process.execPath, [path.join(__dirname, '../../bridge/server.mjs')], { env: { ...process.env, PORT: '8799', HOST: '127.0.0.1', NEURA_TOKEN: 'otro-token-1234567890', NEURA_DATA: otherData, NEURA_CONFIG: '/nonexistent.json' } });
   await new Promise((r) => other.stdout.on('data', (d) => String(d).includes('Backends') && r()));
 
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForFunction(() => [...document.querySelectorAll('#target option')].some((o) => o.value.includes('nube/gpt-x')), null, { timeout: 20000 });

@@ -5,7 +5,7 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const mocks = require('./mocks.cjs');
 const ROOT = path.join(__dirname, '../../desktop');
 let failures = 0; const ok = (c, m) => { console.log(c ? '✓' : '✗', m); if (!c) failures++; };
-const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
 
 (async () => {
   await mocks.start();
@@ -69,7 +69,7 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'neura-br-'));
   const br = spawn(process.execPath, [path.join(__dirname, '../../bridge/server.mjs')], { env: { ...process.env, PORT: '8797', HOST: '127.0.0.1', NEURA_TOKEN: 'x'.repeat(24), NEURA_DATA: data, NEURA_CONFIG: '/nonexistent.json' } });
   await new Promise((r) => br.stdout.on('data', (d) => String(d).includes('Backends') && r()));
-  const b = await chromium.launch(); const p = await b.newPage();
+  const b = await chromium.launch(); const p = await b.newPage({ locale: 'es-ES' });
   p.on('pageerror', (e) => { console.log('PAGEERROR web', e.message); failures++; });
   await p.goto('http://127.0.0.1:8797/');
   await p.waitForSelector('.wizard');

@@ -31,7 +31,7 @@ const spy = http.createServer((q, res) => { hits.push(q.url); res.end(''); });
 (async () => {
   await mocks.start();
   await new Promise((r) => spy.listen(5604, '127.0.0.1', r));
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForSelector('#target option', { state: 'attached' });
