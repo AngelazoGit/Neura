@@ -58,7 +58,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await w.click(`[data-check="${ids.at(-1)}"]`); await idle();
   const ch = mocks.log.filter((x) => x.model).at(-1);
   ok(/Comprueba esta respuesta/.test(ch.q) && /Habilidad activa: «Comprobar una respuesta»/.test(ch.system.join(' ')), '🔎 COMPROBAR envía la respuesta con la habilidad «Comprobar una respuesta» (aunque no esté instalada)');
-  ok(/🔎 Comprueba la respuesta de MOCK/.test(await w.$$eval('#log .msg.user', (u) => u.at(-1).innerText)) && !(await w.evaluate(() => thread().skill)), 'en el chat se ve una línea corta y la habilidad no queda activada en el hilo');
+  ok(/🔎 Comprueba la respuesta · MOCK/.test(await w.$$eval('#log .msg.user', (u) => u.at(-1).innerText)) && !(await w.evaluate(() => thread().skill)), 'en el chat se ve una línea corta y la habilidad no queda activada en el hilo');
 
   // ---- 4. Consejos mientras escribes y ✨ ESTRUCTURAR ----
   await w.evaluate(() => { S.active = null; save(); renderLog(); });
