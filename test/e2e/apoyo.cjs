@@ -120,8 +120,8 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
 
   // ---- 8. Plantillas PRO ----
   await w.evaluate(() => { S.active = null; save(); renderLog(); });
-  ok((await w.$$('.quick [data-tplq]')).length === 7, 'la pantalla inicial ofrece atajos a las plantillas («¿Qué quieres hacer?»)');
-  await w.click('.quick [data-tplq=correo]');
+  ok(!(await w.$('.quick')), 'la pantalla inicial queda limpia: las plantillas están en el menú ✨');
+  await w.click('#structBtn'); await w.click('[data-tpl=correo]');
   await w.fill('#tplBody [data-f=para]', 'un cliente que se queja del retraso');
   await w.fill('#tplBody [data-f=objetivo]', 'disculparnos y proponer una nueva fecha');
   await w.selectOption('#tplBody [data-f=tono]', 'cordial');

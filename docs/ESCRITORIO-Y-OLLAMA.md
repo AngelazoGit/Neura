@@ -175,7 +175,7 @@ Detalles:
 | **🔎 COMPROBAR** | En cada respuesta. La revisa con la habilidad «Comprobar una respuesta» (aunque no la tengas instalada) y, si hay buscador, con fuentes de internet. |
 | **💡 Consejos y ✨ ESTRUCTURAR** | Mientras escribes una petición vaga, una pista sugiere qué añadir (para quién, formato, tono). **✨ ESTRUCTURAR** la reescribe como la haría un experto (Rol, Objetivo, Contexto, Tarea, Formato, Criterios de calidad), con huecos **[completa: …]** y **DESHACER**. No se usa si el texto lleva datos sensibles. Los consejos se quitan con ✕ y se recuperan en ⚙ → NIVEL. |
 | **📅 Aviso de actualidad** | Si preguntas por algo reciente (precios, hoy, este año…) sin 🌐 WEB, avisa de que la IA puede no saberlo y ofrece buscar solo ese mensaje. |
-| **✨ Plantillas PRO** | Botón ✨ junto a la caja de texto, o «¿Qué quieres hacer?» en la pantalla inicial. 12 plantillas con formulario; **CREAR PETICIÓN** la deja en la caja para revisarla; **GUARDAR COMO HABILIDAD** guarda el método para reutilizarlo. |
+| **✨ Plantillas PRO** | Botón ✨ junto a la caja de texto. 12 plantillas con formulario; **CREAR PETICIÓN** la deja en la caja para revisarla; **GUARDAR COMO HABILIDAD** guarda el método para reutilizarlo. |
 | **ⓘ ¿Por qué esta IA?** | En cada respuesta: si era la elegida, si se enrutó por tarea, si AUTO-SALTO saltó otra (y por qué) o si es del CONSEJO. |
 | **? y glosario** | Los «?» junto a los apartados explican cada término en lenguaje llano; el glosario completo está en ⚙ → NIVEL. |
 | **🌐 Idioma** | ⚙ → IDIOMA: español, English, 中文, Русский. Cambia la interfaz, las plantillas y las instrucciones por defecto (las IAs responden en ese idioma). Tus mensajes y las respuestas no se traducen. |

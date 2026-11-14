@@ -1772,7 +1772,6 @@ function renderLog() {
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
       <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
       ${S.providers.length || S.wizardDone ? '' : wizardHTML()}
-      ${n ? `<div class="quick"><b>✨ ¿QUÉ QUIERES HACER?</b><div class="tplGrid mini">${TPL.slice(0, 6).map((x) => `<button type="button" class="tpl" data-tplq="${x.id}"><span>${x.icon}</span><b>${esc(x.name)}</b></button>`).join('')}<button type="button" class="tpl" data-tplq=""><span>➕</span><b>Más plantillas</b></button></div></div>` : ''}
       ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>${targets().length ? learnHTML(true) : ''}` : ''}
       <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
       <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
