@@ -158,6 +158,16 @@ Detalles:
 | **ƒ HERRAMIENTAS** | Deja que la IA use las herramientas de tus servidores MCP (ver apartado 5.5). |
 | **Buscar / exportar** | En **≡**: buscador, **EXPORTAR ESTE HILO (.md)**, **COPIA DE TODOS (.json)** e **IMPORTAR**. |
 | **PIN** | En el móvil y la web: ⚙ → SEGURIDAD DE LAS CLAVES → ACTIVAR PIN. Te lo pedirá al abrir. Si lo olvidas, se borran las claves (no los hilos). |
+| **📊 Consumo** | ⚙ → CONSUMO: por cada IA, peticiones de hoy, tokens aproximados y gasto de hoy y del mes; aparte, lo que ha pasado por el Gateway. Es una estimación por caracteres: la factura real la da cada proveedor. |
+| **Límite diario** | En la tarjeta de cada IA, **LÍMITE DIARIO (peticiones)**. Neura avisa al 80 % y, al llegar, no la usa hasta medianoche (salvo que no quede otra). Útil para no agotar la cuota gratuita de una IA que quieres reservar. |
+| **Precio y tope de gasto** | En las IAs de pago, pon su precio en **€ por millón de tokens** (entrada y salida). En ⚙ → CONSUMO, **TOPE € / DÍA** y **TOPE € / MES**: al llegar, Neura y el Gateway solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Una IA de pago sin precio no se puede contar: Neura te avisa. |
+| **🩺 Diagnóstico** | ⚙ → DIAGNÓSTICO → **PROBAR TODAS MIS IAs**: una petición mínima a cada IA (con **TODOS LOS MODELOS**, a cada modelo) y el motivo de cada fallo (cuota, clave, modelo retirado, equipo sin conexión…). Cuenta en la cuota de cada una. |
+| **🎓 Ruta de aprendizaje** | En modo Principiante, la pantalla inicial muestra el siguiente reto (8 en total) con **PROBAR CON UN EJEMPLO**. Se completan solos al usar Neura y cada uno deja un consejo. El progreso está en ⚙ → NIVEL. |
+| **Importar de otras IAs** | ≡ → **IMPORTAR (.json, .zip)**. ChatGPT: Ajustes → Controles de datos → Exportar datos, y elige el .zip que te envían. Claude: Ajustes → Privacidad → Exportar datos. Gemini (experimental): Google Takeout → Mi actividad → Apps de Gemini, en formato JSON; queda un hilo por día. Reimportar no duplica. En la web y el móvil se importan las conversaciones más recientes que caben; en el PC, todas. |
+| **🧭 Enrutado por tarea** | ⚙ → ENRUTADO POR TAREA (Profesional). Neura reconoce si pides código, un resumen, razonar o redactar, y usa la IA que asignes a cada tipo o **la más votada**. El mensaje indica a dónde fue (🧭). |
+| **👍 MEJOR** | En las respuestas del CONSEJO. Marca la mejor: Neura apunta qué IA prefieres para ese tipo de tarea (un voto por consejo). |
+| **PDF** | ≡ → **PDF**: en el PC se guarda directamente; en la web se abre el diálogo de imprimir («Guardar como PDF»); en el móvil se genera una página para abrir e imprimir. |
+| **🖼 /imagen** | Con un generador en el PC (apartado 5.7), escribe `/imagen` y lo que quieres ver. Una línea `Evitar: …` indica lo que no debe salir. **GUARDAR** guarda la imagen. La habilidad de inicio **Prompt para imagen** te ayuda a escribir el prompt. |
 
 ---
 
@@ -264,6 +274,22 @@ La API está probada con los SDK oficiales de OpenAI y Anthropic. Las configurac
 - **Si la IA se corta a mitad de una respuesta**, la herramienta recibe un error, no una respuesta incompleta como si estuviera terminada.
 
 > Cualquier programa del PC que tenga el token del Gateway, y otros equipos si abres el puente a tu red, usará tus claves y tus cuotas gratuitas. Si se filtra, pulsa **REGENERAR**. El Gateway recibe las claves en memoria y no crea una copia adicional en disco. Los modelos gratuitos rinden peor que los grandes en tareas largas de programación con herramientas.
+
+**Consumo y caché:** lo que pasa por el Gateway aparece en ⚙ → CONSUMO y cuenta para el tope de gasto. **CACHÉ DE RESPUESTAS REPETIDAS** responde sin gastar cuota si una herramienta repite exactamente la misma petición en 10 minutos (desactívala si quieres que «regenerar» dé otra respuesta).
+
+## 5.7 Imágenes gratis en tu PC (ComfyUI o Forge)
+
+Neura puede crear imágenes en tu propio ordenador: gratis, sin cuentas y sin que la imagen salga de tu equipo. Hace falta un programa generador. Con una tarjeta gráfica de 6 GB o más tarda segundos; sin ella funciona, pero tarda varios minutos.
+
+1. Instala **uno** de estos:
+   - **ComfyUI** (recomendado): [comfy.org/download](https://www.comfy.org/download). Descarga un modelo (por ejemplo, uno de Stable Diffusion XL) en la carpeta `models/checkpoints` y abre ComfyUI. Neura lo busca en `http://127.0.0.1:8188`.
+   - **Forge** o **AUTOMATIC1111**: ábrelo con la opción `--api`. Neura lo busca en `http://127.0.0.1:7860`.
+2. En Neura: **⬡ → ESTE PC → RECONECTAR**. En **🖼 IMÁGENES EN ESTE PC** debe poner «Generador detectado».
+3. En el chat: `/imagen un faro al atardecer, acuarela`. Para indicar lo que no debe salir, añade otra línea: `Evitar: texto, marcas de agua`.
+
+Funciona también desde el móvil emparejado con el PC. Con ComfyUI, Neura usa un flujo básico con el primer modelo instalado; si quieres el tuyo (por ejemplo, para FLUX), expórtalo en formato API y ponlo en `puente.json` (`"images": [{ "id": "comfyui", "type": "comfyui", "url": "http://127.0.0.1:8188", "workflow": "ruta/flujo.json" }]`) con `%PROMPT%`, `%NEGATIVE%`, `%SEED%`, `%WIDTH%`, `%HEIGHT%` y `%STEPS%` donde correspondan.
+
+> Revisa la licencia del modelo que descargues. No crees imágenes de personas reales identificables sin su consentimiento.
 
 ---
 

@@ -13,6 +13,10 @@ No incluyas claves, tokens ni contenido privado en los registros.
 | 3 | **Una herramienta real con el Gateway**: empezad solo por una (recomendado: **Continue** o **Cline**) | Conversación, streaming, una tarea que use herramientas (leer o editar un archivo) y cancelar a mitad. Un nombre de modelo inventado debe dar error. |
 | 4 | **Dos clientes a la vez** | Dos herramientas, o dos ventanas, preguntando a la vez por el Gateway: no se mezclan las respuestas. |
 | 5 | **Beta limitada** | Problemas reales de configuración, rendimiento y comprensión de los controles. |
+| 6 | **Importar historial real** | Tu exportación de ChatGPT (.zip) y de Claude: títulos, mensajes y que reimportar no duplique. Gemini (Takeout, JSON) es experimental: anota si el formato real no se lee bien. |
+| 7 | **Imágenes con ComfyUI o Forge reales** | `/imagen` con el modelo que tengas: tiempo, calidad y que GUARDAR guarde el archivo. Anota tarjeta gráfica y modelo. |
+| 8 | **Consumo y tope** | Con una IA de pago y su precio: que el gasto estimado se parezca al de su panel de facturación y que el tope corte al llegar. |
+| 9 | **Diagnóstico** | PROBAR TODAS MIS IAs con tus claves reales: que los motivos de fallo se entiendan. |
 
 ## Plantilla de registro (una fila por prueba)
 

@@ -31,6 +31,13 @@ neura/
 14. **Para principiantes y profesionales.** Al empezar, eliges entre IA en tu equipo (en el PC, sin cuentas: Neura guía la instalación de Ollama y descarga el modelo adecuado a tu memoria) o IA en internet (guía por proveedor para crear la clave gratis). El modo **Principiante** muestra lo esencial, consejos de uso correcto y habilidades que enseñan; el **Profesional**, todo.
 15. **🔌 Neura Gateway (PC).** Conecta tus herramientas a los modelos y proveedores que utilizas mediante Neura, con selección automática y controles de destino y coste. API compatible con OpenAI (`/v1/chat/completions`, `/v1/models`) y con Anthropic (`/v1/messages`), con streaming y herramientas, probada con los SDK oficiales de ambos. Las configuraciones para Continue, Cline, Aider, Open WebUI y Claude Code son ejemplos aún sin validar con cada herramienta (ver `docs/VALIDACION.md`). Se activa en ⬡ → ESTE PC.
 16. **Claves protegidas.** En el PC se cifran con el llavero del sistema; en el móvil y la web, opcionalmente con un PIN (AES-256). Las claves nunca se sincronizan.
+17. **📊 Consumo y tope de gasto.** En ⚙ → CONSUMO ves, por IA, las peticiones de hoy, los tokens aproximados y el gasto de hoy y del mes (y aparte lo que ha pasado por el Gateway). Cada IA admite un **límite diario** de peticiones (aviso al 80 % y pausa hasta medianoche) y, si es de pago, su **precio por millón de tokens**. Con un **tope de gasto** en €/día o €/mes, al llegar Neura y el Gateway solo usan IAs gratuitas y tus equipos. Los tokens y el gasto son una estimación; la factura real la da cada proveedor.
+18. **🩺 Diagnóstico.** En ⚙ → DIAGNÓSTICO, «PROBAR TODAS MIS IAs» hace una petición mínima a cada una (o a cada modelo) y explica por qué falla cada una: cuota agotada, clave, modelo retirado, equipo sin conexión…
+19. **🎓 Ruta de aprendizaje.** En modo principiante, 8 retos cortos (dar contexto, pedir un formato, comprobar una respuesta, comparar IAs, trabajar con un archivo…) que se completan usando Neura, con un ejemplo para probar y un consejo al conseguirlos.
+20. **Importar tu historial.** ≡ → IMPORTAR acepta, además de las copias de Neura, la exportación oficial de **ChatGPT** y de **Claude** (`conversations.json`, también dentro del .zip) y, de forma experimental, la actividad de **Gemini** de Google Takeout en JSON (un hilo por día). Reimportar no duplica.
+21. **🧭 Enrutado por tarea y votos.** Neura reconoce si pides código, un resumen, razonar o redactar y usa la IA que asignes a ese tipo, o la que más votaste con **👍 MEJOR** en el CONSEJO (⚙ → ENRUTADO POR TAREA, modo profesional).
+22. **Exportar a PDF.** ≡ → PDF: en el PC se guarda directamente; en la web abre el diálogo de imprimir («Guardar como PDF»); en el móvil, una página lista para abrir e imprimir.
+23. **🖼 Imágenes gratis en tu PC.** Con ComfyUI o Forge/AUTOMATIC1111 en el PC, escribe `/imagen` y lo que quieres ver (también desde el móvil emparejado). Una línea `Evitar: …` se usa como prompt negativo. La habilidad de inicio **Prompt para imagen** te ayuda a escribirlo.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.
 
@@ -42,7 +49,7 @@ cp config.example.json config.json   # edita backends y token
 NEURA_TOKEN=un-secreto-largo node server.mjs
 ```
 
-Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
+Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info`, `image_generate` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
 
 Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `NEURA_FOLDERS`), añade herramientas de **solo lectura**: `list_dir`, `search_files`, `read_file` y `search_docs` (búsqueda semántica con embeddings de Ollama: `ollama pull nomic-embed-text`; sin ese modelo busca por palabras). Nunca sale de las carpetas compartidas (bloquea `..`, rutas absolutas, carpetas ocultas y enlaces simbólicos que apunten fuera). Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
 
@@ -53,8 +60,12 @@ Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `N
 - **Un modelo desconocido** da error 404 sin llamar a ninguna IA, salvo que se active «usar auto para nombres desconocidos».
 - **Si un proveedor se corta a mitad del streaming**, el cliente recibe un error (`data: {"error":…}` en OpenAI, `event: error` en Anthropic), nunca un final correcto.
 - **«Solo modelos de este equipo»** admite solo backends en `127.0.0.1`/`localhost`: ni internet ni otros ordenadores de la red.
+- **Consumo y tope de gasto:** cuenta peticiones, tokens (los que dé el proveedor o una estimación) y gasto por destino y día en `gateway-uso.json` (62 días). `GET /neura/gateway` (solo desde el equipo, token del puente) lo devuelve a la app. Con el tope de la app alcanzado (sumando lo gastado en la app), solo usa IAs gratuitas.
+- **Caché opcional:** la misma petición exacta en 10 minutos se responde sin llamar a ninguna IA (cabecera `x-neura-cache: hit`). Se vacía al cambiar la configuración.
 
-Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`, `NEURA_FOLDERS`, `NEURA_EMBED_MODEL`.
+**Imágenes (`image_generate`):** genera con **ComfyUI** (`http://127.0.0.1:8188`; flujo básico con el primer modelo de `models/checkpoints`, o el tuyo en formato API con `%PROMPT%`, `%NEGATIVE%`, `%SEED%`, `%WIDTH%`, `%HEIGHT%`, `%STEPS%`) o **Forge / AUTOMATIC1111 / SD.Next** con `--api` (`http://127.0.0.1:7860`). Se configuran con `"images": [{ "id", "type": "comfyui" | "a1111", "url", "workflow"?, "checkpoint"? }]` en `config.json` o `NEURA_IMAGES`. La imagen no sale del equipo.
+
+Variables: `PORT`, `HOST`, `NEURA_TOKEN`, `OLLAMA_URL`, `NEURA_CONFIG`, `NEURA_DATA`, `NEURA_FOLDERS`, `NEURA_EMBED_MODEL`, `NEURA_IMAGES`.
 
 El puente siempre exige token, también en `127.0.0.1` (si no, cualquier web abierta en ese equipo podría leer tus hilos). Si no defines uno, genera uno aleatorio en cada arranque y lo muestra en pantalla. Fija el tuyo con `NEURA_TOKEN` para que no cambie.
 
