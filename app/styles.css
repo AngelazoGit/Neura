@@ -328,3 +328,17 @@ dl.gloss dd{margin:0 0 0 0;color:var(--dim)}
 [hidden]{display:none!important}
 .glossSet{margin:6px 0}
 .glossSet summary{cursor:pointer;font:500 11px var(--cond);letter-spacing:.18em;color:var(--orange2)}
+/* Más cómodo en el móvil: respuestas con los botones en su propia fila y caja de texto más ancha */
+.reply .tag{flex-wrap:wrap;row-gap:6px}
+.reply .tag .acts{flex-wrap:wrap}
+@media (max-width:480px){
+  .reply .tag>span:first-child{flex:1 1 100%}
+  .reply .tag .acts{flex:1 1 100%;justify-content:flex-start}
+  .reply .tag .acts .ms{margin-right:auto}
+  #composer{gap:6px;padding-left:8px;padding-right:8px}
+  #composer .ico.tool{width:34px}
+  #send{padding:0 12px;letter-spacing:.12em}
+  .adjust button{font-size:11px;padding:3px 8px}
+  .empty .biglogo{width:64px;height:74px}
+  .empty .big{font-size:44px}
+}
