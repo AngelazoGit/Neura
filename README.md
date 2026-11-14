@@ -15,7 +15,7 @@ neura/
 
 ## Funciones
 
-1. **Un solo chat con todas las IAs públicas.** En **⚙** añades Gemini, Groq, OpenRouter (modelos gratis), Cerebras, Mistral, GitHub Models, Hugging Face o Cohere con la clave gratuita de cada una. Opcionales de pago: Anthropic, OpenAI, DeepSeek. Eliges el modelo en el desplegable y la conversación continúa aunque cambies de IA.
+1. **Un solo chat con todas las IAs públicas.** En **⚙** añades Gemini, Groq, OpenRouter (modelos gratis), Cerebras, Mistral, GitHub Models, Hugging Face, Cohere o NVIDIA (Nemotron; solo en la app de móvil y de PC, para pruebas y desarrollo) con la clave gratuita de cada una. Opcionales de pago: Anthropic, OpenAI, DeepSeek. Eliges el modelo en el desplegable y la conversación continúa aunque cambies de IA.
 2. **AUTO-SALTO para tokens gratis.** Si la IA elegida agota su cuota gratuita (429), falla o rechaza la clave, Neura reenvía el mensaje a la siguiente IA conectada.
 3. **Menú MCP (⬡).** Conecta con uno o varios servidores MCP (`neura-bridge` u otro compatible). Sus modelos locales aparecen en el mismo desplegable.
 4. **Hilos (≡).** Varias conversaciones guardadas, con búsqueda y exportación (.md / copia .json). Con un puente conectado, los hilos se sincronizan entre el PC, el móvil y la web sin perder mensajes.

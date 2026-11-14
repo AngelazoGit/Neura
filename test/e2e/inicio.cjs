@@ -60,6 +60,8 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   ok(/Una cuenta de Google/.test(await w.textContent('#wzBody')) && /puede usar lo que escribes/.test(await w.textContent('#wzBody')), 'Gemini: qué cuenta necesitas, pasos y aviso de privacidad del nivel gratuito');
   await w.selectOption('#wzPreset', 'openrouter');
   ok(/:free/.test(await w.textContent('#wzBody')) && (await w.getAttribute('#wzKey', 'href')).includes('openrouter.ai'), 'al cambiar de IA cambian la guía y el enlace');
+  await w.selectOption('#wzPreset', 'nvidia');
+  ok(/nvapi-/.test(await w.textContent('#wzBody')) && /pruebas y desarrollo/.test(await w.textContent('#wzBody')) && (await w.getAttribute('#wzKey', 'href')).includes('build.nvidia.com'), 'NVIDIA (Nemotron) aparece en el PC con su guía y su aviso de uso');
   ok(!!(await w.$('[data-level=pro]')), 'si aún no ha elegido nivel, la pregunta sigue ahí');
   await app.close();
 
@@ -72,6 +74,7 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   await p.goto('http://127.0.0.1:8797/');
   await p.waitForSelector('.wizard');
   ok(await p.$eval('[data-wz=cloud]', (x) => x.classList.contains('on')), 'en la web empieza por «IA en internet»');
+  ok(!(await p.$('#wzPreset option[value=nvidia]')) && !(await p.$('#presetSel option[value=nvidia]')), 'en la web no se ofrece NVIDIA (su API no admite peticiones desde el navegador)');
   await p.click('[data-wz=local]');
   ok(/Neura para PC/.test(await p.textContent('#wzBody')), 'en la web, «IA en este equipo» explica cómo conseguirla con Neura para PC');
   await b.close(); br.kill();

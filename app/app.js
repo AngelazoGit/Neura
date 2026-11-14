@@ -50,6 +50,8 @@ const PRESETS = {
   mistral:    { name: 'Mistral', kind: 'openai', tier: 'free', baseUrl: 'https://api.mistral.ai/v1', models: ['mistral-small-latest', 'open-mistral-nemo'], keyUrl: 'https://console.mistral.ai/api-keys' },
   github:     { name: 'GitHub Models', kind: 'openai', tier: 'free', baseUrl: 'https://models.github.ai/inference', models: ['openai/gpt-4.1-mini', 'meta/Llama-3.3-70B-Instruct'], keyUrl: 'https://github.com/settings/tokens' },
   hf:         { name: 'Hugging Face', kind: 'openai', tier: 'free', baseUrl: 'https://router.huggingface.co/v1', models: ['meta-llama/Llama-3.3-70B-Instruct'], keyUrl: 'https://huggingface.co/settings/tokens' },
+  // NVIDIA no permite peticiones desde el navegador (CORS): solo en la app de móvil y de PC.
+  nvidia:     { name: 'NVIDIA (Nemotron)', kind: 'openai', tier: 'free', baseUrl: 'https://integrate.api.nvidia.com/v1', models: ['nvidia/nemotron-3-super-120b-a12b', 'nvidia/nemotron-3.5-lightning-30b-a3b'], keyUrl: 'https://build.nvidia.com/settings/api-keys', nativeOnly: true },
   cohere:     { name: 'Cohere', kind: 'openai', tier: 'free', baseUrl: 'https://api.cohere.ai/compatibility/v1', models: ['command-a-03-2025'], keyUrl: 'https://dashboard.cohere.com/api-keys' },
   anthropic:  { name: 'Anthropic Claude', kind: 'anthropic', tier: 'paid', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], keyUrl: 'https://console.anthropic.com/settings/keys' },
   openai:     { name: 'OpenAI', kind: 'openai', tier: 'paid', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1-mini'], keyUrl: 'https://platform.openai.com/api-keys', stt: 'gpt-4o-mini-transcribe' },
@@ -486,7 +488,7 @@ async function fetchModels(p) {
   let list = j.data || j.models || [];
   if (p.freeOnly) list = list.filter((m) => String(m.id).endsWith(':free') || (m.pricing && +m.pricing.prompt === 0 && +m.pricing.completion === 0));
   return list.map((m) => (typeof m === 'string' ? m : m.id || m.name).replace(/^models\//, ''))
-    .filter((id) => id && !/embed|imagen|veo|tts|whisper|transcri|dall-e|moderation|rerank|guard|audio|live|image-generation|robotics|computer-use|aqa/i.test(id));
+    .filter((id) => id && !/embed|imagen|veo|tts|whisper|transcri|dall-e|moderation|rerank|guard|safety|reward|parse|audio|live|image-generation|robotics|computer-use|aqa/i.test(id));
 }
 // Orden recomendado: Flash vigente primero (cuota gratuita amplia), Pro después (poca cuota gratis)
 // y al final los experimentales o de vista previa, que fallan a menudo.
@@ -950,7 +952,7 @@ function schedule(m) {
 }
 
 // ---------- configuración guiada: la primera IA en un minuto ----------
-const WIZ = ['gemini', 'groq', 'openrouter', 'mistral', 'cerebras'];
+const WIZ = ['gemini', 'groq', 'openrouter', 'mistral', 'cerebras', 'nvidia'].filter((k) => NATIVE || !PRESETS[k].nativeOnly);
 // Qué pide cada proveedor gratuito para crear la clave. Los límites gratuitos los fija cada uno y cambian.
 const GUIDE = {
   gemini: { need: 'Una cuenta de Google.', steps: ['Inicia sesión con tu cuenta de Google.', 'Pulsa «Create API key».', 'Copia la clave y pégala abajo.'],
@@ -958,6 +960,8 @@ const GUIDE = {
   groq: { need: 'Un correo, o tu cuenta de Google o GitHub.', steps: ['Crea tu cuenta o inicia sesión.', 'Pulsa «Create API Key», ponle un nombre y créala.', 'Cópiala (solo se muestra una vez) y pégala abajo.'] },
   openrouter: { need: 'Un correo, o tu cuenta de Google o GitHub.', steps: ['Inicia sesión.', 'Pulsa «Create Key», ponle un nombre y créala.', 'Cópiala y pégala abajo.'], note: 'Neura solo usará sus modelos gratuitos (:free).' },
   mistral: { need: 'Un correo; puede pedirte verificar tu teléfono.', steps: ['Crea tu cuenta en su consola.', 'Entra en «API Keys» y crea una clave.', 'Cópiala y pégala abajo.'] },
+  nvidia: { need: 'Un correo; puede pedirte verificar tu teléfono.', steps: ['Crea tu cuenta de desarrollador NVIDIA o inicia sesión.', 'Pulsa «Generate API Key» y créala.', 'Cópiala (empieza por nvapi-) y pégala abajo.'],
+    note: 'Es un acceso gratuito para pruebas y desarrollo, con un límite de peticiones por minuto. No lo uses para un servicio comercial y no pegues datos sensibles.' },
   cerebras: { need: 'Un correo electrónico.', steps: ['Crea tu cuenta o inicia sesión.', 'Entra en «API Keys» y crea una clave.', 'Cópiala y pégala abajo.'] },
 };
 let wzMode = DESK ? 'local' : 'cloud', wzPreset = 'gemini';
@@ -1947,7 +1951,7 @@ $('#log').addEventListener('click', (e) => {
 });
 
 // IAs y ajustes
-$('#presetSel').innerHTML = Object.entries(PRESETS).map(([k, p]) => `<option value="${k}">${p.name}${p.tier === 'free' ? ' — GRATIS' : p.tier === 'paid' ? ' — PAGO' : ''}</option>`).join('');
+$('#presetSel').innerHTML = Object.entries(PRESETS).filter(([, p]) => NATIVE || !p.nativeOnly).map(([k, p]) => `<option value="${k}">${p.name}${p.tier === 'free' ? ' — GRATIS' : p.tier === 'paid' ? ' — PAGO' : ''}</option>`).join('');
 $('#addProv').onclick = () => {
   const k = $('#presetSel').value;
   S.providers.push({ id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), apiKey: '', enabled: true });
