@@ -50,6 +50,9 @@
     <label class="auto" title="Hilo privado: solo responden tus equipos (el puente de tu PC o los que marques en ⬡). Ningún dato sale a IAs externas.">
       <input type="checkbox" id="private"> 🔒 PRIVADO
     </label>
+    <label class="auto" id="webLbl" hidden title="Busca en internet antes de preguntar: la IA responde citando las fuentes">
+      <input type="checkbox" id="web"> 🌐 WEB
+    </label>
     <button type="button" class="auto skillbtn" id="btnSkills" title="Habilidades: procedimientos reutilizables que se aplican a este hilo con cualquier IA">✦ HABILIDADES</button>
     <label class="auto" id="toolsLbl" hidden title="Deja que la IA use las herramientas de tus servidores MCP (buscar y leer tus documentos, estado del PC…)">
       <input type="checkbox" id="useTools"> ƒ HERRAMIENTAS
@@ -85,7 +88,9 @@
       <button class="btn sm ghost" id="exportAll">COPIA DE TODOS (.json)</button>
       <button class="btn sm ghost" id="importBtn" title="Una copia de Neura o tu exportación de ChatGPT, Claude o Gemini (.json o .zip)">IMPORTAR (.json, .zip)</button>
       <input type="file" id="importFile" accept=".json,.zip,application/json,application/zip" hidden>
+      <button class="btn sm ghost" id="auditBtn" title="Qué datos de este hilo se han enviado y adónde">🔍 ¿ADÓNDE FUERON MIS DATOS?</button>
     </div>
+    <div id="auditOut" hidden></div>
   </div>
 </section>
 
@@ -153,6 +158,7 @@ NEURA_TOKEN=mi-secreto node server.mjs</pre>
   </form>
 </div>
 
+<input type="file" id="batchFile" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
 <div id="toast" role="status"></div>
 <script src="md.js"></script>
 <script src="app.js"></script>

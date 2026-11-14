@@ -225,6 +225,26 @@ async function imageGenerateNow(prompt, args, signal) {
   return { image: out, text: `Imagen generada en ${seconds} s con ${g.id}${out.model ? ` · ${out.model}` : ''} · semilla ${a.seed}`, backend: g.id, model: out.model, seconds, seed: a.seed };
 }
 
+// ---------- búsqueda en internet ----------
+// El buscador lo configura la app de este PC (SearXNG o Brave Search) o config.json ("search"). Así el móvil
+// emparejado puede buscar a través del PC sin tener su propia clave.
+const searchCfg = () => (gateway.search?.type ? gateway.search : cfg.search?.type ? cfg.search : null);
+const searchName = () => ({ searxng: 'SearXNG', brave: 'Brave Search' })[searchCfg()?.type] || null;
+async function webSearch(args, { signal } = {}) {
+  const q = String(args.query || '').trim().slice(0, 300), c = searchCfg();
+  if (!q) throw new Error('Falta la búsqueda');
+  if (!c) throw new Error('Este PC no tiene un buscador configurado (Neura para PC → ⚙ → BÚSQUEDA EN INTERNET).');
+  if (c.type === 'searxng') {
+    const d = await getJSON(`${trim(c.url)}/search?format=json&language=es&q=${encodeURIComponent(q)}`, { timeout: 20000, signal, headers: { Accept: 'application/json' } });
+    return { results: (d.results || []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: x.content || '' })), engine: 'SearXNG' };
+  }
+  if (c.type === 'brave') {
+    const d = await getJSON(`https://api.search.brave.com/res/v1/web/search?count=6&q=${encodeURIComponent(q)}`, { timeout: 20000, signal, headers: { Accept: 'application/json', 'X-Subscription-Token': c.key || '' } });
+    return { results: (d.web?.results || []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: x.description || '' })), engine: 'Brave Search' };
+  }
+  throw new Error('Buscador desconocido');
+}
+
 async function listModels() {
   const backends = await Promise.all(BACKENDS.map(async (b) => {
     try {
@@ -235,7 +255,7 @@ async function listModels() {
     }
   }));
   const models = backends.flatMap((b) => b.models.map((name) => ({ id: `${b.id}/${name}`, backend: b.id, name })));
-  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })), images: await imageStatus() };
+  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })), images: await imageStatus(), search: searchName() };
 }
 
 const asText = (c) => typeof c === 'string' ? c
@@ -691,6 +711,9 @@ const TOOLS = [
   { name: 'system_info', title: 'Estado del equipo',
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
     inputSchema: { type: 'object', properties: {} } },
+  { name: 'web_search', title: 'Buscar en internet',
+    description: 'Busca en internet con el buscador configurado en este equipo (SearXNG o Brave Search) y devuelve título, enlace y extracto de cada resultado.',
+    inputSchema: { type: 'object', required: ['query'], properties: { query: { type: 'string' } } } },
   { name: 'image_generate', title: 'Generar una imagen en este equipo',
     description: 'Genera una imagen con el generador local (ComfyUI o Forge/AUTOMATIC1111). Gratis y privado: no sale del equipo.',
     inputSchema: { type: 'object', required: ['prompt'], properties: {
@@ -706,7 +729,7 @@ const TOOLS = [
 ];
 const TOOL_IMPL = { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs, system_info: systemInfo };
 const CHAT_TOOLS = [...FILE_TOOLS, TOOLS.find((t) => t.name === 'system_info')];
-const IMPL = { list_models: listModels, chat, system_info: systemInfo, image_generate: imageGenerate, ...(SYNC ? { threads_sync: threadsSync } : {}),
+const IMPL = { list_models: listModels, chat, system_info: systemInfo, image_generate: imageGenerate, web_search: webSearch, ...(SYNC ? { threads_sync: threadsSync } : {}),
   ...(FOLDERS.length ? { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs } : {}) };
 
 async function rpc(msg, session) {
@@ -1204,6 +1227,7 @@ async function handle(req, res) {
     if (confSig !== gateway.confSig) gwCache.clear();
     Object.assign(gateway, { confSig, enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto, cache: !!c.cache,
       budget: { day: num(c.budget?.day), month: num(c.budget?.month) },
+      search: c.search?.type === 'searxng' && /^https?:\/\//.test(c.search.url || '') ? { type: 'searxng', url: String(c.search.url) } : c.search?.type === 'brave' && c.search.key ? { type: 'brave', key: String(c.search.key) } : null,
       providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
       order: Array.isArray(c.order) ? c.order.map(String) : [] });
     for (const p of gateway.providers) if (before.get(p.id) !== sig(p)) gwCool.delete(p.id);

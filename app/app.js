@@ -93,6 +93,7 @@ function save() {
     // Con PIN, las claves solo se guardan cifradas dentro de S.vault.
     st.providers = st.providers.map(({ apiKey, ...p }) => p);
     st.mcp = st.mcp.map((m) => (m.local ? m : (({ token, ...x }) => x)(m)));
+    if (st.search) st.search = (({ key, ...x }) => x)(st.search);
     if (vault.key) sealSoon();
   }
   // Los adjuntos ya guardados en IndexedDB se quedan fuera: el hilo solo conserva su referencia.
@@ -115,6 +116,7 @@ function gatewayPayload() {
   return {
     enabled: !!g.enabled, localOnly: !!g.localOnly, freeOnly: !!S.freeOnly, unknownAsAuto: !!g.unknownAsAuto, cache: !!g.cache,
     budget: { day: +S.budget?.day || 0, month: +S.budget?.month || 0 },
+    search: ownSearch() ? { type: S.search.type, url: S.search.url || '', key: S.search.key || '' } : null,
     providers: cloud.map((t) => { const p = S.providers.find((x) => x.id === t.pid); return { id: name(t), url: p.baseUrl, apiKey: p.apiKey || '', model: t.model, free: isFree(t), price: priced(p) ? { in: +p.price.in || 0, out: +p.price.out || 0 } : null }; }),
     order: ordered.map((t) => (t.pid ? name(t) : t.model)),
   };
@@ -316,6 +318,60 @@ const budgetLeft = () => { const b = S.budget || {}, x = budgetUsed(); return Ma
 const overBudget = () => { const b = S.budget || {}, x = budgetUsed(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
 const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
 
+// ---------- registro de privacidad: qué salió de este dispositivo, adónde y cuándo ----------
+// Por hilo y solo en este dispositivo (no se sincroniza). Se apunta cada envío: mensajes a IAs, resúmenes,
+// búsquedas, dictado e imágenes. «Tu equipo» = este PC o tu red privada; «internet» = un servicio externo.
+const isLocalUrl = (u) => { try { return isLocalHost(new URL(u).hostname); } catch { return false; } };
+const isLocalHost = (h) => /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|\[?::1\]?$)/.test(h) || /\.(local|lan|home\.arpa|ts\.net)$/.test(h);
+const hostOf = (u) => { try { return new URL(u).host; } catch { return String(u || ''); } };
+function audit(what, to, host, local, files = []) {
+  const th = thread(), list = ((S.audit ||= {})[th.id] ||= []);
+  list.push({ ts: Date.now(), what, to, host, local: !!local, ...(files.length ? { files } : {}) });
+  if (list.length > 500) list.splice(0, list.length - 500);
+}
+const auditLog = audit;
+// Adjuntos que van en una petición: los nombres que Neura pone en el texto y las imágenes.
+function filesIn(messages) {
+  const names = new Set();
+  const walk = (v) => {
+    if (typeof v === 'string') for (const m of v.matchAll(/\[(?:Archivo adjunto|Imagen adjunta): ([^\]—\n]+?)(?: —[^\]]*)?\]/g)) names.add(m[1].trim());
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') { if (v.type === 'image_url' || v.type === 'image') imgs++; else Object.values(v).forEach(walk); }
+  };
+  let imgs = 0;
+  walk(messages);
+  if (!names.size && imgs) names.add(imgs === 1 ? '1 imagen' : `${imgs} imágenes`);
+  return [...names];
+}
+function auditTarget(t, what, messages) {
+  if (t.kind === 'mcp') {
+    const s = S.mcp.find((x) => x.id === t.sid), b = mcpBackend(t);
+    audit(what, `⬡ ${s?.name || 'servidor'} / ${t.model}`, b?.url ? hostOf(b.url) : hostOf(s?.url), localBackend(t), filesIn(messages));
+  } else {
+    const p = provOf(t);
+    audit(what, p?.name || t.label, hostOf(p?.baseUrl), isLocalUrl(p?.baseUrl), filesIn(messages));
+  }
+}
+function auditHTML() {
+  const th = thread(), list = S.audit?.[th.id] || [];
+  const sync = S.mcp.filter(canSync).map((s) => s.name);
+  const groups = new Map();
+  for (const a of list) {
+    const k = `${a.to}|${a.host}`, g = groups.get(k) || groups.set(k, { ...a, n: 0, whats: new Set(), files: new Set(), last: 0 }).get(k);
+    g.n++; g.whats.add(a.what); (a.files || []).forEach((f) => g.files.add(f)); g.last = Math.max(g.last, a.ts);
+  }
+  const rows = [...groups.values()].sort((a, b) => a.local - b.local || b.last - a.last).map((g) => `<div class="card ${g.local ? '' : 'ext'}">
+      <div class="head"><b class="srv">${esc(g.to)}</b><span class="badge ${g.local ? 'local' : 'paid'}">${g.local ? 'TU EQUIPO' : 'INTERNET'}</span></div>
+      <div class="mono">${esc(g.host)} · ${g.n} ${g.n === 1 ? 'envío' : 'envíos'} · último ${new Date(g.last).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+      <div class="hint">${[...g.whats].map(esc).join(' · ')}${g.files.size ? `<br>Adjuntos: ${[...g.files].map(esc).join(', ')}` : ''}</div></div>`).join('');
+  const ext = [...groups.values()].filter((g) => !g.local).length;
+  return `<h3>🔍 ¿ADÓNDE FUERON LOS DATOS DE ESTE HILO?</h3>
+    <p class="hint">${list.length ? `${ext ? `<b>${ext}</b> ${ext === 1 ? 'servicio de internet ha' : 'servicios de internet han'} recibido datos de este hilo.` : '<b>Nada de este hilo ha salido a internet</b>: solo a tus equipos.'}` : 'Este hilo aún no ha enviado nada desde este dispositivo.'}
+    ${th.private ? ' Es un hilo 🔒 PRIVADO: solo responden tus equipos.' : ''}${sync.length ? ` Se sincroniza con: ${sync.map(esc).join(', ')}.` : ''}</p>
+    ${rows}
+    <p class="hint">Registro de este dispositivo: incluye mensajes a IAs, resúmenes, búsquedas, dictado e imágenes. Las pruebas de conexión no cuentan.</p>`;
+}
+
 // ---------- política de destinos: gasto y privacidad ----------
 // "Gratis" solo si es comprobable: proveedor del nivel gratuito (en OpenRouter, variantes :free) o un equipo tuyo.
 // Backend del puente que atiende un modelo MCP; el puente indica si es local (tu equipo o tu red privada).
@@ -375,7 +431,7 @@ const isCtxErr = (e) => e.status === 413 || /context.{0,20}(length|window|limit)
 const textOf = (c) => (typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n'));
 
 // Herramientas MCP disponibles para las IAs (todas menos las internas de Neura).
-const INTERNAL = new Set(['chat', 'list_models', 'threads_sync', 'image_generate']);
+const INTERNAL = new Set(['chat', 'list_models', 'threads_sync', 'image_generate', 'web_search']);
 function toolbox() {
   const list = [], used = new Set();
   for (const s of S.mcp) if (s.status === 'on') for (const t of s.tools || []) {
@@ -527,6 +583,7 @@ async function callAnthropic(p, model, messages, onDelta, signal, opt = {}) {
 }
 
 async function callTarget(t, messages, onDelta, signal, opt = {}) {
+  if (opt.purpose !== 'prueba') auditTarget(t, opt.purpose || 'mensaje', messages);
   const bill = hasBudget() ? { eur: 0 } : null; // con tope: lo cobrado en cada llamada (ver paidRound)
   try { const out = await callTargetRaw(t, messages, onDelta, signal, { ...opt, bill }); recordUse(t, messages, out, null, bill?.eur); return out; }
   catch (e) { recordUse(t, messages, null, e, bill?.eur); throw e; }
@@ -702,6 +759,7 @@ async function mcpConnect(s, quiet) {
       s.models = (data.models || []).map((m) => (typeof m === 'string' ? m : m.id));
       s.backends = data.backends || [];
       s.images = data.images || [];
+      s.search = data.search || null;
     }
     s.status = 'on'; s.error = null;
     if (!quiet) toast(`${s.name}: CONECTADO · ${s.models.length} modelos`);
@@ -771,7 +829,7 @@ function userContent(m, withImg) {
   const imgs = (m.files || []).filter((f) => f.kind === 'image' && f.data);
   if (!imgs.length) return text;
   if (!withImg) return text + imgs.map((f) => `\n[Imagen adjunta: ${f.name}]`).join('');
-  return [{ type: 'text', text: text || 'Describe la imagen.' }, ...imgs.map((f) => ({ type: 'image_url', image_url: { url: f.data } }))];
+  return [{ type: 'text', text: (text || 'Describe la imagen.') + imgs.map((f) => `\n[Imagen adjunta: ${f.name}]`).join('') }, ...imgs.map((f) => ({ type: 'image_url', image_url: { url: f.data } }))];
 }
 // De un CONSEJO solo pasa al historial la síntesis (o la primera respuesta válida).
 function groupBest(msgs, g) {
@@ -801,20 +859,20 @@ function trimTo(h, budget) {
   return out;
 }
 // Petición auxiliar (resúmenes, crear habilidades…) a la primera IA disponible y permitida; con preferMine, antes tus equipos.
-async function ask(messages, signal, preferMine = false) {
+async function ask(messages, signal, preferMine = false, purpose = 'auxiliar') {
   const all = targets().filter((t) => !cooling(t.key));
   const mine = preferMine ? [...all.filter(isMine), ...all.filter((t) => t.kind === 'mcp')] : [];
   const order = [...mine, ...plan(findT(S.target))]
     .filter((t, i, a) => t && !cooling(t.key) && allowed(t) && a.findIndex((x) => x?.key === t.key) === i);
   let last;
   for (const t of order.slice(0, 3)) {
-    try { const r = noThink(await callTarget(t, messages, () => {}, signal)); if (r.trim()) return { text: r.trim(), t }; }
+    try { const r = noThink(await callTarget(t, messages, () => {}, signal, { purpose })); if (r.trim()) return { text: r.trim(), t }; }
     catch (e) { if (e.name === 'AbortError') throw e; noteFail(t, e); last = e; }
   }
   throw last || new Error('No hay ninguna IA disponible');
 }
 // Para resumir se prefiere la IA local (gratis y sin límites), luego la elegida y luego las demás disponibles.
-const summarize = async (messages, signal) => (await ask(messages, signal, true)).text;
+const summarize = async (messages, signal) => (await ask(messages, signal, true, 'resumen del hilo')).text;
 // Si el historial no cabe, lo antiguo se resume (y se guarda en el hilo) y se envía resumen + lo reciente.
 async function fitContext(th, hist, budget, signal) {
   if (tokens(hist) <= budget) return hist;
@@ -877,14 +935,14 @@ function withInstructions(hist, skill = activeSkill()) {
   return sys.length ? [{ role: 'system', content: sys.join('\n\n---\n\n') }, ...hist] : hist;
 }
 // skill: la versión fijada al enviar; una sincronización durante los reintentos no la cambia.
-async function runTarget(t, hist, msg, signal, tools, sk = null) {
+async function runTarget(t, hist, msg, signal, tools, sk = null, purpose) {
   const t0 = performance.now();
   msg.tools = [];
   if (sk) msg.skill = { id: sk.id, v: sk.version, name: sk.name };
   // A un modelo sin visión, las imágenes de mensajes anteriores le llegan como una nota de texto.
   if (S.health[t.key]?.noVision) hist = hist.map((m) => (Array.isArray(m.content) ? { ...m, content: `${textOf(m.content)}\n[imagen adjunta, no visible para este modelo]` } : m));
   const out = await callTarget(t, withInstructions(hist, sk), (x) => { msg.content = noThink(x); schedule(msg); }, signal, {
-    tools, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
+    tools, purpose, onTool: (rec) => { msg.tools.push(rec); schedule(msg); },
   });
   msg.content = noThink(out) || msg.content || '(respuesta vacía)';
   msg.ms = Math.round(performance.now() - t0);
@@ -915,46 +973,58 @@ async function send(text, files = []) {
     const first = routed || findT(S.target);
     // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
     const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
-    const queue = plan(first, needs);
-    if (first && allowed(first) && !capable(first, needs)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: '📷 no admite imágenes', skipped: true, ts: Date.now() });
-    if (first && allowed(first) && atLimit(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⏳ ${coolText(first.key)}`, skipped: true, ts: Date.now() });
-    if (first && !allowed(first)) msgs.push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
-    if (!first) msgs.push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() });
-    else if (!queue.length) msgs.push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : targets().some(atLimit) && !overBudget() ? 'Las IAs disponibles han llegado al límite diario que pusiste (⚙). Súbelo o espera a mañana.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
-    else if (S.council) await sendCouncil(th, hist, first, signal, needs, skill);
-    else {
-      let attempts = 0, ctxRetried = false;
-      for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
-        const t = queue[qi];
-        // La elegida está agotada: se avisa y se pasa a la siguiente sin gastar una petición.
-        if (S.autoSkip && cooling(t.key) && queue.slice(qi + 1).some((x) => !cooling(x.key))) {
-          if (qi === 0) msgs.push({ id: uid(), role: 'assistant', label: t.label, error: `⏳ ${coolText(t.key)}`, skipped: true, ts: Date.now() });
-          continue;
-        }
-        attempts++;
-        const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now() };
-        msgs.push(msg); renderLog();
-        try { await runTarget(t, hist, msg, signal, S.useTools, skill); break; }
-        catch (e) {
-          if (isCtxErr(e) && !ctxRetried) {
-            // No cabía en el contexto de este modelo: se comprime a la mitad y se reintenta con la misma IA.
-            ctxRetried = true;
-            hist = await fitContext(th, hist, Math.floor(tokens(hist) / 2), signal);
-            msgs.splice(msgs.indexOf(msg), 1);
-            qi--; attempts--;
-            continue;
-          }
-          failMsg(msg, e, t);
-          msg.skipped = S.autoSkip && skippable(e) && qi < queue.length - 1 && attempts < MAX_ATTEMPTS;
-          if (!msg.skipped) break;
-        }
-      }
-    }
+    // 🌐 WEB: se busca antes y los resultados van con la pregunta; la IA debe citar las fuentes.
+    if (S.web && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
+    if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
+    else await respond(th, hist, first, signal, needs, skill);
   } catch (e) {
     if (e.name !== 'AbortError') msgs.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
   }
   msgs.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
   th.ts = Date.now(); setBusy(false); learnProgress(); save(); renderLog(); renderTargets(); syncAll();
+}
+
+// Prueba las IAs en orden (AUTO-SALTO) hasta que una responda. at: posición donde insertar las respuestas
+// (los lotes responden debajo de cada archivo); noFit: no resumir el hilo si no cabe (cada archivo va solo).
+async function respond(th, hist, first, signal, needs = {}, skill = null, { at = null, noFit = false, purpose } = {}) {
+  const msgs = th.messages;
+  const push = (m) => (at == null ? msgs.push(m) : msgs.splice(at++, 0, m));
+  const queue = plan(first, needs);
+  if (first && allowed(first) && !capable(first, needs)) push({ id: uid(), role: 'assistant', label: first.label, error: '📷 no admite imágenes', skipped: true, ts: Date.now() });
+  if (first && allowed(first) && atLimit(first)) push({ id: uid(), role: 'assistant', label: first.label, error: `⏳ ${coolText(first.key)}`, skipped: true, ts: Date.now() });
+  if (first && !allowed(first)) push({ id: uid(), role: 'assistant', label: first.label, error: `⛔ ${notAllowedWhy(first)}`, skipped: true, ts: Date.now() });
+  if (!first) { push({ id: uid(), role: 'assistant', error: 'No hay IAs conectadas. Añade una en ⚙ o conecta un servidor en ⬡.', ts: Date.now() }); return false; }
+  if (!queue.length) {
+    push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : targets().some(atLimit) && !overBudget() ? 'Las IAs disponibles han llegado al límite diario que pusiste (⚙). Súbelo o espera a mañana.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
+    return false;
+  }
+  let attempts = 0, ctxRetried = false;
+  for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
+    const t = queue[qi];
+    // La elegida está agotada: se avisa y se pasa a la siguiente sin gastar una petición.
+    if (S.autoSkip && cooling(t.key) && queue.slice(qi + 1).some((x) => !cooling(x.key))) {
+      if (qi === 0) push({ id: uid(), role: 'assistant', label: t.label, error: `⏳ ${coolText(t.key)}`, skipped: true, ts: Date.now() });
+      continue;
+    }
+    attempts++;
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now() };
+    push(msg); renderLog();
+    try { await runTarget(t, hist, msg, signal, S.useTools, skill, purpose); return true; }
+    catch (e) {
+      if (isCtxErr(e) && !ctxRetried && !noFit) {
+        // No cabía en el contexto de este modelo: se comprime a la mitad y se reintenta con la misma IA.
+        ctxRetried = true;
+        hist = await fitContext(th, hist, Math.floor(tokens(hist) / 2), signal);
+        msgs.splice(msgs.indexOf(msg), 1); if (at != null) at--;
+        qi--; attempts--;
+        continue;
+      }
+      failMsg(msg, e, t);
+      msg.skipped = S.autoSkip && skippable(e) && qi < queue.length - 1 && attempts < MAX_ATTEMPTS;
+      if (!msg.skipped) return false;
+    }
+  }
+  return false;
 }
 
 // ---------- enrutado por tipo de tarea y votos ----------
@@ -1008,6 +1078,71 @@ function routingHTML() {
     ${rt.on ? `<div class="routes">${[...TASKS, { id: 'general' }].map((t) => `<label class="field">${taskName(t.id)}<select data-route="${t.id}">${opts(t.id)}</select></label>`).join('')}</div>` : ''}`;
 }
 
+// ---------- búsqueda en internet con fuentes ----------
+// Buscador propio (⚙): SearXNG (gratis; en tu PC, privado) o Brave Search (clave gratuita). Si no hay, el del PC
+// emparejado a través del puente (herramienta web_search). Los resultados van con la pregunta y la IA debe citarlos.
+const searchServer = (th) => S.mcp.filter((s) => s.status === 'on' && s.search && (s.tools || []).some((t) => t.name === 'web_search') && (!th.private || s.local || s.mine))
+  .sort((a, b) => !!b.local - !!a.local)[0];
+const ownSearch = () => (S.search?.type === 'searxng' && S.search.url) || (S.search?.type === 'brave' && S.search.key && NATIVE) ? S.search : null;
+// En un hilo 🔒 PRIVADO solo vale un buscador de tu equipo o tu red (SearXNG local, o el de tu PC por el puente).
+const ownSearchOk = (th) => ownSearch() && (!th.private || (S.search.type === 'searxng' && isLocalUrl(S.search.url)));
+const searchReady = (th) => !!(ownSearchOk(th) || searchServer(th));
+const cleanSnippet = (x) => htmlText(x).replace(/\s+/g, ' ').slice(0, 400);
+async function webSearch(q, th, signal) {
+  return (await webSearchRaw(q, th, signal)).filter((x) => /^https?:\/\//.test(x.url || ''));
+}
+async function webSearchRaw(q, th, signal) {
+  const audit = th.test ? () => {} : auditLog; // PROBAR BÚSQUEDA no es un dato del hilo
+  if (ownSearchOk(th)) {
+    const c = S.search;
+    if (c.type === 'searxng') {
+      const u = `${c.url.replace(/\/+$/, '')}/search?format=json&language=es&q=${encodeURIComponent(q)}`;
+      audit(`búsqueda: «${q.slice(0, 80)}»`, 'SearXNG', hostOf(c.url), isLocalUrl(c.url));
+      const r = await xfetch(u, { signal, headers: { Accept: 'application/json' } });
+      if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+      return ((await r.json()).results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.content || '') }));
+    }
+    audit(`búsqueda: «${q.slice(0, 80)}»`, 'Brave Search', 'api.search.brave.com', false);
+    const r = await xfetch(`https://api.search.brave.com/res/v1/web/search?count=6&q=${encodeURIComponent(q)}`, { signal, headers: { Accept: 'application/json', 'X-Subscription-Token': c.key } });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+    return ((await r.json()).web?.results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.description || '') }));
+  }
+  const s = searchServer(th);
+  audit(`búsqueda: «${q.slice(0, 80)}»`, `⬡ ${s.name} → ${s.search}`, hostOf(s.url), false);
+  const r = await mcpRpc(s, 'tools/call', { name: 'web_search', arguments: { query: q } }, { signal });
+  if (r.isError) throw new Error((r.content || []).map((c) => c.text).join(' ').replace(/^Error:\s*/, ''));
+  return (r.structuredContent?.results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.snippet || '') }));
+}
+// Añade los resultados a la última pregunta (funciona con cualquier IA, también las que no usan herramientas).
+async function withSearch(th, userMsg, hist, signal) {
+  const q = String(userMsg.content || '').trim().slice(0, 300);
+  if (!q) return hist;
+  let res;
+  try { res = await webSearch(q, th, signal); }
+  catch (e) { if (e.name === 'AbortError') throw e; userMsg.searchError = netHint(e); return hist; }
+  userMsg.sources = res;
+  if (!userMsg.sources.length) { userMsg.searchError = 'la búsqueda no encontró resultados'; return hist; }
+  const block = userMsg.sources.map((x, i) => `[${i + 1}] ${x.title} — ${x.url}\n${x.snippet}`).join('\n\n');
+  const add = `\n\n---\nResultados de una búsqueda en internet (${new Date().toLocaleDateString()}):\n\n${block}\n\n---\nResponde usando estas fuentes cuando sirvan y cítalas con su número entre corchetes, p. ej. [1]. Si no bastan para responder, dilo. No inventes fuentes ni enlaces.`;
+  const last = hist[hist.length - 1];
+  const content = Array.isArray(last.content) ? last.content.map((c, k) => (k === 0 && c.type === 'text' ? { ...c, text: c.text + add } : c)) : last.content + add;
+  return [...hist.slice(0, -1), { ...last, content }];
+}
+function searchSettingsHTML() {
+  const c = S.search || {};
+  return `<h3>🌐 BÚSQUEDA EN INTERNET</h3>
+    <p class="hint">Con 🌐 WEB activado en la barra, Neura busca en internet antes de preguntar y la IA responde citando las fuentes [1], [2]… Así se inventa menos.</p>
+    <label class="field">BUSCADOR<select id="searchType">
+      <option value="" ${!c.type ? 'selected' : ''}>— ninguno${S.mcp.some((s) => s.search) ? ' (usar el de mi PC por ⬡)' : ''} —</option>
+      <option value="searxng" ${c.type === 'searxng' ? 'selected' : ''}>SearXNG (gratis; en tu PC, privado)</option>
+      ${NATIVE ? `<option value="brave" ${c.type === 'brave' ? 'selected' : ''}>Brave Search (clave gratuita)</option>` : ''}</select></label>
+    ${c.type === 'searxng' ? `<label class="field">DIRECCIÓN DE SEARXNG<input id="searchUrl" value="${esc(c.url || 'http://127.0.0.1:8080')}" placeholder="http://127.0.0.1:8080"></label>
+      <p class="hint">Necesita el formato JSON activado en su configuración (<i>search → formats: [html, json]</i>).${NATIVE ? '' : ' En la web, el navegador puede bloquearlo: usa la app, o el buscador de tu PC a través de ⬡.'}</p>` : ''}
+    ${c.type === 'brave' ? `<label class="field">CLAVE DE BRAVE SEARCH<input id="searchKey" type="password" autocomplete="off" value="${esc(c.key || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
+      <a href="https://brave.com/search/api/" target="_blank" rel="noopener">▸ conseguir clave</a><p class="hint">Lo que buscas se envía a Brave: no se usa en hilos 🔒 PRIVADOS.</p>` : ''}
+    ${c.type ? '<div class="row"><button class="btn sm ghost" id="searchTest">PROBAR BÚSQUEDA</button></div>' : ''}`;
+}
+
 // ---------- imágenes en tu equipo: /imagen <prompt> ----------
 // Las genera el puente de tu PC con ComfyUI o Forge/AUTOMATIC1111: gratis, sin cuentas y sin salir de tu equipo.
 const imageServers = (th) => S.mcp.filter((s) => s.status === 'on' && (s.tools || []).some((t) => t.name === 'image_generate') && (!th.private || s.local || s.mine))
@@ -1029,6 +1164,7 @@ async function sendImage(raw) {
     msgs.push(msg); save(); renderLog();
     try {
       const t0 = performance.now();
+      audit('imagen (prompt)', `⬡ ${srv.name}`, hostOf(srv.url), srv.local || isLocalUrl(srv.url));
       const r = await mcpRpc(srv, 'tools/call', { name: 'image_generate', arguments: { prompt: prompt.trim(), negative: negative.trim() } }, { signal: abortCtl.signal });
       const txt = (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
       if (r.isError) throw new Error(txt.replace(/^Error:\s*/, ''));
@@ -1048,6 +1184,99 @@ async function saveImage(id) {
   if (DESK) { const p = await DESK.saveFile(f.name, f.data.split(',')[1], 'base64'); if (p) toast('GUARDADO: ' + p); return; }
   const blob = toBlob(f.data);
   download(f.name, blob, blob.type);
+}
+
+// ---------- tareas por lotes: una habilidad aplicada a cada archivo (o a cada parte de un documento largo) ----------
+// Crea un hilo con un mensaje por archivo o parte y los responde de uno en uno, cada uno por separado (sin el resto
+// del hilo como contexto), con AUTO-SALTO, SOLO GRATIS y el tope de gasto. PARAR lo detiene; CONTINUAR sigue.
+let batchSkill = null;
+function chunkText(text, maxTok) {
+  const max = Math.max(2000, Math.floor(maxTok * 3.5)), out = [];
+  let cur = '';
+  for (const para of text.split(/\n\s*\n/)) {
+    for (let p = para; p.length;) {
+      const piece = p.slice(0, max); p = p.slice(max);
+      if (cur && cur.length + piece.length + 2 > max) { out.push(cur); cur = ''; }
+      cur += (cur ? '\n\n' : '') + piece;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+async function startBatch(files) {
+  const k = liveSkills().find((x) => x.id === batchSkill);
+  if (!k || !files.length) return;
+  const maxTok = Math.max(1000, S.ctxTokens - Math.ceil(k.instructions.length / 3.5) - 1200);
+  const items = [];
+  for (const f of files) {
+    let got;
+    try { got = await readFile(f, Infinity, 20e6); } catch (e) { toast(`${f.name}: ${e.message}`, true); continue; }
+    for (const g of got) {
+      if (g.kind !== 'text') { items.push(g); continue; }
+      const parts = chunkText(g.text, maxTok);
+      parts.forEach((t, i) => items.push({ ...g, name: parts.length > 1 ? `${g.name} (parte ${i + 1}/${parts.length})` : g.name, text: t }));
+    }
+  }
+  if (!items.length) return toast('No se pudo leer ningún archivo', true);
+  const th = { id: uid(), title: `📦 ${k.name} · ${files.length} ${files.length === 1 ? 'archivo' : 'archivos'}`, ts: Date.now(), skill: k.id, project: S.project || null, private: !!thread().private,
+    batch: { skill: k.id },
+    // Cada archivo deja 1 s de margen: sus respuestas llevan horas entre la suya y la del siguiente (la sincronización ordena por hora).
+    messages: items.map((f, i) => ({ id: uid() + uid(), role: 'user', content: `📄 ${f.name}`, files: [f], batchItem: true, ts: Date.now() + i * 1000 })) };
+  S.threads.unshift(th); S.active = th.id;
+  for (const m of th.messages) for (const f of m.files) { try { await storeFile(f); } catch (e) { storageWarn(e); } }
+  save(); closeSheets(); renderLog();
+  toast(`📦 ${items.length} ${items.length === 1 ? 'tarea' : 'tareas'} con ✦ ${k.name}`);
+  runBatch();
+}
+// Un archivo está hecho si tiene debajo una respuesta correcta.
+function batchState(th) {
+  const items = [];
+  th.messages.forEach((m, i) => {
+    if (!m.batchItem) return;
+    let j = i + 1, done = false;
+    for (; j < th.messages.length && th.messages[j].role !== 'user'; j++) if (th.messages[j].content && !th.messages[j].error && !th.messages[j].pending) done = true;
+    items.push({ m, done, end: j });
+  });
+  return items;
+}
+async function runBatch() {
+  const th = thread();
+  if (!th.batch || busy) return;
+  const sk = S.skills.find((x) => x.id === th.batch.skill && !x.deleted);
+  if (!sk) return toast('La habilidad de este lote ya no existe', true);
+  const skill = JSON.parse(JSON.stringify(sk));
+  setBusy(true);
+  const signal = abortCtl.signal;
+  try {
+    for (;;) {
+      const it = batchState(th).find((x) => !x.done);
+      if (!it || signal.aborted) break;
+      // Los errores de un intento anterior de ese archivo se quitan antes de reintentarlo.
+      const i = th.messages.indexOf(it.m);
+      th.messages.splice(i + 1, it.end - i - 1);
+      const content = userContent({ content: it.m.files[0].name.includes('(parte ') ? `Esta es una parte de un documento más largo: «${it.m.files[0].name}». Trátala por separado.` : '', files: it.m.files }, true);
+      const hist = [{ role: 'user', content }];
+      const needs = { vision: Array.isArray(content) };
+      const ok = await respond(th, hist, findT(S.target), signal, needs, skill, { at: i + 1, noFit: true, purpose: 'tarea por lotes' });
+      for (let k = i + 1; k < th.messages.length && th.messages[k].role !== 'user'; k++) th.messages[k].ts = it.m.ts + (k - i);
+      th.ts = Date.now(); save(); renderLog();
+      // Sin ninguna IA posible (tope, SOLO GRATIS, límites) no tiene sentido seguir con los demás.
+      if (!ok && !plan(findT(S.target), needs).length) break;
+    }
+  } catch (e) { if (e.name !== 'AbortError') toast(netHint(e), true); }
+  th.messages.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
+  setBusy(false); save(); renderLog(); syncAll();
+  const st = batchState(th), done = st.filter((x) => x.done).length;
+  toast(done === st.length ? `📦 Lote terminado: ${done} de ${st.length}` : `📦 ${done} de ${st.length} hechos: pulsa CONTINUAR para seguir`);
+}
+function batchHTML(th) {
+  if (!th.batch) return '';
+  const st = batchState(th), done = st.filter((x) => x.done).length, sk = S.skills.find((x) => x.id === th.batch.skill);
+  return `<div class="card batch"><div class="head"><b class="srv">📦 LOTE · ✦ ${esc(sk?.name || 'habilidad')}</b><span class="badge ${done === st.length ? 'on' : 'wait'}">${done}/${st.length}</span></div>
+    <progress max="${st.length}" value="${done}"></progress>
+    <div class="row wrap">${done < st.length && !busy ? '<button class="btn sm" id="batchGo">CONTINUAR</button>' : ''}${busy ? '<span class="hint">Procesando… PARAR lo detiene.</span>' : ''}
+    ${done ? '<span class="hint">Exporta los resultados en ≡ (.md o PDF).</span>' : ''}</div>
+    <p class="hint">Cada archivo o parte se responde por separado, con AUTO-SALTO, SOLO GRATIS y tu tope de gasto.</p></div>`;
 }
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
@@ -1121,12 +1350,17 @@ function replyHTML(m) {
   const files = m.files?.length ? `<div class="files gen">${filesHTML(m)}</div>` : '';
   return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
 }
+function sourcesHTML(m) {
+  if (m.searchError) return `<div class="sources off">🌐 Sin búsqueda: ${esc(m.searchError)}</div>`;
+  if (!m.sources?.length) return '';
+  return `<details class="sources"><summary>🌐 ${m.sources.length} fuentes de internet</summary><ol>${m.sources.map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)}</a> <small>${esc(hostOf(x.url))}</small></li>`).join('')}</ol></details>`;
+}
 function msgHTML(m) {
-  if (m.role === 'user') return `<div class="msg user"><div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
+  if (m.role === 'user') return `<div class="msg user">${sourcesHTML(m)}<div class="tag">▶ TÚ // ${hhmm(m.ts)}${m.routed ? ` <span class="chip route" title="ENRUTADO POR TAREA">🧭 ${esc(taskName(m.task))} → ${esc(m.routed)}</span>` : ''}<span class="acts"><button data-edit="${m.id}" title="Editar y reenviar en una rama (el original se conserva)">✎ EDITAR</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button></span></div><div class="body">${esc(m.content)}${m.files?.length ? `<div class="files">${filesHTML(m)}</div>` : ''}</div></div>`;
   return `<div class="msg">${replyHTML(m)}</div>`;
 }
 function logHTML(th) {
-  const msgs = th.messages, out = [];
+  const msgs = th.messages, out = [batchHTML(th)];
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.group) {
@@ -1447,7 +1681,7 @@ $('#log').addEventListener('click', async (e) => {
   const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
   try {
     if (!p.models[0]) throw new Error('No se encontraron modelos');
-    await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {});
+    await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, undefined, { purpose: 'prueba' });
     delete p.wizard; S.target = t.key; S.wizardDone = true; save(); renderTargets(); renderLog();
     toast(`✓ ${p.name} conectada. ¡Ya puedes escribir!`); $('#input').focus();
   } catch (err) {
@@ -1472,6 +1706,8 @@ function renderTargets() {
   $('#private').checked = !!thread().private;
   const hasTools = toolbox().length > 0;
   $('#toolsLbl').hidden = !hasTools;
+  $('#webLbl').hidden = !searchReady(thread());
+  $('#web').checked = !!S.web;
   if (!hasTools && S.useTools) $('#useTools').checked = false;
   const ready = all.filter((t) => !cooling(t.key)).length;
   $('#syncTxt').textContent = ready === all.length ? `${all.length} IA` : `${ready}/${all.length} IA`;
@@ -1580,7 +1816,7 @@ async function diagnose(allModels) {
       if (atLimit(t)) { Object.assign(x, { ok: false, why: 'ha llegado a tu límite diario' }); paint(); continue; }
       const t0 = performance.now(), sig = AbortSignal.timeout(45000);
       try {
-        await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, sig);
+        await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, sig, { purpose: 'prueba' });
         Object.assign(x, { ok: true, ms: Math.round(performance.now() - t0) }); noteOk(t, x.ms);
       } catch (e) {
         noteFail(t, e);
@@ -1633,6 +1869,7 @@ function renderSettings() {
     <h3>MEMORIA DE CONTEXTO</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
+    ${searchSettingsHTML()}
     ${S.level === 'basic' ? '' : routingHTML()}
     <h3>⚖ CONSEJO</h3>
     <p class="hint">Elige qué IAs forman el consejo (2 a 5). Si no eliges, Neura usa las 3 mejores de proveedores distintos.</p>
@@ -1991,26 +2228,24 @@ async function addFiles(list) {
   try { await addFilesRaw(list); }
   finally { for (const f of attach.slice(before)) { try { await storeFile(f); } catch (e) { storageWarn(e); } } }
 }
+// Convierte un archivo en adjuntos (imagen, texto de PDF o páginas escaneadas, texto). maxText: los lotes lo leen entero.
+async function readFile(f, maxText = 60000, maxBytes = 5e6) {
+  if (f.type.startsWith('image/')) return [{ kind: 'image', name: f.name, data: await shrink(f) }];
+  if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+    toast('Leyendo PDF…');
+    const r = await readPdf(f);
+    if (r.text) return [{ kind: 'text', name: f.name, text: r.text, pdf: true }];
+    toast(`PDF escaneado: se enviarán ${r.images.length} página(s) como imagen${r.pages > r.images.length ? ` (de ${r.pages})` : ''}. Usa una IA con visión (p. ej. Gemini).`);
+    return r.images.map((data, i) => ({ kind: 'image', name: `${f.name} · pág. ${i + 1}`, data }));
+  }
+  if (f.size > maxBytes) throw new Error(`demasiado grande (máx. ${maxBytes / 1e6} MB)`);
+  const t = await f.text();
+  if (t.slice(0, 4000).includes('\u0000')) throw new Error('no es un archivo de texto');
+  return [{ kind: 'text', name: f.name, text: t.slice(0, maxText) }];
+}
 async function addFilesRaw(list) {
   for (const f of list) {
-    try {
-      if (f.type.startsWith('image/')) attach.push({ kind: 'image', name: f.name, data: await shrink(f) });
-      else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
-        toast('Leyendo PDF…');
-        const r = await readPdf(f);
-        if (r.text) attach.push({ kind: 'text', name: f.name, text: r.text, pdf: true });
-        else {
-          r.images.forEach((data, i) => attach.push({ kind: 'image', name: `${f.name} · pág. ${i + 1}`, data }));
-          toast(`PDF escaneado: se enviarán ${r.images.length} página(s) como imagen${r.pages > r.images.length ? ` (de ${r.pages})` : ''}. Usa una IA con visión (p. ej. Gemini).`);
-        }
-      }
-      else {
-        if (f.size > 5e6) throw new Error('demasiado grande (máx. 5 MB)');
-        const t = await f.text();
-        if (t.slice(0, 4000).includes('\u0000')) throw new Error('no es un archivo de texto');
-        attach.push({ kind: 'text', name: f.name, text: t.slice(0, 60000) });
-      }
-    } catch (e) { toast(`${f.name}: ${e.message}`, true); }
+    try { attach.push(...await readFile(f)); } catch (e) { toast(`${f.name}: ${e.message}`, true); }
   }
   renderAttach();
 }
@@ -2039,6 +2274,7 @@ async function transcribe(p, blob) {
   let body;
   if (DESK) { const mp = await multipart(fields, `voz.${ext}`, blob); body = mp.body; headers['Content-Type'] = mp.type; }
   else { body = new FormData(); for (const [k, v] of Object.entries(fields)) body.append(k, v); body.append('file', blob, `voz.${ext}`); }
+  audit('dictado (audio)', p.name, hostOf(p.baseUrl), isLocalUrl(p.baseUrl));
   const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/audio/transcriptions', { method: 'POST', headers, body });
   if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
   return String((await r.json()).text || '').trim();
@@ -2163,7 +2399,7 @@ function renderSkills() {
       <div class="head"><b class="srv">✦ ${esc(k.name)}</b><span class="badge local">v${k.version}</span>${act?.id === k.id ? '<span class="badge on">ACTIVA EN ESTE HILO</span>' : ''}</div>
       <div class="hint">${esc(k.description)}</div>
       <div class="row wrap">${act?.id === k.id ? '<button class="btn sm ghost" data-sk="off">QUITAR DE ESTE HILO</button>' : '<button class="btn sm" data-sk="use">USAR EN ESTE HILO</button>'}
-        <button class="btn sm ghost" data-sk="edit">EDITAR</button><button class="btn sm ghost" data-sk="export">EXPORTAR</button><button class="btn sm red" data-sk="del">✕</button></div>
+        <button class="btn sm ghost" data-sk="batch" title="Aplicar esta habilidad a varios archivos, o a un documento largo por partes">📦 POR LOTES</button><button class="btn sm ghost" data-sk="edit">EDITAR</button><button class="btn sm ghost" data-sk="export">EXPORTAR</button><button class="btn sm red" data-sk="del">✕</button></div>
     </div>`).join('') || '<p class="hint">Aún no tienes habilidades. Crea una con IA, en blanco, o importa un SKILL.md.</p>';
   const d = skDraft, ed = $('#skEditor');
   if (!d) { ed.innerHTML = ''; return; }
@@ -2297,6 +2533,7 @@ $('#skillList').addEventListener('click', (e) => {
   if (act === 'use' || act === 'off') { th.skill = act === 'use' ? k.id : null; th.ts = Date.now(); save(); renderLog(); syncAll(); if (act === 'use') { closeSheets(); toast(`✦ ${k.name} activa en este hilo`); } }
   if (act === 'edit') { skDraft = { mode: 'edit', id: k.id, name: k.name, description: k.description, instructions: k.instructions }; }
   if (act === 'export') download(`SKILL-${slug(k.name)}.md`, skillMd(k), 'text/markdown');
+  if (act === 'batch') { if (busy) return toast('Espera a que termine la respuesta', true); batchSkill = k.id; $('#batchFile').click(); }
   if (act === 'del') {
     if (!confirm(`¿Borrar la habilidad «${k.name}»?`)) return;
     // Se marca como borrada (no se quita) para que el borrado llegue a los demás dispositivos.
@@ -2314,11 +2551,12 @@ async function deriveKey(pin, salt) {
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 250000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
-const secretsOf = () => JSON.stringify({ p: Object.fromEntries(S.providers.map((p) => [p.id, p.apiKey || ''])), m: Object.fromEntries(S.mcp.filter((s) => !s.local).map((s) => [s.id, s.token || ''])) });
+const secretsOf = () => JSON.stringify({ p: Object.fromEntries(S.providers.map((p) => [p.id, p.apiKey || ''])), m: Object.fromEntries(S.mcp.filter((s) => !s.local).map((s) => [s.id, s.token || ''])), w: S.search?.key || '' });
 function applySecrets(json) {
   const x = JSON.parse(json);
   for (const p of S.providers) if (x.p?.[p.id] != null) p.apiKey = x.p[p.id];
   for (const s of S.mcp) if (!s.local && x.m?.[s.id] != null) s.token = x.m[s.id];
+  if (x.w && S.search) S.search.key = x.w;
 }
 function sealSoon() {
   clearTimeout(vault.timer);
@@ -2412,6 +2650,7 @@ $('#threadList').addEventListener('click', (e) => {
     if (!confirm('¿Borrar este hilo? Se borrará también en los equipos sincronizados.')) return;
     // Se deja una marca de borrado para que el borrado llegue a los demás dispositivos.
     Object.assign(S.threads.find((t) => t.id === del), { deleted: true, messages: [], summary: null, ts: Date.now() });
+    if (S.audit) delete S.audit[del];
     if (S.active === del) S.active = S.threads.find((t) => !t.deleted)?.id ?? null;
     save(); renderThreads(); renderLog(); syncAll(); return;
   }
@@ -2436,11 +2675,13 @@ async function exportPdf() {
   } finally { delete document.body.dataset.print; }
 }
 $('#exportPdf').onclick = exportPdf;
+$('#auditBtn').onclick = () => { const o = $('#auditOut'); o.hidden = !o.hidden; if (!o.hidden) o.innerHTML = auditHTML(); };
 $('#exportMd').onclick = () => { const th = thread(); if (!th.messages.length) return toast('El hilo está vacío', true); download(`${safeName(th.title)}.md`, threadMd(th), 'text/markdown'); };
 document.addEventListener('click', (e) => { if (e.target.id === 'saveWarnExport') $('#exportAll').click(); });
 $('#exportAll').onclick = () => download(`neura-hilos-${new Date().toISOString().slice(0, 10)}.json`,
   JSON.stringify({ app: 'neura', version: 2, exported: new Date().toISOString(), threads: portable(S.threads.filter((t) => !t.deleted && t.messages.length)) }, null, 1), 'application/json');
 $('#importBtn').onclick = () => $('#importFile').click();
+$('#batchFile').onchange = (e) => { const f = [...e.target.files]; e.target.value = ''; startBatch(f); };
 $('#importFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importThreads(f); };
 document.querySelectorAll('.sheet').forEach((s) => s.addEventListener('click', (e) => { if (e.target === s || e.target.closest('.close')) closeSheets(); }));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSheets(); stopScan(); } });
@@ -2454,6 +2695,7 @@ $('#private').onchange = (e) => {
   save(); renderTargets(); syncAll();
   if (th.private) toast('🔒 HILO PRIVADO: solo responderán tus equipos (⬡)');
 };
+$('#web').onchange = (e) => { S.web = e.target.checked; save(); if (S.web) toast('🌐 WEB: Neura buscará en internet y la IA citará las fuentes'); };
 $('#useTools').onchange = (e) => { S.useTools = e.target.checked; save(); if (S.useTools) toast(`ƒ ${toolbox().length} herramientas disponibles para la IA`); };
 
 const input = $('#input');
@@ -2484,6 +2726,7 @@ $('#app').addEventListener('dragover', (e) => e.preventDefault());
 $('#app').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
 $('#log').addEventListener('click', (e) => {
   const { copy, speak: sp, skillify } = e.target.dataset || {};
+  if (e.target.id === 'batchGo') return runBatch();
   if (e.target.dataset?.vote) return vote(e.target.dataset.vote);
   if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
   if (sp) return speak(sp);
@@ -2540,7 +2783,7 @@ $('#provList').addEventListener('click', async (e) => {
     if (!p.models[0]) return toast('Sin modelos', true);
     e.target.textContent = 'PROBANDO…';
     const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
-    try { const t0 = performance.now(); const r = await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}); noteOk(t, Math.round(performance.now() - t0)); toast(`${p.models[0]} → "${r.trim().slice(0, 40)}" · ${Math.round(performance.now() - t0)} ms`); }
+    try { const t0 = performance.now(); const r = await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, undefined, { purpose: 'prueba' }); noteOk(t, Math.round(performance.now() - t0)); toast(`${p.models[0]} → "${r.trim().slice(0, 40)}" · ${Math.round(performance.now() - t0)} ms`); }
     catch (err) { noteFail(t, err); toast(`${p.name}: ${err.status ? `[${err.status}] ` : ''}${netHint(err)}`, true); }
   }
   save(); renderProviders(); renderTargets(); renderLog();
@@ -2550,6 +2793,8 @@ $('#settings').addEventListener('change', (e) => {
     S.budget = { ...S.budget, [e.target.id === 'budgetDay' ? 'day' : 'month']: Math.max(0, +e.target.value || 0) };
     save(); renderTargets(); repaintUsage(); toast('TOPE DE GASTO GUARDADO');
   }
+  if (e.target.id === 'searchType') { S.search = { ...S.search, type: e.target.value, url: S.search?.url || (e.target.value === 'searxng' ? 'http://127.0.0.1:8080' : '') }; save(); renderSettings(); renderTargets(); }
+  if (e.target.id === 'searchUrl' || e.target.id === 'searchKey') { S.search = { ...S.search, [e.target.id === 'searchUrl' ? 'url' : 'key']: e.target.value.trim() }; save(); renderTargets(); toast('BUSCADOR GUARDADO'); }
   if (e.target.id === 'routeOn') { S.routing = { ...S.routing, on: e.target.checked }; save(); renderSettings(); }
   if (e.target.dataset.route) { S.routing = { ...S.routing, rules: { ...S.routing?.rules, [e.target.dataset.route]: e.target.value } }; save(); toast('ENRUTADO GUARDADO'); }
   if (e.target.id === 'ctxTokens') { S.ctxTokens = Math.max(1000, +e.target.value || 6000); save(); }
@@ -2560,6 +2805,12 @@ $('#settings').addEventListener('change', (e) => {
 });
 $('#settings').addEventListener('click', async (e) => {
   if (e.target.id === 'diagRun') diagnose($('#diagAll').checked);
+  if (e.target.id === 'searchTest') {
+    e.target.textContent = 'BUSCANDO…';
+    try { const r = await webSearch('Neura inteligencia artificial', { private: false, test: true }, AbortSignal.timeout(20000)); toast(r.length ? `✓ ${r.length} resultados: ${r[0].title.slice(0, 60)}` : 'Funciona, pero no encontró nada', !r.length); }
+    catch (err) { toast(`Búsqueda: ${err.status ? `[${err.status}] ` : ''}${netHint(err)}`, true); }
+    e.target.textContent = 'PROBAR BÚSQUEDA';
+  }
   if (e.target.id === 'addStarters') { const n = installStarters([...STARTERS, ...EXTRA_STARTERS]); toast(n ? `${n} habilidades añadidas (✦)` : 'Ya las tienes'); }
   if (e.target.dataset.level) setTimeout(renderSettings, 0);
   if (e.target.id === 'vaultOn') {

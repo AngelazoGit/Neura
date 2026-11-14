@@ -38,6 +38,9 @@ neura/
 21. **🧭 Enrutado por tarea y votos.** Neura reconoce si pides código, un resumen, razonar o redactar y usa la IA que asignes a ese tipo, o la que más votaste con **👍 MEJOR** en el CONSEJO (⚙ → ENRUTADO POR TAREA, modo profesional).
 22. **Exportar a PDF.** ≡ → PDF: en el PC se guarda directamente; en la web abre el diálogo de imprimir («Guardar como PDF»); en el móvil, una página lista para abrir e imprimir.
 23. **🖼 Imágenes gratis en tu PC.** Con ComfyUI o Forge/AUTOMATIC1111 en el PC, escribe `/imagen` y lo que quieres ver (también desde el móvil emparejado). Una línea `Evitar: …` se usa como prompt negativo. La habilidad de inicio **Prompt para imagen** te ayuda a escribirlo.
+24. **🌐 Búsqueda en internet con fuentes.** Con un buscador en ⚙ (SearXNG, gratis y privado en tu PC, o Brave Search con clave gratuita) aparece **🌐 WEB** en la barra: Neura busca antes de preguntar, la IA recibe los resultados numerados y responde citando [1], [2]… y el mensaje muestra los enlaces. Funciona con cualquier IA, también las locales. El móvil emparejado puede usar el buscador del PC. En hilos 🔒 PRIVADOS solo se usa un buscador de tu equipo.
+25. **🔍 ¿Adónde fueron mis datos?** En ≡, el registro del hilo muestra qué se envió a cada destino (IAs, buscador, dictado, imágenes), cuándo, con qué adjuntos y si salió a internet o se quedó en tu equipo. Se guarda solo en ese dispositivo.
+26. **📦 Tareas por lotes.** En ✦ HABILIDADES → **POR LOTES**: aplica una habilidad a varios archivos, o a un documento largo dividido en partes. Cada uno se responde por separado, con AUTO-SALTO, SOLO GRATIS y tu tope de gasto; PARAR lo detiene y CONTINUAR sigue donde se quedó. Los resultados quedan en un hilo que puedes exportar.
 
 Los nombres de modelo cambian a menudo: pulsa **ESCANEAR MODELOS** en cada IA para traer la lista actual. Las claves se guardan solo en el dispositivo.
 
@@ -49,7 +52,7 @@ cp config.example.json config.json   # edita backends y token
 NEURA_TOKEN=un-secreto-largo node server.mjs
 ```
 
-Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info`, `image_generate` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
+Funciona con Ollama, LM Studio, llama.cpp, vLLM o cualquier API compatible con OpenAI. Expone las herramientas MCP `list_models`, `chat` (con streaming, imágenes y `tools: true` para que el modelo local use las herramientas de archivos), `system_info`, `web_search` (el buscador que configure la app del PC, o `"search"` en `config.json`), `image_generate` y `threads_sync` (guarda los hilos en `~/.neura-bridge/hilos.json`, o en `NEURA_DATA`; desactívalo con `"sync": false` en `config.json`).
 
 Si compartes carpetas (`"folders": ["/ruta/a/documentos"]` en `config.json` o `NEURA_FOLDERS`), añade herramientas de **solo lectura**: `list_dir`, `search_files`, `read_file` y `search_docs` (búsqueda semántica con embeddings de Ollama: `ollama pull nomic-embed-text`; sin ese modelo busca por palabras). Nunca sale de las carpetas compartidas (bloquea `..`, rutas absolutas, carpetas ocultas y enlaces simbólicos que apunten fuera). Al arrancar muestra la URL de tu red (p. ej. `http://192.168.1.20:8787/mcp`): pégala en el menú ⬡ de la app junto con el token.
 

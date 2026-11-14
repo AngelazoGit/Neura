@@ -29,7 +29,7 @@ test('rechaza peticiones sin token o con token falso', async () => {
 });
 test('acepta el token correcto', async () => {
   const r = await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'image_generate', 'threads_sync']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'web_search', 'image_generate', 'threads_sync']);
 });
 test('/health no revela datos del equipo', async () => {
   assert.deepEqual(await (await fetch(`${BASE}/health`)).json(), { ok: true });
@@ -161,7 +161,7 @@ const call = async (name, args) => (await (await rpc2({ jsonrpc: '2.0', id: 1, m
 
 test('con carpetas aparecen las herramientas de archivos', async () => {
   const r = await (await rpc2({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'image_generate', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'web_search', 'image_generate', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
 });
 test('list_dir, search_files y read_file', async () => {
   assert.deepEqual((await call('list_dir', {})).structuredContent.entries, [{ name: 'docs', type: 'dir' }]);
@@ -563,4 +563,26 @@ test('Gateway con tope: pide al proveedor un máximo de salida y, si la respuest
   assert.ok(Math.abs(after.total.day - before - 4.096) < 0.01, `corte sin datos de consumo → se cobra lo reservado (4,096 €): ${after.total.day - before}`);
   assert.equal(after.reserved, 0, 'no queda ninguna reserva colgando');
   await configure({ enabled: false, budget: {} });
+});
+
+// ---------- búsqueda en internet a través del puente ----------
+const searx = http.createServer((req, res) => {
+  const q = new URL(req.url, 'http://x').searchParams.get('q');
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ results: [{ title: 'Resultado <b>uno</b>', url: 'https://ejemplo.org/1', content: `Sobre ${q}` }, { title: 'Dos', url: 'https://ejemplo.org/2', content: 'otro' }] }));
+});
+await new Promise((r) => searx.listen(0, '127.0.0.1', r));
+after(() => searx.close());
+test('web_search: sin buscador explica cómo configurarlo; con el del PC (SearXNG) devuelve resultados; list_models lo indica', async () => {
+  const sr = async (q) => (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'web_search', arguments: { query: q } } })).json()).result;
+  const lm = async () => (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).json()).result.structuredContent.search;
+  assert.equal((await sr('hola')).isError, true);
+  assert.equal(await lm(), null);
+  await configure({ enabled: false, search: { type: 'searxng', url: `http://127.0.0.1:${searx.address().port}` } });
+  const r = await sr('energía solar');
+  assert.equal(r.structuredContent.results.length, 2); assert.equal(r.structuredContent.results[0].snippet, 'Sobre energía solar');
+  assert.equal(await lm(), 'SearXNG');
+  await configure({ enabled: false, search: { type: 'searxng', url: 'javascript:alert(1)' } });
+  assert.equal(await lm(), null, 'una dirección que no es http(s) se ignora');
+  await configure({ enabled: false });
 });
