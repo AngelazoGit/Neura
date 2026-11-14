@@ -870,7 +870,7 @@ async function send(text, files = []) {
     if (e.name !== 'AbortError') msgs.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
   }
   msgs.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
-  th.ts = Date.now(); setBusy(false); save(); renderLog(); renderTargets(); syncAll();
+  th.ts = Date.now(); setBusy(false); learnProgress(); save(); renderLog(); renderTargets(); syncAll();
 }
 
 // ---------- CONSEJO: varias IAs a la vez y una síntesis final ----------
@@ -981,7 +981,7 @@ function renderLog() {
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
       <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
       ${S.providers.length || S.wizardDone ? '' : wizardHTML()}
-      ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>` : ''}
+      ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>${targets().length ? learnHTML(true) : ''}` : ''}
       <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
       <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
       <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li>
@@ -1168,9 +1168,14 @@ const STARTERS = [
   { name: 'Comprobar una respuesta', description: 'Revisa críticamente una respuesta de una IA u otra fuente: señala lo dudoso y cómo verificarlo. Es una evaluación orientativa, no una verificación con fuentes. Usar antes de fiarte de un dato importante.',
     instructions: '# Comprobar una respuesta\n\nRevisas críticamente una respuesta que la persona pega (de una IA o de otra fuente).\n\n1. Separa los hechos comprobables de las opiniones.\n2. Señala las afirmaciones dudosas, sin fuente o que podrían estar desactualizadas, y explica por qué.\n3. Indica cómo verificar cada punto importante: qué buscar y en qué tipo de fuente fiable.\n4. Termina con una valoración orientativa: «parece sólida», «conviene revisar» o «dudosa».\n5. Si no has consultado fuentes en esta conversación, empieza la valoración con «Evaluación orientativa: no he consultado fuentes; los hechos no están verificados». Si las has consultado, cítalas.\n\nNo presentes tu valoración como una certificación. No inventes fuentes ni enlaces.' },
 ];
-function installStarters() {
+// Más habilidades de inicio: no se instalan solas, sino con «+ HABILIDADES DE INICIO».
+const EXTRA_STARTERS = [
+  { name: 'Prompt para imagen', description: 'Convierte tu idea en un prompt detallado para generar imágenes (Gemini, ChatGPT, Stable Diffusion, ComfyUI…). Usar cuando quieras crear una imagen con IA.',
+    instructions: '# Prompt para imagen\n\nAyudas a convertir una idea en un prompt eficaz para un generador de imágenes.\n\n1. Si falta algo esencial (qué debe aparecer, para qué es la imagen, estilo), haz como máximo 3 preguntas breves; si no, sigue.\n2. Escribe el prompt final en un bloque de código, en español, con: sujeto y acción; escenario; estilo (foto, ilustración, 3D, acuarela…); composición y encuadre (plano, ángulo); luz y color; detalles importantes; y proporción (p. ej. 16:9 o vertical 9:16).\n3. Si debe aparecer texto dentro de la imagen, escríbelo entre comillas y pide una tipografía legible.\n4. Añade una versión corta de una línea y, para Stable Diffusion o ComfyUI, una línea «Evitar:» con lo que no debe salir (prompt negativo).\n5. Termina con 2-3 variaciones (otro estilo, otra luz u otro encuadre).\n\nSi Neura tiene imágenes en tu PC, recuerda que se generan escribiendo /imagen seguido del prompt. No crees imágenes de personas reales identificables sin su consentimiento ni copies el estilo exacto de un artista vivo.' },
+];
+function installStarters(list = STARTERS) {
   let n = 0;
-  for (const st of STARTERS) {
+  for (const st of list) {
     if (liveSkills().some((k) => k.name === st.name)) continue;
     S.skills.push({ id: uid() + uid(), ...st, version: 1, updatedAt: Date.now() }); n++;
   }
@@ -1187,8 +1192,57 @@ const TIPS = [
   '<b>Cuida tus datos</b>: no pegues contraseñas ni datos personales en IAs de internet. Para lo privado, usa 🔒 PRIVADO con la IA de tu equipo.',
   '<b>Aprende a pedir</b>: activa ✦ «Mejorar mi pregunta» y verás cómo plantearlo mejor.',
 ];
+// ---------- ruta de aprendizaje: retos cortos que se completan usando Neura ----------
+// Se calculan a partir de tus hilos: no hay que marcar nada a mano.
+const nWords = (t) => String(t || '').trim().split(/\s+/).filter(Boolean).length;
+const usedSkill = (A, name) => A.replies.some((m) => m.skill?.name === name);
+const LEARN = [
+  { id: 'first', t: 'Haz tu primera pregunta', how: 'Escribe lo que quieras abajo y pulsa ENVIAR.', ex: '¿Qué puedes hacer por mí? Explícamelo en 5 viñetas.',
+    done: (A) => A.users.length > 0, tip: 'Es una conversación: puedes seguir preguntando sobre lo que te responda.' },
+  { id: 'context', t: 'Da contexto', how: 'Di quién eres, qué quieres y para qué (al menos 25 palabras).', ex: 'Soy estudiante de bachillerato y el lunes tengo examen de biología. Explícame la fotosíntesis de forma sencilla, con un ejemplo de la vida diaria y en menos de 200 palabras.',
+    done: (A) => A.users.some((m) => nWords(m.content) >= 25), tip: 'Con contexto, la IA se inventa menos y se ajusta a lo que necesitas.' },
+  { id: 'format', t: 'Pide un formato', how: 'Pide la respuesta en tabla, lista, pasos o con un número de palabras.', ex: 'Compara el tren y el avión para un viaje de 600 km en una tabla con precio, tiempo y comodidad.',
+    done: (A) => A.users.some((m) => /\b(tabla|lista|viñetas|pasos|esquema|en \d+ (palabras|líneas|puntos|frases))\b/i.test(m.content || '')), tip: 'Decir el formato ahorra tiempo: la respuesta llega lista para usar.' },
+  { id: 'follow', t: 'Sigue la conversación', how: 'Contesta a la IA para que corrija, amplíe o lo diga de otra forma.', ex: 'Ahora explícamelo como si tuviera 10 años.',
+    done: (A) => A.threads.some((t) => t.messages.filter((m) => m.role === 'user').length >= 2), tip: 'No hace falta acertar a la primera: se mejora pidiendo cambios.' },
+  { id: 'improve', t: 'Mejora tu pregunta', how: 'Activa ✦ HABILIDADES → «Mejorar mi pregunta» y envía una petición.', ex: null,
+    done: (A) => usedSkill(A, 'Mejorar mi pregunta'), tip: 'Fíjate en lo que cambia: es lo que conviene incluir la próxima vez.' },
+  { id: 'check', t: 'Comprueba una respuesta', how: 'Activa ✦ «Comprobar una respuesta» y pega algo que quieras revisar.', ex: null,
+    done: (A) => usedSkill(A, 'Comprobar una respuesta'), tip: 'Las IAs se equivocan con seguridad: comprueba siempre los datos importantes.' },
+  { id: 'compare', t: 'Compara dos IAs', how: 'Cambia de IA en el desplegable de arriba y repite la pregunta en el mismo hilo.', ex: null,
+    done: (A) => A.threads.some((t) => new Set(t.messages.filter((m) => m.role === 'assistant' && m.key && !m.error && m.content).map((m) => m.key)).size >= 2), tip: 'Cada IA tiene puntos fuertes: si es importante, contrasta.' },
+  { id: 'file', t: 'Trabaja con un archivo', how: 'Pulsa 📎, adjunta un PDF, una foto o un texto y pregunta sobre él.', ex: null,
+    done: (A) => A.users.some((m) => m.files?.length), tip: 'Puede resumir y sacar datos de tus documentos. Para lo privado, usa 🔒 PRIVADO con la IA de tu equipo.' },
+];
+function learnState() {
+  const threads = S.threads.filter((t) => !t.deleted);
+  const all = threads.flatMap((t) => t.messages);
+  const A = { threads, users: all.filter((m) => m.role === 'user'), replies: all.filter((m) => m.role === 'assistant') };
+  return LEARN.map((x) => ({ ...x, ok: !!x.done(A) }));
+}
+function learnHTML(compact) {
+  const L = learnState(), n = L.filter((x) => x.ok).length, next = L.find((x) => !x.ok);
+  const list = `<ol class="learn">${L.map((x) => `<li class="${x.ok ? 'ok' : ''}"><b>${x.ok ? '✓' : '○'} ${esc(x.t)}</b> <span>${esc(x.ok ? x.tip : x.how)}</span></li>`).join('')}</ol>`;
+  if (!compact) return `<h3>🎓 RUTA DE APRENDIZAJE · ${n}/${L.length}</h3>${list}`;
+  if (!next) return `<div class="tips learnCard"><b>🏆 RUTA COMPLETADA · ${n}/${L.length}</b><p>Ya sabes lo esencial para usar bien las IAs. Cuando quieras más, pasa a PROFESIONAL en ⚙.</p></div>`;
+  return `<div class="tips learnCard"><b>🎓 TU RUTA DE APRENDIZAJE · ${n}/${L.length}</b>
+    <p><b>Siguiente reto: ${esc(next.t)}.</b> ${esc(next.how)}</p>
+    ${next.ex ? `<button class="btn sm" data-learnex="${next.id}">PROBAR CON UN EJEMPLO</button>` : ''}
+    <details><summary>VER TODOS LOS RETOS</summary>${list}</details></div>`;
+}
+// Tras cada respuesta: felicita una vez por cada reto conseguido.
+function learnProgress() {
+  if (S.level !== 'basic') return;
+  const seen = new Set(S.learnSeen || []);
+  const now = learnState().filter((x) => x.ok && !seen.has(x.id));
+  if (!now.length) return;
+  S.learnSeen = [...seen, ...now.map((x) => x.id)];
+  const x = now[now.length - 1];
+  toast(`🎓 Reto conseguido: ${x.t}. ${x.tip}`);
+}
 document.addEventListener('click', async (e) => {
   const d = e.target.dataset || {};
+  if (d.learnex) { const x = LEARN.find((l) => l.id === d.learnex); $('#input').value = x.ex; $('#input').dispatchEvent(new Event('input')); $('#input').focus(); }
   if (d.wz) { wzMode = d.wz; document.querySelectorAll('[data-wz]').forEach((b) => b.classList.toggle('on', b.dataset.wz === wzMode)); renderWizard(); }
   if (d.level) {
     S.level = d.level;
@@ -1337,6 +1391,7 @@ function renderSettings() {
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
+    <details class="learnSet"><summary>🎓 RUTA DE APRENDIZAJE · ${learnState().filter((x) => x.ok).length}/${LEARN.length}</summary>${learnHTML(false)}</details>
     ${DESK ? `<h3>💻 IA EN ESTE EQUIPO</h3>${localAIHTML()}` : ''}
     <h3>INSTRUCCIONES PARA TODAS LAS IAs</h3>
     <textarea id="instructions" rows="3" class="wide-input" placeholder="Ej.: responde solo en español y de forma breve">${esc(S.instructions ?? '')}</textarea>
@@ -2117,7 +2172,7 @@ $('#settings').addEventListener('change', (e) => {
   if (k) { S.councilKeys = e.target.checked ? [...new Set([...S.councilKeys, k])] : S.councilKeys.filter((x) => x !== k); save(); }
 });
 $('#settings').addEventListener('click', async (e) => {
-  if (e.target.id === 'addStarters') { const n = installStarters(); toast(n ? `${n} habilidades añadidas (✦)` : 'Ya las tienes'); }
+  if (e.target.id === 'addStarters') { const n = installStarters([...STARTERS, ...EXTRA_STARTERS]); toast(n ? `${n} habilidades añadidas (✦)` : 'Ya las tienes'); }
   if (e.target.dataset.level) setTimeout(renderSettings, 0);
   if (e.target.id === 'vaultOn') {
     const pin = $('#pinNew').value;

@@ -265,3 +265,13 @@ table.usage td{text-align:right;padding:3px 4px;border-bottom:1px solid var(--li
 table.usage th:first-child,table.usage td:first-child{text-align:left;word-break:break-all}
 table.usage progress{display:block;width:100%;height:4px;accent-color:var(--orange)}
 b.red,span.red{color:var(--red)}
+ol.learn{margin:6px 0 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:5px;font:12px var(--mono)}
+ol.learn li{color:var(--dim)}
+ol.learn li b{color:var(--text)}
+ol.learn li.ok b{color:var(--green)}
+ol.learn li span{display:block;margin-left:16px}
+.learnCard p{margin:6px 0}
+.learnCard details{margin-top:6px}
+.learnSet{margin:6px 0}
+.learnSet summary{cursor:pointer;font:500 11px var(--cond);letter-spacing:.18em;color:var(--orange2)}
+.learnSet h3{display:none}
