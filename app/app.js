@@ -978,7 +978,7 @@ async function send(text, files = [], opt = {}) {
     // 🌐 WEB: se busca antes y los resultados van con la pregunta; la IA debe citar las fuentes.
     if ((S.web || opt.web) && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
     if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
-    else await respond(th, hist, first, signal, needs, skill);
+    else await respond(th, hist, first, signal, needs, skill, { why: routed && routed.key !== S.target ? `🧭 Enrutado por tarea: ${taskName(task)} → ${routed.label}.` : undefined });
   } catch (e) {
     if (e.name !== 'AbortError') msgs.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
   }
@@ -988,7 +988,7 @@ async function send(text, files = [], opt = {}) {
 
 // Prueba las IAs en orden (AUTO-SALTO) hasta que una responda. at: posición donde insertar las respuestas
 // (los lotes responden debajo de cada archivo); noFit: no resumir el hilo si no cabe (cada archivo va solo).
-async function respond(th, hist, first, signal, needs = {}, skill = null, { at = null, noFit = false, purpose } = {}) {
+async function respond(th, hist, first, signal, needs = {}, skill = null, { at = null, noFit = false, purpose, why } = {}) {
   const msgs = th.messages;
   const push = (m) => (at == null ? msgs.push(m) : msgs.splice(at++, 0, m));
   const queue = plan(first, needs);
@@ -1000,16 +1000,22 @@ async function respond(th, hist, first, signal, needs = {}, skill = null, { at =
     push({ id: uid(), role: 'assistant', error: th.private ? 'Este hilo es 🔒 PRIVADO y no hay ninguno de tus equipos conectado (⬡).' : S.freeOnly ? 'Con SOLO GRATIS activado no hay ninguna IA gratuita disponible ahora.' : targets().some(atLimit) && !overBudget() ? 'Las IAs disponibles han llegado al límite diario que pusiste (⚙). Súbelo o espera a mañana.' : 'Has llegado a tu tope de gasto (⚙ → CONSUMO) y no hay ninguna IA gratuita disponible ahora.', ts: Date.now() });
     return false;
   }
-  let attempts = 0, ctxRetried = false;
+  let attempts = 0, ctxRetried = false, lastWhy = null;
+  // Por qué responde esta IA (se ve con ⓘ en la respuesta).
+  const reason = (t) => (lastWhy ? `AUTO-SALTO: ${lastWhy}; esta era la siguiente disponible (por éxito y velocidad).`
+    : t.key === first?.key ? why || 'Es la IA que tienes elegida arriba.'
+    : `La elegida no se podía usar (${!allowed(first) ? notAllowedWhy(first) : atLimit(first) ? 'límite diario' : !capable(first, needs) ? 'no admite imágenes' : 'en pausa'}); esta era la siguiente disponible.`)
+    + (th.private ? ' Hilo 🔒 PRIVADO: solo tus equipos.' : S.freeOnly ? ' SOLO GRATIS activado.' : '');
   for (let qi = 0; qi < queue.length && attempts < MAX_ATTEMPTS; qi++) {
     const t = queue[qi];
     // La elegida está agotada: se avisa y se pasa a la siguiente sin gastar una petición.
     if (S.autoSkip && cooling(t.key) && queue.slice(qi + 1).some((x) => !cooling(x.key))) {
       if (qi === 0) push({ id: uid(), role: 'assistant', label: t.label, error: `⏳ ${coolText(t.key)}`, skipped: true, ts: Date.now() });
+      if (qi === 0) lastWhy = `${t.label} estaba en pausa (${coolText(t.key)})`;
       continue;
     }
     attempts++;
-    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now() };
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, ts: Date.now(), why: reason(t) };
     push(msg); renderLog();
     try { await runTarget(t, hist, msg, signal, S.useTools, skill, purpose); return true; }
     catch (e) {
@@ -1022,6 +1028,7 @@ async function respond(th, hist, first, signal, needs = {}, skill = null, { at =
         continue;
       }
       failMsg(msg, e, t);
+      lastWhy = `${t.label}: ${msg.error}`;
       msg.skipped = S.autoSkip && skippable(e) && qi < queue.length - 1 && attempts < MAX_ATTEMPTS;
       if (!msg.skipped) return false;
     }
@@ -1207,7 +1214,158 @@ async function structurePrompt() {
   btn.disabled = false; btn.classList.remove('busy');
 }
 
-function openTemplates() { toast('Escribe lo que quieres pedir y pulsa ✨ para estructurarlo'); }
+// ---------- ❓ ¿Qué es esto? (glosario en lenguaje llano) ----------
+const GLOSS = {
+  prompt: ['Petición (prompt)', 'Lo que le escribes a la IA. Si dices quién debe ser (rol), qué quieres y para qué, el contexto y el formato, la respuesta mejora muchísimo. ✨ ESTRUCTURAR lo hace por ti.'],
+  modelo: ['Modelo', 'El «cerebro» concreto de una IA (por ejemplo, Gemini Flash o Llama). Un mismo proveedor tiene varios: unos más rápidos, otros más listos.'],
+  proveedor: ['Proveedor', 'La empresa que ofrece la IA por internet (Google, Groq, Mistral…). Te da una clave para usarla.'],
+  clave: ['Clave API', 'Una contraseña que identifica tu cuenta en un proveedor. Neura la guarda solo en tu dispositivo y la envía solo a ese proveedor.'],
+  token: ['Token', 'Un trozo de texto (unas tres cuartas partes de una palabra). Las IAs miden, limitan y cobran por tokens.'],
+  contexto: ['Contexto', 'Lo que la IA «recuerda» de la conversación en cada mensaje. Si el hilo crece demasiado, Neura resume lo antiguo para que siga cabiendo.'],
+  cuota: ['Cuota gratuita', 'El límite de uso gratis de cada proveedor (peticiones o tokens por minuto o por día). Al agotarse, Neura pasa a otra IA.'],
+  autosalto: ['AUTO-SALTO', 'Si la IA elegida falla o agota su cuota, Neura reenvía el mensaje a la siguiente disponible, sin que hagas nada.'],
+  consejo: ['CONSEJO', 'Varias IAs responden a la vez y una combina lo mejor, señalando en qué no están de acuerdo. Útil para lo importante.'],
+  privado: ['🔒 PRIVADO', 'En ese hilo solo responden tus equipos (la IA de tu PC): nada sale a internet.'],
+  local: ['IA local', 'Una IA que funciona en tu ordenador (con Ollama). Gratis, sin límites y privada; algo más lenta y menos lista que las grandes de internet.'],
+  mcp: ['MCP y puente', 'MCP es una forma estándar de conectar apps con IAs y herramientas. El «puente» es el programa de tu PC que Neura usa para hablar con tu IA local y tus archivos.'],
+  habilidad: ['Habilidad', 'Unas instrucciones guardadas para una tarea que repites (resumir actas, tu estilo de correo…). Se aplican con cualquier IA.'],
+  proyecto: ['Proyecto', 'Un grupo de hilos con una memoria común (datos y preferencias) que reciben todas las IAs.'],
+  gratis: ['SOLO GRATIS', 'Neura solo usa IAs del nivel gratuito y las de tu equipo. Nunca una de pago.'],
+  tope: ['Tope de gasto', 'El máximo en euros que quieres gastar al día o al mes en IAs de pago. Al llegar, Neura solo usa las gratuitas.'],
+  web: ['🌐 WEB', 'Neura busca en internet antes de preguntar y la IA responde citando las fuentes, para que se invente menos.'],
+  alucinacion: ['Alucinación', 'Cuando la IA se inventa algo y lo dice con seguridad. Por eso conviene 🔎 COMPROBAR lo importante.'],
+  gateway: ['Gateway', 'Permite que otros programas de tu PC (editores de código, etc.) usen tus IAs de Neura como si fuera un proveedor.'],
+};
+const help = (k) => `<button type="button" class="help" data-help="${k}" aria-label="¿Qué es ${esc(GLOSS[k][0])}?">?</button>`;
+function showHelp(k, anchor) {
+  const pop = $('#helpPop'), [t, d] = GLOSS[k] || ['', k];
+  pop.innerHTML = `<b>${esc(t)}</b><p>${esc(d)}</p><button type="button" class="btn sm ghost" data-helpclose="1">ENTENDIDO</button>`;
+  pop.hidden = false;
+  const rc = anchor?.getBoundingClientRect?.();
+  pop.style.top = rc ? `${Math.min(innerHeight - pop.offsetHeight - 10, rc.bottom + 6)}px` : '30%';
+}
+const glossaryHTML = () => `<details class="glossSet"><summary>📖 GLOSARIO: ¿QUÉ ES CADA COSA?</summary><dl class="gloss">${Object.values(GLOSS).map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join('')}</dl></details>`;
+document.addEventListener('click', (e) => {
+  const k = e.target.dataset?.help;
+  if (k) { e.preventDefault(); e.stopPropagation(); return showHelp(k, e.target); }
+  if (e.target.dataset?.why) { const m = thread().messages.find((x) => x.id === e.target.dataset.why); if (m?.why) { GLOSS._why = ['¿Por qué esta IA?', m.why]; showHelp('_why', e.target); } return; }
+  if (e.target.dataset?.helpclose || !e.target.closest('#helpPop')) $('#helpPop').hidden = true;
+}, true);
+
+// ---------- ✨ Plantillas PRO: formularios que montan una petición de nivel profesional ----------
+// Cada plantilla sigue la estructura que usaría un experto: rol, objetivo, contexto, tarea en pasos, formato y
+// criterios de calidad. Lo que no rellenes queda como [completa: …]. «Guardar como habilidad» guarda el método.
+const TPL = [
+  { id: 'correo', icon: '✉️', name: 'Correo profesional', desc: 'Un correo claro, con el tono adecuado y listo para enviar.',
+    role: 'redactor profesional de comunicación escrita',
+    fields: [['para', 'Para quién es', 'p. ej. mi jefa; un cliente que se queja; un proveedor nuevo', 1], ['objetivo', 'Qué quieres conseguir', 'p. ej. pedir un aplazamiento del pago', 1], ['puntos', 'Puntos que debe incluir', 'datos, fechas, cifras…', 0, 'area'], ['tono', 'Tono', 'formal|cordial|firme|cercano', 0, 'select'], ['largo', 'Extensión', 'breve (5-8 líneas)|media|detallada', 0, 'select']],
+    steps: ['Abre con una frase que deje claro el motivo.', 'Desarrolla los puntos en orden lógico, uno por párrafo corto.', 'Cierra con la petición o el siguiente paso concreto y una despedida adecuada.'],
+    format: 'Asunto en la primera línea, después el correo. Sin explicaciones aparte.', quality: ['Que se entienda el objetivo en la primera lectura.', 'Ni una frase de relleno.', 'Si falta un dato necesario, márcalo como [dato] en vez de inventarlo.'] },
+  { id: 'resumen', icon: '📄', name: 'Resumir un documento', desc: 'Lo esencial de un texto o PDF para quien lo vaya a usar.',
+    role: 'analista experto en síntesis de documentos',
+    fields: [['doc', 'Documento', 'adjúntalo con 📎 o pégalo aquí', 0, 'area'], ['para', 'Para quién es el resumen', 'p. ej. dirección; yo para estudiar', 1], ['enfoque', 'En qué fijarse', 'decisiones, cifras, riesgos, plazos…'], ['largo', 'Extensión', '5 viñetas|una página|un párrafo', 0, 'select']],
+    steps: ['Identifica el propósito del documento.', 'Extrae las ideas clave, las cifras y las decisiones, sin opinar.', 'Señala lo que queda abierto o es ambiguo.'],
+    format: 'Título, «En una frase:», ideas clave en viñetas y «Pendiente / dudas».', quality: ['Fiel al original: nada que no esté en el texto.', 'Cita la página si es un PDF: (pág. N).'] },
+  { id: 'informe', icon: '📊', name: 'Informe ejecutivo', desc: 'Datos y hallazgos convertidos en una página para decidir.',
+    role: 'consultor que redacta informes para dirección',
+    fields: [['tema', 'Tema', 'p. ej. ventas del trimestre', 1], ['datos', 'Datos o hallazgos', 'pega cifras, notas o adjunta un archivo', 1, 'area'], ['para', 'Para quién', 'p. ej. comité de dirección'], ['decision', 'Qué decisión debe facilitar', 'p. ej. ampliar o no el equipo']],
+    steps: ['Empieza por la conclusión y la recomendación.', 'Justifícalas con los datos más relevantes.', 'Indica riesgos, alternativas y próximos pasos.'],
+    format: 'Máximo una página: Resumen (3 líneas), Hallazgos (viñetas con cifras), Recomendación, Riesgos, Próximos pasos.', quality: ['Cada afirmación apoyada en un dato aportado.', 'Si los datos no bastan para recomendar, dilo.'] },
+  { id: 'propuesta', icon: '💼', name: 'Propuesta comercial', desc: 'Una oferta centrada en el problema del cliente.',
+    role: 'consultor comercial experto en propuestas de valor',
+    fields: [['cliente', 'Cliente y su necesidad', 'quién es y qué problema tiene', 1, 'area'], ['solucion', 'Tu producto o servicio', 'qué ofreces', 1], ['precio', 'Precio y condiciones', 'opcional'], ['diferencia', 'Por qué tú', 'experiencia, garantía, plazos…']],
+    steps: ['Resume el problema del cliente con sus palabras.', 'Presenta la solución como respuesta a ese problema.', 'Explica beneficios medibles, inversión y siguiente paso.'],
+    format: 'Secciones: Situación, Propuesta, Beneficios, Inversión y condiciones, Próximos pasos.', quality: ['Hablar de beneficios para el cliente, no de características.', 'No inventar cifras ni casos de éxito.'] },
+  { id: 'acta', icon: '🗓', name: 'Acta y tareas de una reunión', desc: 'De tus notas a acuerdos y tareas con responsable.',
+    role: 'secretario de reuniones meticuloso',
+    fields: [['notas', 'Notas o transcripción', 'pega tus notas o adjúntalas', 1, 'area'], ['quien', 'Asistentes', 'nombres y cargos'], ['fecha', 'Fecha', '']],
+    steps: ['Ordena los temas tratados.', 'Separa decisiones tomadas de temas abiertos.', 'Convierte los compromisos en tareas con responsable y fecha.'],
+    format: 'Acta breve (temas y acuerdos) y una tabla de tareas: Tarea | Responsable | Fecha.', quality: ['Si una tarea no tiene responsable o fecha, márcalo como «sin asignar».', 'Nada que no aparezca en las notas.'] },
+  { id: 'decision', icon: '⚖️', name: 'Analizar una decisión', desc: 'Opciones comparadas con criterio y una recomendación.',
+    role: 'analista de decisiones imparcial',
+    fields: [['decision', 'Qué tienes que decidir', '', 1], ['opciones', 'Opciones', 'una por línea', 1, 'area'], ['criterios', 'Qué te importa más', 'coste, tiempo, riesgo, calidad…'], ['contexto', 'Contexto', 'presupuesto, plazos, situación', 0, 'area']],
+    steps: ['Valora cada opción con cada criterio.', 'Identifica riesgos y lo que habría que comprobar.', 'Recomienda una opción y explica en qué caso cambiaría.'],
+    format: 'Tabla Opción × Criterio, ventajas y riesgos, y recomendación final razonada.', quality: ['Imparcial: señala también los puntos débiles de la recomendada.', 'Distingue hechos de supuestos.'] },
+  { id: 'explicar', icon: '🎓', name: 'Explicar un tema', desc: 'Entender algo a tu nivel, con ejemplos.',
+    role: 'profesor paciente y experto en el tema',
+    fields: [['tema', 'Tema', '', 1], ['nivel', 'Tu nivel', 'principiante|intermedio|avanzado', 0, 'select'], ['para', 'Para qué', 'examen, trabajo, curiosidad…']],
+    steps: ['Explica la idea central en una frase sencilla.', 'Desarrolla por partes, cada una con un ejemplo cotidiano.', 'Termina con un resumen y 3 preguntas para comprobar que se ha entendido.'],
+    format: 'Bloques cortos con subtítulos; sin jerga, o explicada la primera vez.', quality: ['Ajustado al nivel indicado.', 'Si algo es discutido o hay matices, dilo.'] },
+  { id: 'redes', icon: '📣', name: 'Publicación para redes', desc: 'Un post con gancho, adaptado a la red.',
+    role: 'experto en comunicación en redes sociales',
+    fields: [['red', 'Red social', 'LinkedIn|Instagram|X / Twitter|Facebook|TikTok (guion)', 1, 'select'], ['tema', 'De qué va', '', 1], ['publico', 'Para quién', ''], ['objetivo', 'Qué quieres que hagan', 'comentar, visitar la web, apuntarse…']],
+    steps: ['Empieza con un gancho que pare el scroll.', 'Aporta valor en pocas líneas, con el estilo propio de la red.', 'Cierra con una llamada a la acción clara.'],
+    format: 'El texto listo para publicar y, aparte, 3 variantes del gancho y hashtags si la red los usa.', quality: ['Longitud adecuada a la red.', 'Sin promesas exageradas ni datos inventados.'] },
+  { id: 'plan', icon: '🧭', name: 'Plan de proyecto', desc: 'Fases, hitos y riesgos para llevar algo a cabo.',
+    role: 'jefe de proyecto con experiencia',
+    fields: [['objetivo', 'Objetivo', 'qué debe estar hecho al final', 1], ['plazo', 'Plazo', ''], ['recursos', 'Recursos', 'personas, presupuesto, herramientas'], ['limites', 'Restricciones', 'lo que no se puede cambiar', 0, 'area']],
+    steps: ['Divide el proyecto en fases con entregables.', 'Pon hitos con fecha y dependencias.', 'Identifica riesgos y cómo mitigarlos.'],
+    format: 'Tabla Fase | Entregable | Fecha | Responsable, y una lista de riesgos con su mitigación.', quality: ['Realista con el plazo y los recursos dados.', 'Si el plazo no es viable, dilo y propone alternativas.'] },
+  { id: 'revisar', icon: '🔍', name: 'Revisar un texto', desc: 'Corrección y mejora explicada de cualquier texto.',
+    role: 'editor profesional',
+    fields: [['texto', 'Texto', 'pégalo aquí', 1, 'area'], ['tipo', 'Qué es', 'correo, trabajo, web, CV…'], ['mejorar', 'Qué mejorar', 'ortografía|claridad|tono|persuasión|todo', 0, 'select']],
+    steps: ['Corrige errores de ortografía y gramática.', 'Mejora claridad y orden sin cambiar el significado.', 'Explica los cambios importantes.'],
+    format: 'Versión corregida completa y después una lista breve de cambios y por qué.', quality: ['Respetar la voz del autor.', 'No añadir información nueva.'] },
+  { id: 'codigo', icon: '💻', name: 'Revisar código', desc: 'Errores, riesgos y mejoras con el código corregido.',
+    role: 'programador sénior que hace revisiones de código',
+    fields: [['codigo', 'Código', 'pégalo o adjúntalo', 1, 'area'], ['lenguaje', 'Lenguaje / entorno', ''], ['buscar', 'Qué revisar', 'errores|seguridad|rendimiento|legibilidad|todo', 0, 'select']],
+    steps: ['Explica brevemente qué hace el código.', 'Lista los problemas por gravedad, con la línea afectada.', 'Propón la corrección mínima para cada uno.'],
+    format: 'Lista de hallazgos (gravedad, línea, problema, arreglo) y el código corregido.', quality: ['No inventar APIs ni funciones.', 'Si algo depende de código que no se ve, dilo.'] },
+  { id: 'traducir', icon: '🌍', name: 'Traducción profesional', desc: 'Traducción natural, no literal, con el registro adecuado.',
+    role: 'traductor profesional nativo del idioma de destino',
+    fields: [['texto', 'Texto', '', 1, 'area'], ['idioma', 'A qué idioma', 'inglés|español|francés|alemán|italiano|portugués|chino|ruso', 1, 'select'], ['registro', 'Contexto y registro', 'p. ej. web de una empresa, formal']],
+    steps: ['Traduce el sentido, no palabra por palabra.', 'Adapta expresiones y unidades al idioma de destino.', 'Señala lo que no tenga traducción exacta.'],
+    format: 'La traducción y, aparte, notas solo si hay ambigüedades.', quality: ['Que suene escrito por un nativo.', 'Mantener nombres propios, cifras y formato.'] },
+];
+function tplPrompt(t, v) {
+  const val = (k) => (v[k] || '').trim();
+  const hole = (f) => `[completa: ${f[1].toLowerCase()}]`;
+  const ctx = t.fields.map((f) => (val(f[0]) ? `- ${f[1]}: ${val(f[0])}` : f[3] ? `- ${f[1]}: ${hole(f)}` : '')).filter(Boolean);
+  return `**Rol:** Actúa como ${t.role}.
+**Objetivo:** ${t.name}${val('objetivo') ? `: ${val('objetivo')}` : ''}.
+**Contexto:**
+${ctx.join('\n')}
+**Tarea:**
+${t.steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}
+**Formato de la respuesta:** ${t.format}
+**Criterios de calidad:**
+${t.quality.map((x) => `- ${x}`).join('\n')}
+- Si te falta información importante, pregúntala antes de responder.`;
+}
+const tplSkill = (t) => `# ${t.name}\n\nActúa como ${t.role}.\n\n## Pasos\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n## Formato\n${t.format}\n\n## Calidad\n${t.quality.map((x) => `- ${x}`).join('\n')}\n- Si falta información importante, pregúntala antes de responder.`;
+let tplOpen = null;
+function renderTemplates() {
+  const t = TPL.find((x) => x.id === tplOpen), typed = input.value.trim();
+  $('#tplBody').innerHTML = t ? `<div class="card tplForm">
+      <div class="head"><b class="srv">${t.icon} ${esc(t.name)}</b><button type="button" class="btn sm ghost" data-tpl="back">← PLANTILLAS</button></div>
+      <p class="hint">${esc(t.desc)} Lo que dejes vacío quedará como hueco para rellenar.</p>
+      ${t.fields.map(([k, label, ph, req, type]) => `<label>${esc(label)}${req ? ' *' : ''}${type === 'select'
+        ? `<select data-f="${k}"><option value="">—</option>${ph.split('|').map((o) => `<option>${esc(o)}</option>`).join('')}</select>`
+        : type === 'area' ? `<textarea data-f="${k}" rows="3" placeholder="${esc(ph)}"></textarea>` : `<input data-f="${k}" placeholder="${esc(ph)}">`}</label>`).join('')}
+      <div class="row wrap"><button type="button" class="btn" data-tpl="make">CREAR PETICIÓN</button><button type="button" class="btn sm ghost" data-tpl="skill" title="Guarda el método (sin tus datos) para reutilizarlo con cualquier texto">✦ GUARDAR COMO HABILIDAD</button></div>
+    </div>` : `${typed ? `<div class="card"><b>✨ ¿Mejorar lo que ya escribiste?</b><p class="hint">«${esc(typed.slice(0, 120))}${typed.length > 120 ? '…' : ''}»</p><button type="button" class="btn" data-tpl="struct">✨ ESTRUCTURAR MI PETICIÓN</button></div>` : ''}
+    <p class="hint">Elige qué quieres hacer: rellenas unos campos y Neura monta una petición como la escribiría un experto (rol, objetivo, contexto, pasos, formato y criterios de calidad).</p>
+    <div class="tplGrid">${TPL.map((x) => `<button type="button" class="tpl" data-tpl="${x.id}"><span>${x.icon}</span><b>${esc(x.name)}</b><small>${esc(x.desc)}</small></button>`).join('')}</div>`;
+}
+function openTemplates(id = null) { tplOpen = id; renderTemplates(); openSheet('#sheetTpl'); }
+$('#sheetTpl').addEventListener('click', (e) => {
+  const a = e.target.closest('[data-tpl]')?.dataset.tpl; if (!a) return;
+  if (a === 'back') { tplOpen = null; return renderTemplates(); }
+  if (a === 'struct') { closeSheets(); return structurePrompt(); }
+  const t = TPL.find((x) => x.id === tplOpen);
+  if (a === 'make' || a === 'skill') {
+    const v = Object.fromEntries([...document.querySelectorAll('#tplBody [data-f]')].map((x) => [x.dataset.f, x.value]));
+    if (a === 'skill') {
+      if (liveSkills().some((k) => k.name === t.name)) return toast('Ya tienes esa habilidad (✦)');
+      S.skills.push({ id: uid() + uid(), name: t.name, description: `${t.desc} Usar para: ${t.name.toLowerCase()}.`, instructions: tplSkill(t), version: 1, updatedAt: Date.now() });
+      save(); syncAll(); return toast(`✦ Habilidad «${t.name}» guardada: actívala en ✦ HABILIDADES`);
+    }
+    input.value = tplPrompt(t, v); input.dispatchEvent(new Event('input'));
+    structUndo = null; closeSheets(); input.focus();
+    return toast('✨ Petición lista: revísala, completa los huecos y pulsa ENVIAR');
+  }
+  tplOpen = a; renderTemplates();
+});
 
 // ---------- búsqueda en internet con fuentes ----------
 // Buscador propio (⚙): SearXNG (gratis; en tu PC, privado) o Brave Search (clave gratuita). Si no hay, el del PC
@@ -1261,7 +1419,7 @@ async function withSearch(th, userMsg, hist, signal) {
 }
 function searchSettingsHTML() {
   const c = S.search || {};
-  return `<h3>🌐 BÚSQUEDA EN INTERNET</h3>
+  return `<h3>🌐 BÚSQUEDA EN INTERNET ${help('web')}</h3>
     <p class="hint">Con 🌐 WEB activado en la barra, Neura busca en internet antes de preguntar y la IA responde citando las fuentes [1], [2]… Así se inventa menos.</p>
     <label class="field">BUSCADOR<select id="searchType">
       <option value="" ${!c.type ? 'selected' : ''}>— ninguno${S.mcp.some((s) => s.search) ? ' (usar el de mi PC por ⬡)' : ''} —</option>
@@ -1428,7 +1586,7 @@ async function sendCouncil(th, hist, first, signal, needs = {}, skill = null) {
   const group = uid();
   const members = councilMembers(first, needs);
   const runs = members.map((t) => {
-    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, ts: Date.now() };
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, ts: Date.now(), why: '⚖ CONSEJO: varias IAs de proveedores distintos responden a la vez.' };
     th.messages.push(msg);
     return { t, msg };
   });
@@ -1479,7 +1637,8 @@ function replyHTML(m) {
     : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-check="${m.id}" title="Revisa esta respuesta: qué es dudoso y cómo verificarlo (con fuentes de internet si tienes buscador)">🔎 COMPROBAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
   const skill = m.skill ? `<span class="chip skill">✦ ${esc(m.skill.name)} · v${m.skill.v}</span>` : '';
   const files = m.files?.length ? `<div class="files gen">${filesHTML(m)}</div>` : '';
-  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${skill}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
+  const whyBtn = m.why && !m.pending ? `<button type="button" class="whyb" data-why="${m.id}" aria-label="¿Por qué esta IA?" title="¿Por qué esta IA?">ⓘ</button>` : '';
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${esc(m.label)} ${whyBtn}${skill}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
 }
 function sourcesHTML(m) {
   if (m.searchError) return `<div class="sources off">🌐 Sin búsqueda: ${esc(m.searchError)}</div>`;
@@ -1547,6 +1706,7 @@ function renderLog() {
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
       <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
       ${S.providers.length || S.wizardDone ? '' : wizardHTML()}
+      ${n ? `<div class="quick"><b>✨ ¿QUÉ QUIERES HACER?</b><div class="tplGrid mini">${TPL.slice(0, 6).map((x) => `<button type="button" class="tpl" data-tplq="${x.id}"><span>${x.icon}</span><b>${esc(x.name)}</b></button>`).join('')}<button type="button" class="tpl" data-tplq=""><span>➕</span><b>Más plantillas</b></button></div></div>` : ''}
       ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>${targets().length ? learnHTML(true) : ''}` : ''}
       <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
       <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
@@ -1886,9 +2046,9 @@ function renderProviders() {
         <button class="btn sm ghost" data-act="toggle">${p.enabled === false ? 'ACTIVAR' : 'PAUSAR'}</button>
         <button class="btn sm red" data-act="del">✕</button></div>
       <label>ENDPOINT<input data-f="baseUrl" value="${esc(p.baseUrl)}" placeholder="https://…/v1"></label>
-      <label>CLAVE API<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
+      <label>CLAVE API ${help('clave')}<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
       ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
-      <label>MODELOS (separados por coma)<input data-f="models" value="${esc(p.models.join(', '))}"></label>
+      <label>MODELOS (separados por coma) ${help('modelo')}<input data-f="models" value="${esc(p.models.join(', '))}"></label>
       <div class="row2">
         <label>LÍMITE DIARIO (peticiones)<input data-f="dailyLimit" type="number" min="0" step="1" inputmode="numeric" value="${esc(p.dailyLimit || '')}" placeholder="sin límite"></label>
         ${p.tier === 'free' ? '' : `<label>€ / 1M TOKENS ENTRADA<input data-f="priceIn" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.price?.in ?? '')}" placeholder="?"></label>
@@ -1922,7 +2082,7 @@ function usageHTML() {
   const gw = gwUse, gwRows = gw ? Object.entries(gw.today || {}).map(([id, u]) => `<tr><td>${esc(id)}</td><td>${u.n + (u.err || 0)}</td><td>${fmtTok(u.in + u.out)}</td><td>${eur(u.eur)}</td><td>${eur(gw.month?.[id]?.eur || 0)}</td></tr>`).join('') : '';
   const unpriced = S.providers.filter((p) => p.enabled !== false && p.tier !== 'free' && !priced(p) && !S.freeOnly);
   const head = '<thead><tr><th>IA</th><th>HOY</th><th>TOKENS</th><th>€ HOY</th><th>€ MES</th></tr></thead>';
-  return `<h3>📊 CONSUMO</h3>
+  return `<h3>📊 CONSUMO ${help('token')}</h3>
     <p class="hint" id="usageSum">${usageSumHTML()}</p>
     ${rows ? `<table class="usage">${head}<tbody>${rows}</tbody></table>` : '<p class="hint">Aún no has usado ninguna IA hoy.</p>'}
     ${gwRows ? `<h4>🔌 POR EL GATEWAY (otras herramientas)</h4><table class="usage">${head}<tbody>${gwRows}</tbody></table>${gw.cache?.hits ? `<p class="hint">Caché: ${gw.cache.hits} respuestas repetidas servidas sin llamar a ninguna IA.</p>` : ''}` : ''}
@@ -2006,13 +2166,14 @@ function renderSettings() {
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
-    <label class="auto"><input type="checkbox" id="tipsOn" ${S.tipsOff ? '' : 'checked'}> CONSEJOS MIENTRAS ESCRIBES</label>
+    <label class="auto"><input type="checkbox" id="tipsOn" ${S.tipsOff ? '' : 'checked'}> CONSEJOS MIENTRAS ESCRIBES ${help('prompt')}</label>
+    ${glossaryHTML()}
     <details class="learnSet"><summary>🎓 RUTA DE APRENDIZAJE · ${learnState().filter((x) => x.ok).length}/${LEARN.length}</summary>${learnHTML(false)}</details>
     ${DESK ? `<h3>💻 IA EN ESTE EQUIPO</h3>${localAIHTML()}` : ''}
-    <h3>INSTRUCCIONES PARA TODAS LAS IAs</h3>
+    <h3>INSTRUCCIONES PARA TODAS LAS IAs ${help('prompt')}</h3>
     <textarea id="instructions" rows="3" class="wide-input" placeholder="Ej.: responde solo en español y de forma breve">${esc(S.instructions ?? '')}</textarea>
     <p class="hint">Se envían a todas las IAs en cada mensaje (idioma, tono, longitud…). Déjalo vacío para no enviar nada.</p>
-    <h3>GASTO</h3>
+    <h3>GASTO ${help('gratis')}</h3>
     <label class="auto"><input type="checkbox" id="freeOnly" ${S.freeOnly ? 'checked' : ''}> SOLO GRATIS</label>
     <p class="hint">Neura solo usará IAs del nivel gratuito (en OpenRouter, modelos <b>:free</b>) y tus equipos. Las de pago o de coste desconocido (⛔) no se usan ni en AUTO-SALTO, ni en CONSEJO, ni para resumir.</p>
     <div id="usagePanel">${usageHTML()}</div>
@@ -2023,15 +2184,15 @@ function renderSettings() {
     <h3>🛡 DATOS SENSIBLES</h3>
     <label class="auto"><input type="checkbox" id="guardOn" ${S.guard !== false ? 'checked' : ''}> AVISAR ANTES DE ENVIARLOS A INTERNET</label>
     <p class="hint">DNI/NIE, IBAN, tarjetas, teléfonos, correos, contraseñas y claves API. Se detectan en tu dispositivo, sin IA, y puedes ocultarlos, mandarlos solo a tu IA local o enviarlos igualmente.</p>
-    <h3>MEMORIA DE CONTEXTO</h3>
+    <h3>MEMORIA DE CONTEXTO ${help('contexto')}</h3>
     <label class="field">TOKENS MÁXIMOS POR MENSAJE<input type="number" id="ctxTokens" min="1000" step="500" value="${S.ctxTokens}"></label>
     <p class="hint">Si un hilo pasa de este tamaño, Neura resume lo antiguo (con tu IA local si la tienes) y envía el resumen más lo reciente. Así las IAs gratuitas, con poco contexto, siguen respondiendo.</p>
     ${searchSettingsHTML()}
     ${S.level === 'basic' ? '' : routingHTML()}
-    <h3>⚖ CONSEJO</h3>
+    <h3>⚖ CONSEJO ${help('consejo')}</h3>
     <p class="hint">Elige qué IAs forman el consejo (2 a 5). Si no eliges, Neura usa las 3 mejores de proveedores distintos.</p>
     <div class="checks">${all.map((t) => `<label class="auto"><input type="checkbox" data-council="${esc(t.key)}" ${S.councilKeys.includes(t.key) ? 'checked' : ''}> ${esc(t.label)}</label>`).join('') || '<span class="hint">Añade IAs primero.</span>'}</div>
-    <h3>SEGURIDAD DE LAS CLAVES</h3>
+    <h3>SEGURIDAD DE LAS CLAVES ${help('clave')}</h3>
     ${sec ? `<p class="hint">🔒 En este PC las claves se guardan cifradas con el llavero del sistema (${esc(sec)}).</p>` : ''}
     ${!crypto.subtle ? '<p class="hint">El PIN necesita una conexión segura (https o la app instalada).</p>'
       : S.vault ? `<p class="hint">🔒 Claves cifradas con PIN${vault.locked ? ' · <b>BLOQUEADAS</b>' : ''}.</p>
@@ -2891,7 +3052,7 @@ $('#composer').onsubmit = (e) => {
   send(text, files, opt);
 };
 $('#attachBtn').onclick = () => $('#fileIn').click();
-$('#structBtn').onclick = () => (input.value.trim() ? structurePrompt() : openTemplates());
+$('#structBtn').onclick = () => openTemplates();
 $('#fileIn').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
 $('#attachBar').addEventListener('click', (e) => { const i = e.target.dataset.unattach; if (i != null) { attach.splice(+i, 1); renderAttach(); } });
 $('#mic').hidden = !(SR || (navigator.mediaDevices?.getUserMedia && window.MediaRecorder));
@@ -2901,6 +3062,7 @@ $('#app').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransf
 $('#log').addEventListener('click', (e) => {
   const { copy, speak: sp, skillify } = e.target.dataset || {};
   if (e.target.id === 'batchGo') return runBatch();
+  const tq = e.target.closest('[data-tplq]'); if (tq) return openTemplates(tq.dataset.tplq || null);
   if (e.target.dataset?.vote) return vote(e.target.dataset.vote);
   if (e.target.dataset?.check) return checkReply(e.target.dataset.check);
   if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(t); }

@@ -56,7 +56,7 @@ const lastQ = () => { const x = mocks.log.filter((l) => l.model).at(-1); return 
   await w.fill('#input', 'qué tiempo hace hoy'); await w.waitForTimeout(500);
   await w.click('#btnThreads'); await w.click('#newThread');
   await w.fill('#input', 'qué tiempo hace hoy en Madrid'); await w.waitForTimeout(500);
-  ok(!!(await w.$('#skillHint[hidden]')), 'un mensaje que no encaja no sugiere nada');
+  ok(!/Usar la habilidad/.test(await w.textContent('#skillHint')), 'un mensaje que no encaja no sugiere ninguna habilidad');
   await w.fill('#input', '');
 
   // Capacidades

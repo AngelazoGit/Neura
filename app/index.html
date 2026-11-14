@@ -110,6 +110,13 @@
   </div>
 </section>
 
+<section class="sheet" id="sheetTpl" aria-hidden="true">
+  <div class="sheet-in">
+    <header><h2>PLANTILLAS <em>// PRO</em></h2><button class="ico close">✕</button></header>
+    <div id="tplBody"></div>
+  </div>
+</section>
+
 <section class="sheet" id="sheetAis" aria-hidden="true">
   <div class="sheet-in">
     <header><h2>IAs <em>// PÚBLICAS</em></h2><button class="ico close">✕</button></header>
@@ -160,6 +167,7 @@ NEURA_TOKEN=mi-secreto node server.mjs</pre>
 </div>
 
 <input type="file" id="batchFile" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
+<div id="helpPop" class="card" role="dialog" hidden></div>
 <div id="toast" role="status"></div>
 <script src="md.js"></script>
 <script src="app.js"></script>

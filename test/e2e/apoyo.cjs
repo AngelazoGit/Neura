@@ -75,7 +75,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await w.click('[data-assist=undo]');
   ok(await w.inputValue('#input') === 'escribe un correo', 'DESHACER recupera lo que habías escrito');
   await w.fill('#input', 'escribe un correo con mi DNI 12345678Z');
-  await w.click('#structBtn');
+  await w.click('#structBtn'); await w.click('[data-tpl=struct]');
   ok(/Quita los datos sensibles/.test(await w.textContent('#toast')) && mocks.log.length === before + 1, 'no estructura (no envía a la IA) si hay datos sensibles');
   await w.fill('#input', 'Redacta un correo formal para mi jefe en 5 líneas pidiendo vacaciones');
   await w.waitForTimeout(500);
@@ -90,6 +90,57 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   ok(/Sin búsqueda:/.test(await w.textContent('#log')), '…y ese mensaje intenta buscar (aquí el buscador está apagado y se avisa)');
   ok(!(await w.evaluate(() => S.web)), 'solo ese mensaje: 🌐 WEB no queda activado');
   await w.evaluate(() => { S.search = {}; renderTargets(); });
+
+  // ---- 6. ¿Qué es esto? ----
+  await w.click('#btnAis');
+  await w.click('#settings h3 [data-help=contexto]');
+  ok(/Contexto/.test(await w.textContent('#helpPop')) && /recuerda/.test(await w.textContent('#helpPop')) && await w.isVisible('#helpPop'), '«?» junto a cada apartado explica el término en lenguaje llano');
+  await w.click('[data-helpclose]');
+  ok(await w.isHidden('#helpPop'), 'ENTENDIDO lo cierra');
+  ok(/GLOSARIO/.test(await w.textContent('#settings')) && (await w.$$('dl.gloss dt')).length >= 15, '⚙ incluye un glosario completo');
+  const tipsBox = await w.isChecked('#tipsOn');
+  await w.click('label:has(#tipsOn) [data-help]');
+  ok(await w.isChecked('#tipsOn') === tipsBox, 'pulsar «?» dentro de una opción no la cambia');
+  await w.click('[data-helpclose]');
+  await w.keyboard.press('Escape');
+
+  // ---- 7. ¿Por qué esta IA? ----
+  await w.evaluate(() => { S.active = null; S.target = 'm::cuota'; save(); renderLog(); renderTargets(); });
+  await sendMsg('Hola, prueba de motivo');
+  const whyIds = await w.$$eval('[data-why]', (b) => b.map((x) => x.dataset.why));
+  await w.click(`[data-why="${whyIds.at(-1)}"]`);
+  const why = await w.textContent('#helpPop');
+  ok(/AUTO-SALTO/.test(why) && /Cuota gratuita agotada/.test(why), 'ⓘ en la respuesta explica por qué contestó esa IA (aquí: la elegida agotó su cuota) · ' + why.replace(/\s+/g, ' ').slice(0, 120));
+  await w.click('[data-helpclose]');
+  await w.evaluate(() => { S.target = 'm::rapido'; S.health = {}; S.active = null; save(); renderLog(); renderTargets(); });
+  await sendMsg('Otra prueba');
+  await w.click(`[data-why="${(await w.$$eval('[data-why]', (b) => b.map((x) => x.dataset.why))).at(-1)}"]`);
+  ok(/Es la IA que tienes elegida arriba/.test(await w.textContent('#helpPop')), '…o que es la que tienes elegida');
+  await w.click('[data-helpclose]');
+
+  // ---- 8. Plantillas PRO ----
+  await w.evaluate(() => { S.active = null; save(); renderLog(); });
+  ok((await w.$$('.quick [data-tplq]')).length === 7, 'la pantalla inicial ofrece atajos a las plantillas («¿Qué quieres hacer?»)');
+  await w.click('.quick [data-tplq=correo]');
+  await w.fill('#tplBody [data-f=para]', 'un cliente que se queja del retraso');
+  await w.fill('#tplBody [data-f=objetivo]', 'disculparnos y proponer una nueva fecha');
+  await w.selectOption('#tplBody [data-f=tono]', 'cordial');
+  await w.click('[data-tpl=make]');
+  const pr = await w.inputValue('#input');
+  ok(/\*\*Rol:\*\* Actúa como redactor profesional/.test(pr) && /Para quién es: un cliente que se queja/.test(pr) && /Tono: cordial/.test(pr) && /\*\*Criterios de calidad:\*\*/.test(pr) && /pregúntala antes de responder/.test(pr),
+    'el formulario monta una petición profesional (rol, objetivo, contexto, pasos, formato y criterios)');
+  ok(!/\[completa:/.test(pr), 'con los campos obligatorios rellenos no quedan huecos');
+  await w.fill('#input', '');
+  await w.click('#structBtn');
+  await w.click('[data-tpl=acta]'); await w.click('[data-tpl=make]');
+  ok(/Notas o transcripción: \[completa: notas o transcripción\]/.test(await w.inputValue('#input')), 'un campo obligatorio vacío queda como hueco [completa: …]');
+  await w.click('#structBtn'); await w.click('[data-tpl=decision]'); await w.click('[data-tpl=skill]');
+  ok(await w.evaluate(() => liveSkills().some((k) => k.name === 'Analizar una decisión' && /Actúa como analista de decisiones/.test(k.instructions))), '✦ GUARDAR COMO HABILIDAD guarda el método para reutilizarlo');
+  await w.keyboard.press('Escape');
+  await w.fill('#input', 'quiero un post sobre mi tienda');
+  await w.click('#structBtn');
+  ok(/ESTRUCTURAR MI PETICIÓN/.test(await w.textContent('#tplBody')), 'si ya escribiste algo, ✨ ofrece estructurarlo');
+  await w.keyboard.press('Escape');
 
   await app.close();
   console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
