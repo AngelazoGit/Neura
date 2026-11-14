@@ -18,13 +18,15 @@ const add = (t) => {
   out.add(t);
 };
 const fromMarkup = (s) => {
+  // Trozos de plantilla que empiezan dentro de una etiqueta (\`">TEXTO\`, \`checked> TEXTO\`) o acaban en una a medias.
+  s = s.replace(/^[^<>]*>/, '').replace(/<[^>]*$/, '');
   for (const m of s.matchAll(/(?:placeholder|title|aria-label)="([^"]*)"/g)) add(m[1]);
   for (const part of s.replace(/<[^>]*>/g, '\u0000').split('\u0000')) add(part);
 };
 fromMarkup(html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/g, ''));
 // Recorre el árbol del código: literales de texto y partes fijas de las plantillas `…${}…`.
 // Se omiten las expresiones regulares y los argumentos de selectores, clases y almacenamiento.
-const skipCallee = new Set(['querySelector', 'querySelectorAll', '$', 'getElementById', 'closest', 'getItem', 'setItem', 'toggle', 'contains', 'add', 'remove', 'addEventListener', 'matchMedia', 'createElement', 'getAttribute', 'setAttribute', 'open', 'get', 'require', 'fetch', 'xfetch', 'mcpRpc', 'W', 'startsWith', 'endsWith', 'includes', 'split', 'join', 'padStart', 'replace', 'match', 'test', 'decode', 'encode']);
+const skipCallee = new Set(['querySelector', 'querySelectorAll', '$', 'getElementById', 'closest', 'getItem', 'setItem', 'toggle', 'contains', 'add', 'remove', 'addEventListener', 'matchMedia', 'createElement', 'getAttribute', 'setAttribute', 'open', 'get', 'require', 'fetch', 'xfetch', 'mcpRpc', 'W', 'startsWith', 'endsWith', 'includes', 'split', 'join', 'padStart', 'replace', 'match', 'test', 'decode', 'encode', 'matches']);
 function walk(n, parent) {
   if (!n || typeof n.type !== 'string') return;
   const calleeName = parent?.type === 'CallExpression' && (parent.callee.property?.name || parent.callee.name);

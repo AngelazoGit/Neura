@@ -342,3 +342,4 @@ dl.gloss dd{margin:0 0 0 0;color:var(--dim)}
   .empty .biglogo{width:64px;height:74px}
   .empty .big{font-size:44px}
 }
+#input::placeholder{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

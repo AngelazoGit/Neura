@@ -101,12 +101,15 @@ function trNode(n) {
     const v = tr(n.nodeValue);
     if (v !== n.nodeValue) n.nodeValue = v;
     done18.set(n, v);
-  } else if (n.nodeType === 1 && !n.closest(NO_TR)) {
+  } else if (n.nodeType === 1) {
+    // Las cajas de texto conservan lo que escribes, pero su ayuda (placeholder, title) sí se traduce.
+    const skip = n.closest(NO_TR);
+    if (skip && !n.matches('input, textarea, select')) return;
     for (const at of ['placeholder', 'title', 'aria-label']) {
       const v0 = n.getAttribute(at);
       if (v0) { const v = tr(v0); if (v !== v0) n.setAttribute(at, v); }
     }
-    for (const c of n.childNodes) trNode(c);
+    if (!skip) for (const c of n.childNodes) trNode(c);
   }
 }
 if (DICT) {
@@ -114,7 +117,7 @@ if (DICT) {
     for (const m of ms) {
       if (m.type === 'childList') m.addedNodes.forEach(trNode);
       else if (m.type === 'characterData') trNode(m.target);
-      else if (!m.target.closest?.(NO_TR)) { const v0 = m.target.getAttribute(m.attributeName), v = tr(v0); if (v !== v0) m.target.setAttribute(m.attributeName, v); }
+      else if (!m.target.closest?.(NO_TR) || m.target.matches?.('input, textarea, select')) { const v0 = m.target.getAttribute(m.attributeName), v = tr(v0); if (v !== v0) m.target.setAttribute(m.attributeName, v); }
     }
   }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['placeholder', 'title', 'aria-label'] });
   trNode(document.body);
