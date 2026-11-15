@@ -116,6 +116,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await sendMsg('Otra prueba');
   await w.click(`[data-why="${(await w.$$eval('[data-why]', (b) => b.map((x) => x.dataset.why))).at(-1)}"]`);
   ok(/Es la IA que tienes elegida arriba/.test(await w.textContent('#helpPop')), '…o que es la que tienes elegida');
+  ok(!(await w.evaluate(() => glossaryHTML().includes('Por qué esta IA'))), 'ⓘ no deja rastro en el glosario');
   await w.click('[data-helpclose]');
 
   // ---- 8. Plantillas PRO ----

@@ -122,6 +122,7 @@ if (DICT) {
   }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['placeholder', 'title', 'aria-label'] });
   trNode(document.body);
 }
+const confirm = (m) => window.confirm(tr(m));
 const langSelect = (id) => `<select id="${id}" class="langSel" aria-label="Idioma / Language" data-noi18n>${Object.entries(LANGS).map(([k, v]) => `<option value="${k}" ${k === LANG ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
 function setLang(l) {
   if (!LANGS[l] || l === LANG) return;
@@ -395,7 +396,6 @@ function audit(what, to, host, local, files = []) {
   list.push({ ts: Date.now(), what, to, host, local: !!local, ...(files.length ? { files } : {}) });
   if (list.length > 500) list.splice(0, list.length - 500);
 }
-const auditLog = audit;
 // Adjuntos que van en una petición: los nombres que Neura pone en el texto y las imágenes.
 function filesIn(messages) {
   const names = new Set();
@@ -1314,8 +1314,8 @@ const GLOSS = {
   gateway: ['Gateway', 'Permite que otros programas de tu PC (editores de código, etc.) usen tus IAs de Neura como si fuera un proveedor.'],
 };
 const help = (k) => `<button type="button" class="help" data-help="${k}" aria-label="¿Qué es ${esc(GLOSS[k][0])}?">?</button>`;
-function showHelp(k, anchor) {
-  const pop = $('#helpPop'), [t, d] = GLOSS[k] || ['', k];
+function showHelp(k, anchor, entry = GLOSS[k] || ['', k]) {
+  const pop = $('#helpPop'), [t, d] = entry;
   pop.innerHTML = `<b>${esc(t)}</b><p>${esc(d)}</p><button type="button" class="btn sm ghost" data-helpclose="1">ENTENDIDO</button>`;
   pop.hidden = false;
   const rc = anchor?.getBoundingClientRect?.();
@@ -1325,7 +1325,7 @@ const glossaryHTML = () => `<details class="glossSet"><summary>📖 GLOSARIO: ¿
 document.addEventListener('click', (e) => {
   const k = e.target.dataset?.help;
   if (k) { e.preventDefault(); e.stopPropagation(); return showHelp(k, e.target); }
-  if (e.target.dataset?.why) { const m = thread().messages.find((x) => x.id === e.target.dataset.why); if (m?.why) { GLOSS._why = ['¿Por qué esta IA?', m.why]; showHelp('_why', e.target); } return; }
+  if (e.target.dataset?.why) { const m = thread().messages.find((x) => x.id === e.target.dataset.why); if (m?.why) showHelp(null, e.target, ['¿Por qué esta IA?', m.why]); return; }
   if (e.target.dataset?.helpclose || !e.target.closest('#helpPop')) $('#helpPop').hidden = true;
 }, true);
 
@@ -1458,23 +1458,23 @@ async function webSearch(q, th, signal) {
   return (await webSearchRaw(q, th, signal)).filter((x) => /^https?:\/\//.test(x.url || ''));
 }
 async function webSearchRaw(q, th, signal) {
-  const audit = th.test ? () => {} : auditLog; // PROBAR BÚSQUEDA no es un dato del hilo
+  const log = th.test ? () => {} : audit; // PROBAR BÚSQUEDA no es un dato del hilo
   if (ownSearchOk(th)) {
     const c = S.search;
     if (c.type === 'searxng') {
       const u = `${c.url.replace(/\/+$/, '')}/search?format=json&language=es&q=${encodeURIComponent(q)}`;
-      audit(`búsqueda: «${q.slice(0, 80)}»`, `SearXNG → ${tr('buscadores de internet')}`, hostOf(c.url), false);
+      log(`búsqueda: «${q.slice(0, 80)}»`, `SearXNG → ${tr('buscadores de internet')}`, hostOf(c.url), false);
       const r = await xfetch(u, { signal, headers: { Accept: 'application/json' } });
       if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
       return ((await r.json()).results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.content || '') }));
     }
-    audit(`búsqueda: «${q.slice(0, 80)}»`, 'Brave Search', 'api.search.brave.com', false);
+    log(`búsqueda: «${q.slice(0, 80)}»`, 'Brave Search', 'api.search.brave.com', false);
     const r = await xfetch(`https://api.search.brave.com/res/v1/web/search?count=6&q=${encodeURIComponent(q)}`, { signal, headers: { Accept: 'application/json', 'X-Subscription-Token': c.key } });
     if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
     return ((await r.json()).web?.results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.description || '') }));
   }
   const s = searchServer(th);
-  audit(`búsqueda: «${q.slice(0, 80)}»`, `⬡ ${s.name} → ${s.search}`, hostOf(s.url), false);
+  log(`búsqueda: «${q.slice(0, 80)}»`, `⬡ ${s.name} → ${s.search}`, hostOf(s.url), false);
   const r = await mcpRpc(s, 'tools/call', { name: 'web_search', arguments: { query: q } }, { signal });
   if (r.isError) throw new Error((r.content || []).map((c) => c.text).join(' ').replace(/^Error:\s*/, ''));
   return (r.structuredContent?.results || []).slice(0, 6).map((x) => ({ title: cleanSnippet(x.title), url: x.url, snippet: cleanSnippet(x.snippet || '') }));
@@ -3166,7 +3166,7 @@ $('#composer').onsubmit = (e) => {
   if (!text && !attach.length) return;
   if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
   // Una petición estructurada con huecos sin rellenar suele dar una respuesta genérica.
-  if (/\[completa:/i.test(text) && !confirm('Quedan huecos [completa: …] sin rellenar. ¿Enviar igualmente?')) return;
+  if ((text.includes('[completa:') || text.includes(`[${tr('completa')}:`)) && !confirm('Quedan huecos [completa: …] sin rellenar. ¿Enviar igualmente?')) return;
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
   input.value = ''; input.style.height = 'auto';
   const opt = assistWeb ? { web: true } : {};

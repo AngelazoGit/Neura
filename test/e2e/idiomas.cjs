@@ -35,6 +35,11 @@ const launch = () => _electron.launch({ executablePath: require(ROOT + '/node_mo
   await w.click('#structBtn'); await w.click('[data-tpl=correo]'); await w.click('[data-tpl=make]');
   const pr = await w.inputValue('#input');
   ok(/\*\*Role:\*\*/.test(pr) && !/Actúa como/.test(pr), 'las Plantillas PRO montan la petición en inglés · ' + pr.slice(0, 60));
+  let dlg = '';
+  w.once('dialog', (d) => { dlg = d.message(); d.dismiss(); });
+  await w.click('#send');
+  await w.waitForTimeout(300);
+  ok(/Proceed|send anyway|unfilled|gaps/i.test(dlg) && !/Quedan huecos/.test(dlg), 'los avisos del sistema también salen traducidos y reconocen los huecos en inglés · ' + dlg.slice(0, 60));
   await w.fill('#input', '');
   await w.click('#btnAis');
   const set = await w.textContent('#settings');
