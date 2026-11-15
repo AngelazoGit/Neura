@@ -7,7 +7,7 @@ let failures = 0; const ok = (c, m) => { console.log(c ? '✓' : '✗', m); if (
 const idle = (w) => w.waitForFunction(() => document.querySelector('#send').textContent.includes('ENVIAR') && !document.querySelector('.reply.pending'), null, { timeout: 20000 });
 const send = async (w, t) => { await w.fill('#input', t); await w.click('#send'); await idle(w); };
 const setT = (w, k) => w.evaluate((k) => { const s = document.querySelector('#target'); s.value = k; s.dispatchEvent(new Event('change')); }, k);
-const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
 const lastQ = () => { const x = mocks.log.filter((l) => l.model).at(-1); return x; };
 
 (async () => {
@@ -56,7 +56,7 @@ const lastQ = () => { const x = mocks.log.filter((l) => l.model).at(-1); return 
   await w.fill('#input', 'qué tiempo hace hoy'); await w.waitForTimeout(500);
   await w.click('#btnThreads'); await w.click('#newThread');
   await w.fill('#input', 'qué tiempo hace hoy en Madrid'); await w.waitForTimeout(500);
-  ok(!!(await w.$('#skillHint[hidden]')), 'un mensaje que no encaja no sugiere nada');
+  ok(!/Usar la habilidad/.test(await w.textContent('#skillHint')), 'un mensaje que no encaja no sugiere ninguna habilidad');
   await w.fill('#input', '');
 
   // Capacidades

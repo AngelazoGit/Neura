@@ -31,7 +31,7 @@ const openai = http.createServer(async (req, res) => {
   }
   const j = JSON.parse(raw.toString() || '{}');
   calls[j.model] = (calls[j.model] || 0) + 1;
-  log.push({ model: j.model, n: j.messages.length, tools: !!j.tools, stream: j.stream, system: j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)) });
+  log.push({ model: j.model, n: j.messages.length, tools: !!j.tools, stream: j.stream, max: j.max_tokens ?? j.max_completion_tokens, system: j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)) });
   const last = j.messages[j.messages.length - 1];
   const q = textOf(last.content);
   log.at(-1).q = q;
@@ -41,6 +41,7 @@ const openai = http.createServer(async (req, res) => {
   const sk = /Habilidad activa: «([^»]+)» \(v([^)]+)\)/.exec(j.messages.filter((m) => m.role === 'system').map((m) => textOf(m.content)).join('\n'));
   if (sk && j.model !== 'cuota') return reply(res, j.stream, `Aplicando ${sk[1]} v${sk[2]} con ${j.model}: ${q.slice(0, 30)}`);
   if (/Conversación a resumir/.test(q)) return reply(res, j.stream, 'RESUMEN: el usuario habló de números largos.');
+  if (j.messages.some((m) => m.role === 'system' && /experto en escribir peticiones/.test(textOf(m.content)))) return reply(res, j.stream, `**Rol:** redactor profesional.\n**Objetivo:** ${q}\n**Formato de la respuesta:** correo breve.\n**Contexto:** [completa: para quién es]`);
   if (/Respuestas de varias IAs/.test(q)) return reply(res, j.stream, 'SÍNTESIS FINAL combinada');
   switch (j.model) {
     case 'gemini-2.5-flash':
@@ -68,6 +69,7 @@ const openai = http.createServer(async (req, res) => {
       return reply(res, j.stream, `IMAGEN:${img ? 'sí' : 'no'} PDF:${/Factura numero 4242/.test(q) ? 'sí' : 'no'}`);
     }
     case 'tabla': return reply(res, j.stream, '## Tabla\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- uno\n- dos');
+    case 'cita': return reply(res, j.stream, 'Según la fuente [1], la final fue en julio; otra fuente [7] lo confirma.');
     case 'ciega': {
       if (Array.isArray(last.content)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'Image input is not supported for this model.' } })); }
       return reply(res, j.stream, 'ciega responde texto');

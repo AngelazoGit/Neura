@@ -5,7 +5,7 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const mocks = require('./mocks.cjs');
 const ROOT = path.join(__dirname, '../../desktop');
 let failures = 0; const ok = (c, m) => { console.log(c ? '✓' : '✗', m); if (!c) failures++; };
-const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
 
 (async () => {
   await mocks.start();
@@ -60,6 +60,8 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   ok(/Una cuenta de Google/.test(await w.textContent('#wzBody')) && /puede usar lo que escribes/.test(await w.textContent('#wzBody')), 'Gemini: qué cuenta necesitas, pasos y aviso de privacidad del nivel gratuito');
   await w.selectOption('#wzPreset', 'openrouter');
   ok(/:free/.test(await w.textContent('#wzBody')) && (await w.getAttribute('#wzKey', 'href')).includes('openrouter.ai'), 'al cambiar de IA cambian la guía y el enlace');
+  await w.selectOption('#wzPreset', 'nvidia');
+  ok(/nvapi-/.test(await w.textContent('#wzBody')) && /pruebas y desarrollo/.test(await w.textContent('#wzBody')) && (await w.getAttribute('#wzKey', 'href')).includes('build.nvidia.com'), 'NVIDIA (Nemotron) aparece en el PC con su guía y su aviso de uso');
   ok(!!(await w.$('[data-level=pro]')), 'si aún no ha elegido nivel, la pregunta sigue ahí');
   await app.close();
 
@@ -67,11 +69,12 @@ const launch = (UD) => _electron.launch({ executablePath: require(ROOT + '/node_
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'neura-br-'));
   const br = spawn(process.execPath, [path.join(__dirname, '../../bridge/server.mjs')], { env: { ...process.env, PORT: '8797', HOST: '127.0.0.1', NEURA_TOKEN: 'x'.repeat(24), NEURA_DATA: data, NEURA_CONFIG: '/nonexistent.json' } });
   await new Promise((r) => br.stdout.on('data', (d) => String(d).includes('Backends') && r()));
-  const b = await chromium.launch(); const p = await b.newPage();
+  const b = await chromium.launch(); const p = await b.newPage({ locale: 'es-ES' });
   p.on('pageerror', (e) => { console.log('PAGEERROR web', e.message); failures++; });
   await p.goto('http://127.0.0.1:8797/');
   await p.waitForSelector('.wizard');
   ok(await p.$eval('[data-wz=cloud]', (x) => x.classList.contains('on')), 'en la web empieza por «IA en internet»');
+  ok(!(await p.$('#wzPreset option[value=nvidia]')) && !(await p.$('#presetSel option[value=nvidia]')), 'en la web no se ofrece NVIDIA (su API no admite peticiones desde el navegador)');
   await p.click('[data-wz=local]');
   ok(/Neura para PC/.test(await p.textContent('#wzBody')), 'en la web, «IA en este equipo» explica cómo conseguirla con Neura para PC');
   await b.close(); br.kill();

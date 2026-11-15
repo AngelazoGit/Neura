@@ -50,6 +50,9 @@
     <label class="auto" title="Hilo privado: solo responden tus equipos (el puente de tu PC o los que marques en ⬡). Ningún dato sale a IAs externas.">
       <input type="checkbox" id="private"> 🔒 PRIVADO
     </label>
+    <label class="auto" id="webLbl" hidden title="Busca en internet antes de preguntar: la IA responde citando las fuentes">
+      <input type="checkbox" id="web"> 🌐 WEB
+    </label>
     <button type="button" class="auto skillbtn" id="btnSkills" title="Habilidades: procedimientos reutilizables que se aplican a este hilo con cualquier IA">✦ HABILIDADES</button>
     <label class="auto" id="toolsLbl" hidden title="Deja que la IA use las herramientas de tus servidores MCP (buscar y leer tus documentos, estado del PC…)">
       <input type="checkbox" id="useTools"> ƒ HERRAMIENTAS
@@ -64,7 +67,8 @@
   <form id="composer">
     <button type="button" class="ico tool" id="attachBtn" aria-label="Adjuntar imagen, PDF o texto" title="Adjuntar imagen, PDF o texto">📎</button>
     <input type="file" id="fileIn" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
-    <textarea id="input" rows="1" placeholder="ESCRIBE TU MENSAJE…" enterkeyhint="send"></textarea>
+    <button type="button" class="ico tool" id="structBtn" aria-label="Plantillas PRO y estructurar la petición" title="✨ Convierte lo que escribes en una petición profesional, o elige una plantilla PRO">✨</button>
+    <textarea id="input" rows="1" placeholder="ESCRIBE AQUÍ…" enterkeyhint="send"></textarea>
     <button type="button" class="ico tool" id="mic" aria-label="Dictar por voz" aria-pressed="false" title="Dictar por voz">🎤</button>
     <button type="submit" id="send"><span>ENVIAR</span></button>
   </form>
@@ -73,7 +77,7 @@
 <section class="sheet" id="sheetThreads" aria-hidden="true">
   <div class="sheet-in">
     <header><h2>HILOS <em>// GUARDADOS</em></h2><button class="ico close">✕</button></header>
-    <select id="projectSel" class="search" aria-label="Proyecto"></select>
+    <select id="projectSel" class="search" aria-label="Proyecto" data-noi18n></select>
     <div id="projectCard"></div>
     <button class="btn wide" id="newThread">+ NUEVO HILO</button>
     <input type="search" id="threadSearch" class="search" placeholder="BUSCAR EN LOS HILOS…" aria-label="Buscar en los hilos">
@@ -81,10 +85,13 @@
     <p class="hint" id="syncInfo"></p>
     <div class="row wrap">
       <button class="btn sm" id="exportMd">EXPORTAR ESTE HILO (.md)</button>
+      <button class="btn sm" id="exportPdf">PDF</button>
       <button class="btn sm ghost" id="exportAll">COPIA DE TODOS (.json)</button>
-      <button class="btn sm ghost" id="importBtn">IMPORTAR (.json)</button>
-      <input type="file" id="importFile" accept=".json,application/json" hidden>
+      <button class="btn sm ghost" id="importBtn" title="Una copia de Neura o tu exportación de ChatGPT, Claude o Gemini (.json o .zip)">IMPORTAR (.json, .zip)</button>
+      <input type="file" id="importFile" accept=".json,.zip,application/json,application/zip" hidden>
+      <button class="btn sm ghost" id="auditBtn" title="Qué datos de este hilo se han enviado y adónde">🔍 ¿ADÓNDE FUERON MIS DATOS?</button>
     </div>
+    <div id="auditOut" hidden></div>
   </div>
 </section>
 
@@ -100,6 +107,13 @@
       <input type="file" id="skFile" accept=".md,text/markdown,text/plain" hidden>
     </div>
     <div id="skEditor"></div>
+  </div>
+</section>
+
+<section class="sheet" id="sheetTpl" aria-hidden="true">
+  <div class="sheet-in">
+    <header><h2>PLANTILLAS <em>// PRO</em></h2><button class="ico close">✕</button></header>
+    <div id="tplBody"></div>
   </div>
 </section>
 
@@ -152,7 +166,10 @@ NEURA_TOKEN=mi-secreto node server.mjs</pre>
   </form>
 </div>
 
+<input type="file" id="batchFile" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
+<div id="helpPop" class="card" role="dialog" hidden></div>
 <div id="toast" role="status"></div>
+<script src="i18n.js"></script>
 <script src="md.js"></script>
 <script src="app.js"></script>
 </body>

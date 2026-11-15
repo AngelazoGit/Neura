@@ -7,7 +7,7 @@ import os from 'node:os';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync, readdirSync, realpathSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, extname, normalize, dirname, sep, resolve, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const cfgPath = process.env.NEURA_CONFIG || join(HERE, 'config.json');
@@ -25,6 +25,7 @@ const TOKEN_GENERATED = !process.env.NEURA_TOKEN && !cfg.token && !!TOKEN;
 // Token propio del Gateway: solo vale para /v1/* (modelos e inferencia). No da acceso a hilos, archivos ni configuración.
 const GW_TOKEN = process.env.NEURA_GATEWAY_TOKEN || cfg.gatewayToken || randomBytes(18).toString('base64url');
 const TIMEOUT = Number(cfg.timeoutMs || 300000);
+const IMAGE_TIMEOUT = Number(cfg.imageTimeoutMs || TIMEOUT); // cuánto se espera una imagen (el generador puede seguir después)
 const APP_DIR = cfg.appDir || join(HERE, '..', 'app');
 const SERVE_APP = cfg.serveApp !== false && existsSync(join(APP_DIR, 'index.html'));
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -51,6 +52,17 @@ const BACKENDS = cfg.backends?.length ? cfg.backends : [
   { id: 'ollama', type: 'ollama', url: process.env.OLLAMA_URL || 'http://127.0.0.1:11434' },
   { id: 'lmstudio', type: 'openai', url: 'http://127.0.0.1:1234/v1' },
 ];
+
+// Generadores de imágenes en este equipo: AUTOMATIC1111 / Forge / SD.Next (API /sdapi) y ComfyUI.
+// Se detectan en sus puertos habituales; en config.json, "images": [{ "id", "type": "a1111"|"comfyui", "url", "workflow"? }].
+const IMAGES = (() => {
+  let list = cfg.images;
+  if (process.env.NEURA_IMAGES) try { list = JSON.parse(process.env.NEURA_IMAGES); } catch { console.error('NEURA_IMAGES no es JSON válido'); }
+  return Array.isArray(list) ? list : [
+    { id: 'forge', type: 'a1111', url: 'http://127.0.0.1:7860' },
+    { id: 'comfyui', type: 'comfyui', url: 'http://127.0.0.1:8188' },
+  ];
+})();
 
 // ---------- backends ----------
 const trim = (u) => u.replace(/\/+$/, '');
@@ -99,6 +111,140 @@ function isThisMachine(b) {
   try { h = new URL(b.url).hostname.replace(/^\[|\]$/g, ''); } catch { return false; }
   return h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
+// ---------- imágenes ----------
+async function imageStatus() {
+  return Promise.all(IMAGES.map(async (g) => {
+    try {
+      if (g.type === 'comfyui') await getJSON(`${trim(g.url)}/system_stats`, { timeout: 3000 });
+      else await getJSON(`${trim(g.url)}/sdapi/v1/sd-models`, { timeout: 3000 });
+      return { id: g.id, type: g.type, online: true };
+    } catch { return { id: g.id, type: g.type, online: false }; }
+  }));
+}
+// Rellena %PROMPT%, %NEGATIVE%, %SEED%, %WIDTH%, %HEIGHT%, %STEPS% en un flujo de ComfyUI (formato API) propio.
+function fillWorkflow(node, vars) {
+  if (typeof node === 'string') {
+    const m = node.match(/^%([A-Z]+)%$/);
+    if (m && m[1] in vars) return vars[m[1]];
+    return node.replace(/%([A-Z]+)%/g, (x, k) => (k in vars ? String(vars[k]) : x));
+  }
+  if (Array.isArray(node)) return node.map((x) => fillWorkflow(x, vars));
+  if (node && typeof node === 'object') return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, fillWorkflow(v, vars)]));
+  return node;
+}
+async function comfyGenerate(g, a, signal) {
+  const base = trim(g.url);
+  let wf;
+  if (g.workflow) wf = fillWorkflow(JSON.parse(readFileSync(g.workflow, 'utf8')), { PROMPT: a.prompt, NEGATIVE: a.negative, SEED: a.seed, WIDTH: a.width, HEIGHT: a.height, STEPS: a.steps });
+  else {
+    // Flujo básico de texto a imagen con el primer modelo (checkpoint) instalado, o el de config.
+    const info = await getJSON(`${base}/object_info/CheckpointLoaderSimple`, { timeout: 10000, signal });
+    const ckpt = g.checkpoint || info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0]?.[0];
+    if (!ckpt) throw new Error('ComfyUI no tiene ningún modelo (checkpoint) instalado en models/checkpoints');
+    wf = {
+      3: { class_type: 'KSampler', inputs: { seed: a.seed, steps: a.steps, cfg: 7, sampler_name: 'euler', scheduler: 'normal', denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+      4: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
+      5: { class_type: 'EmptyLatentImage', inputs: { width: a.width, height: a.height, batch_size: 1 } },
+      6: { class_type: 'CLIPTextEncode', inputs: { text: a.prompt, clip: ['4', 1] } },
+      7: { class_type: 'CLIPTextEncode', inputs: { text: a.negative, clip: ['4', 1] } },
+      8: { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+      9: { class_type: 'SaveImage', inputs: { filename_prefix: 'neura', images: ['8', 0] } },
+    };
+    g = { ...g, model: ckpt };
+  }
+  const { prompt_id: id } = await getJSON(`${base}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: 'neura' }), timeout: 30000, signal });
+  if (!id) throw new Error('ComfyUI no aceptó el flujo');
+  const end = Date.now() + IMAGE_TIMEOUT;
+  while (Date.now() < end) {
+    if (signal?.aborted) throw stillBusy(() => comfyIdle(base, id));
+    const h = (await getJSON(`${base}/history/${encodeURIComponent(id)}`, { timeout: 10000, signal }))[id];
+    if (h?.status?.status_str === 'error') throw new Error('ComfyUI falló al generar la imagen');
+    const img = Object.values(h?.outputs || {}).flatMap((o) => o.images || [])[0];
+    if (img) {
+      const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: img.type || 'output' });
+      const r = await fetch(`${base}/view?${q}`, { signal: signalFor(30000, signal) });
+      if (!r.ok) throw new Error(`ComfyUI: HTTP ${r.status} al descargar la imagen`);
+      return { data: Buffer.from(await r.arrayBuffer()).toString('base64'), mime: r.headers.get('content-type') || 'image/png', model: g.model || 'flujo propio' };
+    }
+    await new Promise((res) => setTimeout(res, 700));
+  }
+  throw stillBusy(() => comfyIdle(base, id));
+}
+// Dejar de esperar no para el generador: el turno se mantiene hasta comprobar que ha terminado (máx. 30 min).
+const stillBusy = (idle) => Object.assign(new Error('La imagen está tardando más de lo previsto. El generador del PC sigue trabajando: Neura no aceptará otra imagen hasta que termine.'), { idle });
+async function untilIdle(check) {
+  const end = Date.now() + 30 * 60e3;
+  while (Date.now() < end) {
+    // Si el generador no responde (cerrado, o una versión sin esa consulta), no se le puede esperar: se libera.
+    try { if (await check()) return; } catch { return; }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+}
+const comfyIdle = (base, id) => untilIdle(async () => {
+  const q = await getJSON(`${base}/queue`, { timeout: 5000 });
+  return ![...(q.queue_running || []), ...(q.queue_pending || [])].some((x) => x?.[1] === id);
+});
+const a1111Idle = (base) => untilIdle(async () => !(await getJSON(`${base}/sdapi/v1/progress?skip_current_image=true`, { timeout: 5000 })).state?.job_count);
+async function a1111Generate(g, a, signal) {
+  let d;
+  try {
+    d = await getJSON(`${trim(g.url)}/sdapi/v1/txt2img`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, timeout: IMAGE_TIMEOUT,
+      body: JSON.stringify({ prompt: a.prompt, negative_prompt: a.negative, width: a.width, height: a.height, steps: a.steps, seed: a.seed }) });
+  } catch (e) {
+    // Tiempo agotado o cancelado: Forge sigue con el trabajo; se espera a que su cola quede vacía.
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw stillBusy(() => a1111Idle(trim(g.url)));
+    throw e;
+  }
+  if (!d.images?.[0]) throw new Error('El generador no devolvió ninguna imagen');
+  let model = '';
+  try { model = JSON.parse(d.info || '{}').sd_model_name || ''; } catch {}
+  return { data: d.images[0].replace(/^data:[^,]+,/, ''), mime: 'image/png', model };
+}
+const clampInt = (v, lo, hi, def) => (Number.isFinite(+v) ? Math.min(hi, Math.max(lo, Math.round(+v))) : def);
+let imageBusy = false; // una imagen a la vez: cancelar en la app no para el generador, así no se acumulan trabajos
+async function imageGenerate(args, { signal } = {}) {
+  const prompt = String(args.prompt || '').trim().slice(0, 4000);
+  if (!prompt) throw new Error('Falta el prompt');
+  if (imageBusy) throw new Error('El generador del PC aún está terminando la imagen anterior. Espera a que acabe y vuelve a intentarlo.');
+  imageBusy = true;
+  try { const out = await imageGenerateNow(prompt, args, signal); imageBusy = false; return out; }
+  catch (e) {
+    if (e.idle) e.idle().finally(() => { imageBusy = false; }); else imageBusy = false;
+    throw e;
+  }
+}
+async function imageGenerateNow(prompt, args, signal) {
+  const a = { prompt, negative: String(args.negative || '').slice(0, 2000), steps: clampInt(args.steps, 1, 80, 25),
+    width: clampInt(args.width, 256, 2048, 1024) & ~7, height: clampInt(args.height, 256, 2048, 1024) & ~7, seed: clampInt(args.seed, 0, 2 ** 31, Math.floor(Math.random() * 2 ** 31)) };
+  const online = (await imageStatus()).filter((x) => x.online).map((x) => IMAGES.find((g) => g.id === x.id));
+  const g = online.find((x) => x.id === args.backend) || online[0];
+  if (!g) throw new Error('No hay ningún generador de imágenes encendido en este equipo. Instala y abre ComfyUI (puerto 8188) o Forge / AUTOMATIC1111 con la opción --api (puerto 7860).');
+  const t0 = Date.now();
+  const out = await (g.type === 'comfyui' ? comfyGenerate : a1111Generate)(g, a, signal);
+  const seconds = Math.round((Date.now() - t0) / 100) / 10;
+  return { image: out, text: `Imagen generada en ${seconds} s con ${g.id}${out.model ? ` · ${out.model}` : ''} · semilla ${a.seed}`, backend: g.id, model: out.model, seconds, seed: a.seed };
+}
+
+// ---------- búsqueda en internet ----------
+// El buscador lo configura la app de este PC (SearXNG o Brave Search) o config.json ("search"). Así el móvil
+// emparejado puede buscar a través del PC sin tener su propia clave.
+const searchCfg = () => (gateway.search?.type ? gateway.search : cfg.search?.type ? cfg.search : null);
+const searchName = () => ({ searxng: 'SearXNG', brave: 'Brave Search' })[searchCfg()?.type] || null;
+async function webSearch(args, { signal } = {}) {
+  const q = String(args.query || '').trim().slice(0, 300), c = searchCfg();
+  if (!q) throw new Error('Falta la búsqueda');
+  if (!c) throw new Error('Este PC no tiene un buscador configurado (Neura para PC → ⚙ → BÚSQUEDA EN INTERNET).');
+  if (c.type === 'searxng') {
+    const d = await getJSON(`${trim(c.url)}/search?format=json&language=es&q=${encodeURIComponent(q)}`, { timeout: 20000, signal, headers: { Accept: 'application/json' } });
+    return { results: (d.results || []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: x.content || '' })), engine: 'SearXNG' };
+  }
+  if (c.type === 'brave') {
+    const d = await getJSON(`https://api.search.brave.com/res/v1/web/search?count=6&q=${encodeURIComponent(q)}`, { timeout: 20000, signal, headers: { Accept: 'application/json', 'X-Subscription-Token': c.key || '' } });
+    return { results: (d.web?.results || []).slice(0, 6).map((x) => ({ title: x.title, url: x.url, snippet: x.description || '' })), engine: 'Brave Search' };
+  }
+  throw new Error('Buscador desconocido');
+}
+
 async function listModels() {
   const backends = await Promise.all(BACKENDS.map(async (b) => {
     try {
@@ -109,7 +255,7 @@ async function listModels() {
     }
   }));
   const models = backends.flatMap((b) => b.models.map((name) => ({ id: `${b.id}/${name}`, backend: b.id, name })));
-  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })) };
+  return { models, backends: backends.map(({ models: m, ...rest }) => ({ ...rest, count: m.length })), images: await imageStatus(), search: searchName() };
 }
 
 const asText = (c) => typeof c === 'string' ? c
@@ -565,6 +711,14 @@ const TOOLS = [
   { name: 'system_info', title: 'Estado del equipo',
     description: 'CPU, memoria, carga y estado de los backends de IA de este equipo.',
     inputSchema: { type: 'object', properties: {} } },
+  { name: 'web_search', title: 'Buscar en internet',
+    description: 'Busca en internet con el buscador configurado en este equipo (SearXNG o Brave Search) y devuelve título, enlace y extracto de cada resultado.',
+    inputSchema: { type: 'object', required: ['query'], properties: { query: { type: 'string' } } } },
+  { name: 'image_generate', title: 'Generar una imagen en este equipo',
+    description: 'Genera una imagen con el generador local (ComfyUI o Forge/AUTOMATIC1111). Gratis y privado: no sale del equipo.',
+    inputSchema: { type: 'object', required: ['prompt'], properties: {
+      prompt: { type: 'string' }, negative: { type: 'string', description: 'lo que no debe aparecer' },
+      width: { type: 'integer' }, height: { type: 'integer' }, steps: { type: 'integer' }, seed: { type: 'integer' }, backend: { type: 'string' } } } },
   ...(SYNC ? [{ name: 'threads_sync', title: 'Sincronizar hilos',
     description: 'Guarda en este equipo los hilos de chat (y las colecciones skills y projects) y devuelve lo que cambió desde la revisión since.',
     inputSchema: { type: 'object', properties: {
@@ -575,7 +729,7 @@ const TOOLS = [
 ];
 const TOOL_IMPL = { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs, system_info: systemInfo };
 const CHAT_TOOLS = [...FILE_TOOLS, TOOLS.find((t) => t.name === 'system_info')];
-const IMPL = { list_models: listModels, chat, system_info: systemInfo, ...(SYNC ? { threads_sync: threadsSync } : {}),
+const IMPL = { list_models: listModels, chat, system_info: systemInfo, image_generate: imageGenerate, web_search: webSearch, ...(SYNC ? { threads_sync: threadsSync } : {}),
   ...(FOLDERS.length ? { list_dir: listDir, search_files: searchFiles, read_file: readFile, search_docs: searchDocs } : {}) };
 
 async function rpc(msg, session) {
@@ -599,6 +753,11 @@ async function rpc(msg, session) {
       if (!fn) return err(-32602, `Herramienta desconocida: ${params?.name}`);
       try {
         const data = await fn(params.arguments || {});
+        if (data.image) {
+          // Imagen como contenido MCP de tipo image (base64); el resto, como datos estructurados.
+          const { image, ...rest } = data;
+          return ok({ content: [{ type: 'image', data: image.data, mimeType: image.mime }, { type: 'text', text: data.text }], structuredContent: rest });
+        }
         const text = typeof data.text === 'string' ? data.text : params.name === 'threads_sync'
           ? `rev ${data.rev} · ${data.threads.length} hilos` : JSON.stringify(data, null, 2);
         return ok({ content: [{ type: 'text', text }], structuredContent: data });
@@ -633,7 +792,120 @@ const authorizedGw = (req) => same(req.headers.authorization || '', `Bearer ${GW
 // Otras herramientas (Continue, Cline, Aider, Open WebUI…) usan Neura como proveedor: por detrás van los
 // backends de este puente y las IAs que la app de PC le pasa con las claves del propio usuario (solo en memoria).
 // Con el modelo «auto» (o uno desconocido) se aplica AUTO-SALTO: si una IA falla o agota su cuota, se prueba la siguiente.
-const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, providers: [], order: [] };
+const gateway = { enabled: false, localOnly: false, freeOnly: false, unknownAsAuto: false, cache: false, budget: {}, providers: [], order: [] };
+
+// Consumo del Gateway por día y destino (se guarda en disco, 62 días). Tokens: los que dé el proveedor o una estimación.
+const pad2 = (n) => String(n).padStart(2, '0');
+const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const gwUsageFile = join(DATA_DIR, 'gateway-uso.json');
+const gwUsage = (() => { try { return JSON.parse(readFileSync(gwUsageFile, 'utf8')) || {}; } catch { return {}; } })();
+let gwSaveT;
+const priceOf = (t, inTok, outTok) => (t.price ? ((+t.price.in || 0) * inTok + (+t.price.out || 0) * outTok) / 1e6 : 0);
+// eur: lo que se cobra si ya se sabe (p. ej. lo reservado cuando una respuesta se corta); si no, por el precio y los tokens.
+function gwRecord(t, inTok, outTok, failed, eur) {
+  const u = ((gwUsage[dayKey()] ||= {})[t.id] ||= { n: 0, err: 0, in: 0, out: 0, eur: 0 });
+  if (failed) u.err++;
+  else { u.n++; u.in += inTok; u.out += outTok; }
+  u.eur += eur ?? (failed ? 0 : priceOf(t, inTok, outTok));
+  const days = Object.keys(gwUsage).sort();
+  while (days.length > 62) delete gwUsage[days.shift()];
+  clearTimeout(gwSaveT);
+  gwSaveT = setTimeout(() => {
+    try { mkdirSync(DATA_DIR, { recursive: true }); writeFileSync(gwUsageFile + '.tmp', JSON.stringify(gwUsage)); renameSync(gwUsageFile + '.tmp', gwUsageFile); } catch {}
+  }, 1000);
+}
+// ---------- saldo único del tope de gasto (app de este PC + Gateway) ----------
+// Cada petición a una IA de pago reserva aquí su coste máximo estimado antes de enviarse y se liquida una sola vez al
+// terminar. Node atiende las peticiones de una en una, así que comprobar el saldo y reservar es indivisible: la app y
+// el Gateway nunca pueden reservar el mismo dinero. Lo que la app gasta se apunta con el id «app».
+const ledger = new Map(); // id de reserva → € reservados
+let ledgerSum = 0;
+const RESERVE_OUT = 4096; // máximo de tokens de salida que se pide al proveedor si la petición no fija otro
+const estimateIn = (body) => Math.ceil(JSON.stringify(body.messages || []).length / 2); // a la alta: ~2 caracteres por token
+function gwSpent(onlyGateway) {
+  const day = dayKey();
+  let d = onlyGateway ? 0 : ledgerSum, m = d;
+  for (const [k, v] of Object.entries(gwUsage)) for (const [id, u] of Object.entries(v)) {
+    if (onlyGateway && id === 'app') continue;
+    if (k === day) d += u.eur;
+    if (k.slice(0, 7) === day.slice(0, 7)) m += u.eur;
+  }
+  return { day: d, month: m };
+}
+function budgetLeft() {
+  const b = gateway.budget || {}, s = gwSpent();
+  return Math.min(b.day > 0 ? b.day - s.day : Infinity, b.month > 0 ? b.month - s.month : Infinity);
+}
+const capped = () => gateway.budget?.day > 0 || gateway.budget?.month > 0;
+// Función síncrona: entre comprobar el saldo y apuntar la reserva no hay ningún await, así que ninguna otra
+// petición (de la app o del Gateway) puede ejecutarse en medio y ver el mismo saldo libre.
+function reserve(eur) {
+  if (!(eur >= 0) || budgetLeft() < eur) return null;
+  const id = randomUUID();
+  ledger.set(id, eur); ledgerSum += eur;
+  return id;
+}
+// Liquida una reserva una sola vez: la quita del saldo comprometido y apunta lo cobrado.
+function settle(id, t, inTok, outTok, eur) {
+  const r = ledger.get(id);
+  if (r == null) return false;
+  ledger.delete(id); ledgerSum -= r;
+  gwRecord(t, inTok, outTok, false, eur);
+  return true;
+}
+const gwOver = () => budgetLeft() <= 0;
+// Caché opcional: la misma petición exacta en 10 minutos se responde sin llamar a ninguna IA.
+const gwCache = new Map();
+let gwCacheHits = 0;
+const GW_CACHE_TTL = 10 * 60e3;
+const gwCacheKey = (model, body) => createHash('sha256').update(JSON.stringify([model || 'auto', body])).digest('hex');
+function gwCacheGet(k) {
+  const v = gwCache.get(k);
+  if (v && Date.now() - v.at <= GW_CACHE_TTL) return v;
+  gwCache.delete(k);
+  return null;
+}
+function gwCachePut(k, v) {
+  gwCache.delete(k); gwCache.set(k, { ...v, at: Date.now() });
+  while (gwCache.size > 200) gwCache.delete(gwCache.keys().next().value);
+}
+// Se lee una copia de la respuesta mientras llega al cliente: cuenta tokens y, si terminó bien, la guarda en caché.
+function gwTap(r, t, body, key, ticket, est) {
+  const [a, b] = r.body.tee();
+  const ct = r.headers.get('content-type') || '';
+  (async () => {
+    const chunks = [];
+    let complete = true;
+    try { for await (const c of b) chunks.push(Buffer.from(c)); } catch { complete = false; }
+    const buf = Buffer.concat(chunks), txt = buf.toString('utf8');
+    let inTok = Math.ceil(JSON.stringify(body.messages || []).length / 4), outTok = 0;
+    let real = false; // tokens dados por el proveedor (no estimados)
+    if (/event-stream/.test(ct)) {
+      let chars = 0, done = false;
+      for (const l of txt.split('\n')) {
+        const d = l.startsWith('data:') ? l.slice(5).trim() : '';
+        if (!d) continue;
+        if (d === '[DONE]') { done = true; continue; }
+        try {
+          const j = JSON.parse(d), ch = j.choices?.[0];
+          if (j.usage) { inTok = j.usage.prompt_tokens || inTok; outTok = j.usage.completion_tokens || outTok; real = true; }
+          if (ch?.finish_reason) done = true;
+          chars += (ch?.delta?.content || '').length + (ch?.delta?.tool_calls || []).reduce((n, x) => n + (x.function?.arguments || '').length, 0);
+        } catch {}
+      }
+      if (!outTok) outTok = Math.ceil(chars / 4);
+      complete &&= done;
+    } else {
+      try { const j = JSON.parse(txt); real = !!j.usage; inTok = j.usage?.prompt_tokens || inTok; outTok = j.usage?.completion_tokens || Math.ceil(JSON.stringify(j.choices?.[0]?.message || '').length / 4); }
+      catch { complete = false; }
+    }
+    // Sin datos del proveedor y sin final correcto (corte, desconexión), no se sabe cuánto consumió: se cobra lo reservado.
+    const eur = !complete && !real && ticket ? est : undefined;
+    if (ticket) settle(ticket, t, inTok, outTok, eur); else gwRecord(t, inTok, outTok, false);
+    if (key && complete) gwCachePut(key, { ct, buf, t });
+  })();
+  return new Response(a, { status: r.status, headers: r.headers });
+}
 const gwCool = new Map(); // id → hasta cuándo no se usa
 const backendCache = { at: 0, list: [] };
 async function gwTargets() {
@@ -649,9 +921,12 @@ async function gwTargets() {
     }
     Object.assign(backendCache, { at: Date.now(), list: out });
   }
-  const cloud = gateway.localOnly ? [] : gateway.providers.map((p) => ({ ...p, local: false }));
+  // Con el tope de gasto alcanzado, solo IAs gratuitas (como SOLO GRATIS).
+  const over = gwOver();
+  // Con un tope activo, una de pago sin precio tampoco: su gasto no se podría contar.
+  const cloud = gateway.localOnly ? [] : gateway.providers.filter((p) => p.free || (!over && !(capped() && !p.price))).map((p) => ({ ...p, local: false }));
   // Con SOLO LOCAL o SOLO GRATIS, de los backends del puente solo cuentan los locales (uno externo puede ser de pago).
-  const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !gateway.freeOnly)), ...cloud];
+  const all = [...backendCache.list.filter((t) => (gateway.localOnly ? t.here : t.local || !(gateway.freeOnly || over))), ...cloud];
   const rank = (t) => { const i = gateway.order.indexOf(t.id); return i < 0 ? 1e6 : i; };
   return all.sort((a, b) => rank(a) - rank(b));
 }
@@ -678,6 +953,9 @@ function gwFail(t, status, headers) {
 }
 // Llama al primer destino que responda bien; devuelve la respuesta todavía sin leer (para poder reenviar el streaming).
 async function gwCall(model, body, signal) {
+  const key = gateway.cache ? gwCacheKey(model, body) : null;
+  const hit = key && gwCacheGet(key);
+  if (hit) { gwCacheHits++; return { r: new Response(hit.buf, { status: 200, headers: { 'content-type': hit.ct } }), t: hit.t, cached: true }; }
   const plan = await gwPlan(model);
   if (!plan.length) throw Object.assign(new Error('No hay modelos disponibles en Neura Gateway'), { status: 503 });
   let last;
@@ -686,19 +964,39 @@ async function gwCall(model, body, signal) {
     // Saltar lo que un fallo de esta misma petición acaba de pausar (p. ej. misma clave inválida);
     // si todo estaba ya en pausa al empezar, se prueba igualmente como último recurso.
     if (plan.length > 1 && gwCool.get(t.id) !== pausedBefore.get(t.id)) continue;
+    // Con tope y una IA de pago: se pide al proveedor un máximo de salida y se reserva su coste antes de enviar.
+    let send = body, ticket = null, est = 0;
+    if (capped() && t.price) {
+      send = body.max_tokens || body.max_completion_tokens ? body : { ...body, max_tokens: RESERVE_OUT };
+      est = priceOf(t, estimateIn(send), +(send.max_tokens || send.max_completion_tokens));
+      ticket = reserve(est);
+      if (!ticket) { last = Object.assign(new Error(`${t.id}: no cabe en tu tope de gasto`), { status: 402 }); continue; }
+    }
     try {
-      const r = await fetch(`${t.url}/chat/completions`, {
+      const post = (b) => fetch(`${t.url}/chat/completions`, {
         method: 'POST', signal: signalFor(TIMEOUT, signal),
         headers: { 'Content-Type': 'application/json', ...(t.apiKey ? { Authorization: `Bearer ${t.apiKey}` } : {}) },
-        body: JSON.stringify({ ...body, model: t.model }),
+        body: JSON.stringify({ ...b, model: t.model }),
       });
-      if (r.ok) { gwCool.delete(t.id); return { r, t }; }
+      let r = await post(send);
+      // Algunos modelos (p. ej. de razonamiento de OpenAI) solo aceptan max_completion_tokens.
+      if (r.status === 400 && send.max_tokens && !body.max_tokens) {
+        const txt = await r.text();
+        if (/max_tokens/.test(txt)) { const { max_tokens: mt, ...rest } = send; r = await post({ ...rest, max_completion_tokens: mt }); }
+        else r = new Response(txt, { status: 400 });
+      }
+      if (r.ok) { gwCool.delete(t.id); return { r: gwTap(r, t, send, key, ticket, est), t }; }
+      // Error HTTP: el proveedor rechazó la petición sin generar nada; la reserva se libera sin cobro.
+      if (ticket) settle(ticket, t, 0, 0, 0);
       gwFail(t, r.status, r.headers);
+      if (r.status !== 429) gwRecord(t, 0, 0, true);
       last = Object.assign(new Error(`${t.id}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
       if (r.status === 400) break; // petición mal formada: otra IA no lo arreglará
     } catch (e) {
+      // Corte de red o cancelación tras enviar: el proveedor pudo consumir; se cobra lo reservado.
+      if (ticket) settle(ticket, t, 0, 0, est);
       if (signal?.aborted) throw e;
-      gwFail(t, 0); last = e;
+      gwFail(t, 0); gwRecord(t, 0, 0, true); last = e;
     }
   }
   throw last || new Error('Sin respuesta');
@@ -715,8 +1013,9 @@ async function gwModels(res) {
 async function gwOpenAI(req, res, body) {
   const ctl = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
-  let r, t;
-  try { ({ r, t } = await gwCall(body.model, body, ctl.signal)); } catch (e) { return gwError(res, e); }
+  let r, t, cached;
+  try { ({ r, t, cached } = await gwCall(body.model, body, ctl.signal)); } catch (e) { return gwError(res, e); }
+  if (cached) res.setHeader('x-neura-cache', 'hit');
   if (!body.stream) {
     const d = await r.json();
     return send(res, 200, { ...d, model: body.model || t.id });
@@ -779,8 +1078,9 @@ const msgId = () => 'msg_' + randomBytes(12).toString('hex');
 async function gwAnthropic(req, res, body) {
   const ctl = new AbortController();
   res.on('close', () => { if (!res.writableEnded) ctl.abort(); });
-  let r;
-  try { ({ r } = await gwCall(body.model, anthropicToOpenAI(body), ctl.signal)); } catch (e) { return gwError(res, e, true); }
+  let r, cached;
+  try { ({ r, cached } = await gwCall(body.model, anthropicToOpenAI(body), ctl.signal)); } catch (e) { return gwError(res, e, true); }
+  if (cached) res.setHeader('x-neura-cache', 'hit');
   if (!body.stream) {
     const d = await r.json();
     const m = d.choices?.[0]?.message || {};
@@ -890,15 +1190,46 @@ async function handle(req, res) {
   if (path === '/health') return send(res, 200, { ok: true });
 
   // Configuración del Gateway: solo la app de este mismo equipo (con token) puede pasarle las IAs y claves.
-  if (path === '/neura/gateway' && req.method === 'POST') {
+  // Saldo único del tope: la app de este PC reserva y liquida aquí sus peticiones de pago.
+  if (path === '/neura/budget/reserve' || path === '/neura/budget/settle') {
+    const ip = req.socket.remoteAddress || '';
+    if (req.method !== 'POST' || !authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
+    let c; try { c = JSON.parse(await readBody(req, 4096)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
+    const eur = +c.eur;
+    if (!(eur >= 0 && eur < 1e6)) return send(res, 400, { error: 'importe inválido' });
+    if (path === '/neura/budget/reserve') {
+      // La app manda su tope actual: así no depende de que la configuración del Gateway ya haya llegado.
+      if (c.budget) gateway.budget = { day: Math.max(0, +c.budget.day || 0), month: Math.max(0, +c.budget.month || 0) };
+      const id = reserve(eur);
+      return id ? send(res, 200, { id }) : send(res, 402, { error: 'No cabe en tu tope de gasto', left: Math.max(0, budgetLeft()) });
+    }
+    const n = (x) => Math.max(0, Math.round(+x || 0));
+    return settle(String(c.id), { id: 'app' }, n(c.in), n(c.out), eur) ? send(res, 200, { ok: true }) : send(res, 409, { error: 'reserva ya liquidada o desconocida' });
+  }
+  if (path === '/neura/gateway' && (req.method === 'POST' || req.method === 'GET')) {
     const ip = req.socket.remoteAddress || '';
     if (!authorized(req) || !/^(127\.|::1$|::ffff:127\.)/.test(ip)) return send(res, 403, { error: 'solo desde este equipo' });
+    if (req.method === 'GET') {
+      // Consumo del Gateway para el panel de la app: hoy por destino, el mes acumulado, gasto y caché.
+      const day = dayKey(), month = {};
+      for (const [k, v] of Object.entries(gwUsage)) if (k.slice(0, 7) === day.slice(0, 7)) for (const [id, u] of Object.entries(v)) if (id !== 'app') { const m = (month[id] ||= { n: 0, eur: 0 }); m.n += u.n; m.eur += u.eur; }
+      const { app, ...todayGw } = gwUsage[day] || {};
+      // spent: solo el Gateway (para mostrarlo junto al de la app); total: todo lo que cuenta para el tope, con lo reservado.
+      return send(res, 200, { date: day, today: todayGw, month, spent: gwSpent(true), total: gwSpent(), reserved: ledgerSum, over: gwOver(), cache: { enabled: !!gateway.cache, hits: gwCacheHits, entries: gwCache.size } });
+    }
     let c; try { c = JSON.parse(await readBody(req)); } catch { return send(res, 400, { error: 'JSON inválido' }); }
-    const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model) });
+    const num = (x) => Math.max(0, +x || 0);
+    const clean = (p) => ({ id: String(p.id), url: trim(String(p.url)), apiKey: p.apiKey ? String(p.apiKey) : '', model: String(p.model), free: !!p.free,
+      price: p.price ? { in: num(p.price.in), out: num(p.price.out) } : null });
     // Si cambió la configuración de un destino (p. ej. la clave), se puede reintentar ya: se quita su pausa.
     const sig = (p) => `${p.url} ${p.apiKey} ${p.model}`;
     const before = new Map(gateway.providers.map((p) => [p.id, sig(p)]));
-    Object.assign(gateway, { enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto,
+    // Si cambia algo más que el gasto de la app, la caché se vacía (p. ej. al activar «solo modelos de este equipo»).
+    const confSig = JSON.stringify(c);
+    if (confSig !== gateway.confSig) gwCache.clear();
+    Object.assign(gateway, { confSig, enabled: !!c.enabled, localOnly: !!c.localOnly, freeOnly: !!c.freeOnly, unknownAsAuto: !!c.unknownAsAuto, cache: !!c.cache,
+      budget: { day: num(c.budget?.day), month: num(c.budget?.month) },
+      search: c.search?.type === 'searxng' && /^https?:\/\//.test(c.search.url || '') ? { type: 'searxng', url: String(c.search.url) } : c.search?.type === 'brave' && c.search.key ? { type: 'brave', key: String(c.search.key) } : null,
       providers: Array.isArray(c.providers) ? c.providers.filter((p) => p?.id && /^https?:\/\//.test(p.url) && p.model).map(clean) : [],
       order: Array.isArray(c.order) ? c.order.map(String) : [] });
     for (const p of gateway.providers) if (before.get(p.id) !== sig(p)) gwCool.delete(p.id);

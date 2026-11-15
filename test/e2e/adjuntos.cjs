@@ -35,7 +35,7 @@ const setT = (p, k) => p.evaluate((k) => { const s = document.querySelector('#ta
   const watch = (p) => p.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
 
   // 1. Migración desde una instalación con imágenes antiguas (dentro del estado)
-  let ctx = await b.newContext({ acceptDownloads: true }); let p = await ctx.newPage(); watch(p);
+  let ctx = await b.newContext({ acceptDownloads: true, locale: 'es-ES' }); let p = await ctx.newPage(); watch(p);
   await p.addInitScript((st) => { if (location.protocol === 'http:' && !sessionStorage.getItem('sembrado')) { localStorage.setItem('neura.v1', JSON.stringify(st)); sessionStorage.setItem('sembrado', '1'); } }, oldState);
   await p.goto(APP);
   await p.waitForFunction(() => { const s = JSON.parse(localStorage.getItem('neura.v1')); return s.threads[0].messages[0].files.every((f) => f.ref && !f.data && !f.text); }, null, { timeout: 10000 })
@@ -86,7 +86,7 @@ const setT = (p, k) => p.evaluate((k) => { const s = document.querySelector('#ta
   const exp = JSON.parse(fs.readFileSync(file, 'utf8'));
   const expImg = exp.threads.flatMap((t) => t.messages.flatMap((m) => m.files || [])).find((f) => f.name === 'tabla.jpg');
   ok(expImg.data === JPG_URL && !JSON.stringify(exp).includes('"ref"'), 'la copia exportada lleva los originales (no referencias de este dispositivo)');
-  const ctx2 = await b.newContext(); const q = await ctx2.newPage(); watch(q);
+  const ctx2 = await b.newContext({ locale: 'es-ES' }); const q = await ctx2.newPage(); watch(q);
   await q.goto(APP); await q.click('#btnThreads');
   await q.setInputFiles('#importFile', file);
   await q.waitForFunction(() => JSON.parse(localStorage.getItem('neura.v1') || '{}').threads?.some((t) => t.id === 'th1' && t.messages[0].files?.every((f) => f.ref)), null, { timeout: 10000 });
@@ -98,7 +98,7 @@ const setT = (p, k) => p.evaluate((k) => { const s = document.querySelector('#ta
   // 6. Sincronización de una imagen a otro dispositivo
   const pair = `${APP}#pair=${Buffer.from(JSON.stringify({ u: `${APP}mcp`, t: TOKEN, n: 'pc' })).toString('base64url')}`;
   await p.goto('about:blank'); await p.goto(pair); await p.waitForFunction(() => S.mcp[0]?.status === 'on', null, { timeout: 10000 }); await p.waitForTimeout(1500);
-  const ctx3 = await b.newContext(); const m = await ctx3.newPage(); watch(m);
+  const ctx3 = await b.newContext({ locale: 'es-ES' }); const m = await ctx3.newPage(); watch(m);
   await m.goto(pair);
   await m.waitForFunction(() => S.threads.some((t) => t.id === 'th1' && t.messages[0].files?.[0]?.ref), null, { timeout: 15000 });
   const mr = await m.evaluate(() => S.threads.find((t) => t.id === 'th1').messages[0].files[0].ref);
@@ -106,7 +106,7 @@ const setT = (p, k) => p.evaluate((k) => { const s = document.querySelector('#ta
   await ctx3.close(); await ctx.close();
 
   // 7. Guardado interrumpido entre archivo y referencia + almacenamiento lleno: aviso visible y nada se pierde
-  ctx = await b.newContext({ acceptDownloads: true }); p = await ctx.newPage(); watch(p);
+  ctx = await b.newContext({ acceptDownloads: true, locale: 'es-ES' }); p = await ctx.newPage(); watch(p);
   await p.addInitScript((st) => {
     if (location.protocol !== 'http:') return;
     if (!localStorage.getItem('neura.v1')) localStorage.setItem('neura.v1', JSON.stringify(st));

@@ -29,7 +29,7 @@ test('rechaza peticiones sin token o con token falso', async () => {
 });
 test('acepta el token correcto', async () => {
   const r = await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'threads_sync']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'web_search', 'image_generate', 'threads_sync']);
 });
 test('/health no revela datos del equipo', async () => {
   assert.deepEqual(await (await fetch(`${BASE}/health`)).json(), { ok: true });
@@ -112,8 +112,40 @@ writeFileSync(join(shared, 'sub', 'codigo.js'), 'function suma(a, b) { return a 
 writeFileSync(join(shared, '.oculta', 'clave.txt'), 'secreto oculto');
 writeFileSync(join(outside, 'secreto.txt'), 'secreto de fuera');
 symlinkSync(outside, join(shared, 'enlace'));
+// Generadores de imágenes simulados: AUTOMATIC1111/Forge (/sdapi) y ComfyUI (/prompt, /history, /view).
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const imgSeen = [];
+let a1111Busy = false;
+const a1111 = http.createServer((req, res) => {
+  let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/sdapi/v1/sd-models') return res.end('[{"title":"sdxl"}]');
+    if (req.url.startsWith('/sdapi/v1/progress')) return res.end(JSON.stringify({ state: { job_count: a1111Busy ? 1 : 0 } }));
+    if (req.url === '/sdapi/v1/txt2img') {
+      const j = JSON.parse(b); imgSeen.push({ a1111: j }); a1111Busy = true;
+      // «cuelga»: sigue trabajando 3,5 s, más que el tiempo de espera del puente (imageTimeoutMs: 1500).
+      return setTimeout(() => { a1111Busy = false; if (!res.destroyed) res.end(JSON.stringify({ images: [PNG.toString('base64')], info: JSON.stringify({ sd_model_name: 'sdxl-base' }) })); }, j.prompt === 'cuelga' ? 3500 : j.prompt === 'lenta' ? 400 : 0);
+    }
+    res.statusCode = 404; res.end('{}');
+  });
+});
+let comfyPolls = 0;
+const comfy = http.createServer((req, res) => {
+  let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+    if (req.url === '/system_stats') return res.end('{}');
+    if (req.url === '/object_info/CheckpointLoaderSimple') return res.end(JSON.stringify({ CheckpointLoaderSimple: { input: { required: { ckpt_name: [['dreamshaper.safetensors', 'otro.safetensors']] } } } }));
+    if (req.url === '/prompt') { imgSeen.push({ comfy: JSON.parse(b) }); comfyPolls = 0; return res.end('{"prompt_id":"p1"}'); }
+    if (req.url === '/history/p1') return res.end(++comfyPolls < 2 ? '{}' : JSON.stringify({ p1: { status: { status_str: 'success' }, outputs: { 9: { images: [{ filename: 'neura_0001.png', subfolder: '', type: 'output' }] } } } }));
+    if (req.url.startsWith('/view?filename=neura_0001.png')) { res.setHeader('content-type', 'image/png'); return res.end(PNG); }
+    res.statusCode = 404; res.end('{}');
+  });
+});
+await Promise.all([a1111, comfy].map((x) => new Promise((r) => x.listen(0, '127.0.0.1', r))));
+after(() => { a1111.close(); comfy.close(); });
 const cfgFile = join(base, 'config.json');
-writeFileSync(cfgFile, JSON.stringify({ backends: [{ id: 'ollama', type: 'ollama', url: `http://127.0.0.1:${ollama.address().port}` }], folders: [shared] }));
+writeFileSync(cfgFile, JSON.stringify({ backends: [{ id: 'ollama', type: 'ollama', url: `http://127.0.0.1:${ollama.address().port}` }], folders: [shared],
+  imageTimeoutMs: 1500,
+  images: [{ id: 'forge', type: 'a1111', url: `http://127.0.0.1:${a1111.address().port}` }, { id: 'comfy', type: 'comfyui', url: `http://127.0.0.1:${comfy.address().port}` }, { id: 'apagado', type: 'comfyui', url: 'http://127.0.0.1:9' }] }));
 
 const PORT2 = 18788, BASE2 = `http://127.0.0.1:${PORT2}`;
 const srv2 = spawn(process.execPath, [fileURLToPath(new URL('server.mjs', import.meta.url))], {
@@ -129,7 +161,7 @@ const call = async (name, args) => (await (await rpc2({ jsonrpc: '2.0', id: 1, m
 
 test('con carpetas aparecen las herramientas de archivos', async () => {
   const r = await (await rpc2({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
-  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
+  assert.deepEqual(r.result.tools.map((t) => t.name), ['list_models', 'chat', 'system_info', 'web_search', 'image_generate', 'threads_sync', 'list_dir', 'search_files', 'read_file', 'search_docs']);
 });
 test('list_dir, search_files y read_file', async () => {
   assert.deepEqual((await call('list_dir', {})).structuredContent.entries, [{ name: 'docs', type: 'dir' }]);
@@ -359,5 +391,198 @@ test('Gateway: dos clientes a la vez no mezclan sus respuestas', async () => {
     .then((t) => [...t.matchAll(/"content":"(.)"/g)].map((m) => m[1]).join(''));
   const [a, b] = await Promise.all([one('primer-cliente'), one('SEGUNDO-CLIENTE')]);
   assert.equal(a, 'primer-cliente'); assert.equal(b, 'SEGUNDO-CLIENTE');
+  await configure({ enabled: false });
+});
+test('Gateway: cuenta el consumo por destino y día, con el gasto según el precio', async () => {
+  await configure({ enabled: true, providers: [{ ...prov('pago/bueno', 'bueno'), price: { in: 1000000, out: 2000000 } }, { ...prov('gratis/eco', 'eco'), free: true }] });
+  const u0 = await (await gw('/neura/gateway')).json();
+  const n0 = u0.today['pago/bueno']?.n || 0, e0 = u0.today['pago/bueno']?.eur || 0;
+  await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'hola' }] });
+  await new Promise((r) => setTimeout(r, 50));
+  const u = await (await gw('/neura/gateway')).json();
+  assert.match(u.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(u.today['pago/bueno'].n, n0 + 1);
+  // El proveedor dio 5 tokens de entrada y 3 de salida: 5 × 1 € + 3 × 2 € = 11 € (precio por millón).
+  assert.equal(Math.round((u.today['pago/bueno'].eur - e0) * 100) / 100, 11);
+  assert.ok(u.spent.day >= 11 && u.month['pago/bueno'].n >= 1);
+  assert.equal((await fetch(`${BASE}/neura/gateway`, { headers: { Authorization: `Bearer ${GWT}` } })).status, 403, 'el token del Gateway no ve el consumo');
+});
+test('Gateway: al llegar al tope de gasto solo usa IAs gratuitas (cuenta también lo que la app liquidó en el saldo único)', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 1, out: 1 } }, { ...prov('gratis/eco', 'eco'), free: true }];
+  const ids = async () => (await (await gw('/v1/models')).json()).data.map((m) => m.id);
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 10 } });
+  assert.ok((await ids()).includes('pago/bueno'), 'por debajo del tope, la de pago está');
+  const { id } = await (await gw('/neura/budget/reserve', { eur: 10, budget: { day: total0 + 10 } })).json();
+  assert.equal((await gw('/neura/budget/settle', { id, eur: 10, in: 5, out: 5 })).status, 200);
+  const l = await ids();
+  assert.ok(!l.includes('pago/bueno') && l.includes('gratis/eco'), 'con lo gastado por la app el tope se alcanza: solo la gratuita');
+  const g = await (await gw('/neura/gateway')).json();
+  assert.equal(g.over, true); assert.equal(g.today.app, undefined, 'el gasto de la app no aparece como uso del Gateway');
+  await configure({ enabled: false, budget: {} });
+});
+test('Gateway: caché opcional de peticiones idénticas (texto y streaming); se vacía al cambiar la configuración', async () => {
+  const providers = [prov('p/bueno', 'bueno')];
+  await configure({ enabled: true, providers, cache: true });
+  const ask = (q, stream) => gw('/v1/chat/completions', { model: 'p/bueno', stream, messages: [{ role: 'user', content: q }] });
+  const calls = () => gwSeen.filter((x) => x.body.model === 'bueno').length;
+  const c0 = calls();
+  const a = await ask('cache-1'); assert.equal(a.headers.get('x-neura-cache'), null); const ta = await a.text();
+  await new Promise((r) => setTimeout(r, 50));
+  const b = await ask('cache-1'); assert.equal(b.headers.get('x-neura-cache'), 'hit'); assert.equal(await b.text(), ta);
+  assert.equal(calls(), c0 + 1, 'la repetida no llega al proveedor');
+  await ask('cache-2'); assert.equal(calls(), c0 + 2, 'una distinta sí');
+  const s1 = await (await ask('cache-s', true)).text(); await new Promise((r) => setTimeout(r, 50));
+  const s2 = await ask('cache-s', true); assert.equal(s2.headers.get('x-neura-cache'), 'hit'); assert.equal(await s2.text(), s1);
+  const m = await (await gw('/v1/messages', { model: 'p/bueno', max_tokens: 10, messages: [{ role: 'user', content: 'cache-1' }] })).json();
+  assert.equal(m.content[0].text, 'respuesta de bueno', 'también por la API de Anthropic');
+  await configure({ enabled: true, providers, cache: true, localOnly: false, freeOnly: true });
+  const c1 = calls(); await ask('cache-1'); assert.equal(calls(), c1 + 1, 'tras cambiar la configuración se vuelve a preguntar');
+  await configure({ enabled: true, providers });
+  const c2 = calls(); await ask('cache-2'); await ask('cache-2'); assert.equal(calls(), c2 + 2, 'sin caché, siempre se pregunta');
+  await configure({ enabled: false });
+});
+
+test('imágenes: list_models indica qué generadores están encendidos', async () => {
+  const r = await call('list_models', {});
+  assert.deepEqual(r.structuredContent.images.map((i) => `${i.id}:${i.online}`), ['forge:true', 'comfy:true', 'apagado:false']);
+});
+test('imágenes: Forge/AUTOMATIC1111 devuelve la imagen como contenido MCP (con prompt negativo y valores acotados)', async () => {
+  const r = await call('image_generate', { prompt: 'un faro', negative: 'texto', steps: 999, width: 100 });
+  assert.equal(r.isError, undefined);
+  const img = r.content.find((c) => c.type === 'image');
+  assert.equal(img.mimeType, 'image/png'); assert.deepEqual(Buffer.from(img.data, 'base64'), PNG);
+  assert.match(r.content.find((c) => c.type === 'text').text, /forge · sdxl-base/);
+  const sent = imgSeen.at(-1).a1111;
+  assert.equal(sent.prompt, 'un faro'); assert.equal(sent.negative_prompt, 'texto'); assert.equal(sent.steps, 80); assert.equal(sent.width, 256);
+  assert.equal(r.structuredContent.image, undefined, 'la imagen no se duplica en los datos estructurados');
+});
+test('imágenes: ComfyUI con un flujo básico y el primer modelo instalado', async () => {
+  const r = await call('image_generate', { prompt: 'un gato astronauta', negative: 'borroso', backend: 'comfy', seed: 7 });
+  assert.deepEqual(Buffer.from(r.content.find((c) => c.type === 'image').data, 'base64'), PNG);
+  const wf = imgSeen.at(-1).comfy.prompt;
+  assert.equal(wf[4].inputs.ckpt_name, 'dreamshaper.safetensors');
+  assert.equal(wf[6].inputs.text, 'un gato astronauta'); assert.equal(wf[7].inputs.text, 'borroso'); assert.equal(wf[3].inputs.seed, 7);
+  assert.match(r.structuredContent.text, /comfy · dreamshaper/);
+});
+test('imágenes: sin ningún generador encendido, explica cómo conseguir uno', async () => {
+  const r = (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'image_generate', arguments: { prompt: 'x' } } })).json()).result;
+  assert.equal(r.isError, true); assert.match(r.content[0].text, /ComfyUI.*Forge/);
+});
+
+test('imágenes: una a la vez (cancelar en la app no para el generador, así no se acumulan trabajos)', async () => {
+  const [a, b] = await Promise.all([call('image_generate', { prompt: 'lenta' }), new Promise((r) => setTimeout(r, 100)).then(() => call('image_generate', { prompt: 'otra' }))]);
+  assert.equal(a.isError, undefined);
+  assert.equal(b.isError, true); assert.match(b.content[0].text, /imagen anterior/);
+  assert.equal((await call('image_generate', { prompt: 'después' })).isError, undefined, 'al terminar, acepta la siguiente');
+});
+test('Gateway: la clave de la caché incluye todo lo que cambia la respuesta (modelo, instrucciones, historial, imagen, herramientas, parámetros)', async () => {
+  await configure({ enabled: true, providers: [prov('p/bueno', 'bueno'), prov('p/eco', 'eco')], cache: true });
+  const calls = () => gwSeen.length;
+  const base = { model: 'p/bueno', messages: [{ role: 'user', content: [{ type: 'text', text: 'resume esto' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }] };
+  const ask = async (b) => { const n = calls(); await (await gw('/v1/chat/completions', b)).text(); await new Promise((r) => setTimeout(r, 30)); return calls() - n; };
+  assert.equal(await ask(base), 1); assert.equal(await ask(base), 0, 'idéntica: de la caché');
+  const variants = {
+    'otra imagen': { ...base, messages: [{ role: 'user', content: [{ type: 'text', text: 'resume esto' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,BBBB' } }] }] },
+    'otro modelo': { ...base, model: 'p/eco' },
+    'auto en vez del modelo': { ...base, model: 'auto' },
+    instrucciones: { ...base, messages: [{ role: 'system', content: 'sé breve' }, ...base.messages] },
+    historial: { ...base, messages: [{ role: 'user', content: 'antes' }, { role: 'assistant', content: 'vale' }, ...base.messages] },
+    herramientas: { ...base, tools: [{ type: 'function', function: { name: 'leer', parameters: { type: 'object' } } }] },
+    temperatura: { ...base, temperature: 0.2 },
+  };
+  for (const [name, b] of Object.entries(variants)) assert.equal(await ask(b), 1, `${name}: no puede salir de la caché`);
+  const anth = { model: 'p/bueno', max_tokens: 50, messages: [{ role: 'user', content: 'hola caché' }] };
+  const askA = async (b) => { const n = calls(); await (await gw('/v1/messages', b)).text(); await new Promise((r) => setTimeout(r, 30)); return calls() - n; };
+  assert.equal(await askA(anth), 1); assert.equal(await askA(anth), 0);
+  assert.equal(await askA({ ...anth, system: 'otro sistema' }), 1, 'Anthropic: otro system no sale de la caché');
+  await configure({ enabled: false });
+});
+test('Gateway: con un tope activo, una IA de pago sin precio no se usa (su gasto no se podría contar)', async () => {
+  const providers = [{ ...prov('pago/sinprecio', 'bueno') }, { ...prov('gratis/eco', 'eco'), free: true }];
+  const ids = async () => (await (await gw('/v1/models')).json()).data.map((m) => m.id);
+  await configure({ enabled: true, providers });
+  assert.ok((await ids()).includes('pago/sinprecio'), 'sin tope, se usa');
+  await configure({ enabled: true, providers, budget: { month: 50 } });
+  const l = await ids();
+  assert.ok(!l.includes('pago/sinprecio') && l.includes('gratis/eco'));
+  await configure({ enabled: false });
+});
+
+test('imágenes: si se agota la espera, el turno sigue ocupado hasta que el generador termina de verdad', async () => {
+  const a = await call('image_generate', { prompt: 'cuelga' });
+  assert.equal(a.isError, true); assert.match(a.content[0].text, /sigue trabajando/);
+  const b = await call('image_generate', { prompt: 'mientras tanto' });
+  assert.equal(b.isError, true, 'el generador sigue ocupado: no se acepta otra'); assert.match(b.content[0].text, /imagen anterior/);
+  await new Promise((r) => setTimeout(r, 4500)); // termina a los 3,5 s; el puente lo comprueba cada 2 s
+  assert.equal((await call('image_generate', { prompt: 'ya libre' })).isError, undefined, 'cuando termina, se acepta la siguiente');
+});
+test('Gateway: el tope reserva el coste estimado antes de enviar (dos peticiones a la vez no pueden pasarse)', async () => {
+  // 1.000 €/M de salida → cada petición reserva 4.096 tokens × 1.000 € / 1M ≈ 4,10 €; el tope de 6 € solo deja una a la vez.
+  const providers = [{ ...prov('pago/eco', 'eco'), price: { in: 0, out: 1000 } }];
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 6 } });
+  const one = (q) => gw('/v1/chat/completions', { model: 'pago/eco', stream: true, messages: [{ role: 'user', content: q }] });
+  const [r1, r2] = await Promise.all([one('primera-larga'), new Promise((r) => setTimeout(r, 50)).then(() => one('segunda'))]);
+  const st = [r1.status, r2.status].sort();
+  await r1.text(); await r2.text();
+  assert.deepEqual(st, [200, 402], 'la segunda no cabe mientras la primera tiene su reserva');
+  await new Promise((r) => setTimeout(r, 100));
+  const r3 = await one('tercera'); assert.equal(r3.status, 200, 'al terminar, la reserva se cambia por el gasto real (pequeño) y vuelve a caber'); await r3.text();
+  await configure({ enabled: false });
+});
+
+test('Saldo único: la app y el Gateway no pueden reservar el mismo dinero', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 0, out: 200 } }]; // reserva del Gateway: 4.096 × 200 € / 1M ≈ 0,82 €
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day, budget = { day: total0 + 1 };
+  await configure({ enabled: true, providers, budget });
+  const res = await (await gw('/neura/budget/reserve', { eur: 0.8, budget })).json(); // la app reserva 0,80 € de 1 €
+  assert.ok(res.id);
+  const r = await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(r.status, 402, 'al Gateway solo le quedan 0,20 €: no cabe su reserva de 0,82 €');
+  assert.equal((await gw('/neura/budget/reserve', { eur: 0.3, budget })).status, 402, '…ni otra reserva de la app de 0,30 €');
+  assert.equal((await gw('/neura/budget/settle', { id: res.id, eur: 0, in: 0, out: 0 })).status, 200, 'la app liquida (su petición fue rechazada: 0 €)');
+  assert.equal((await gw('/neura/budget/settle', { id: res.id, eur: 0, in: 0, out: 0 })).status, 409, 'una reserva solo se liquida una vez');
+  assert.equal((await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'x' }] })).status, 200, 'liberado el saldo, el Gateway ya cabe');
+  assert.equal((await fetch(`${BASE}/neura/budget/reserve`, { method: 'POST', headers: { Authorization: `Bearer ${GWT}` }, body: '{"eur":1}' })).status, 403, 'el token del Gateway no puede reservar');
+  assert.equal((await gw('/neura/budget/reserve', { eur: -5 })).status, 400, 'importes inválidos se rechazan');
+  await configure({ enabled: false, budget: {} });
+});
+test('Gateway con tope: pide al proveedor un máximo de salida y, si la respuesta se corta, cobra lo reservado', async () => {
+  const providers = [{ ...prov('pago/bueno', 'bueno'), price: { in: 0, out: 1000 } }, { ...prov('pago/corta', 'corta'), price: { in: 0, out: 1000 } }];
+  const total0 = (await (await gw('/neura/gateway')).json()).total.day;
+  await configure({ enabled: true, providers, budget: { day: total0 + 100 } });
+  await gw('/v1/chat/completions', { model: 'pago/bueno', messages: [{ role: 'user', content: 'max' }] });
+  assert.equal(gwSeen.at(-1).body.max_tokens, 4096, 'sin max_tokens del cliente, se envía el máximo reservado');
+  await gw('/v1/chat/completions', { model: 'pago/bueno', max_tokens: 50, messages: [{ role: 'user', content: 'max' }] });
+  assert.equal(gwSeen.at(-1).body.max_tokens, 50, 'el del cliente se respeta');
+  const before = (await (await gw('/neura/gateway')).json()).total.day;
+  await (await gw('/v1/chat/completions', { model: 'pago/corta', stream: true, messages: [{ role: 'user', content: 'x' }] })).text();
+  await new Promise((r) => setTimeout(r, 300));
+  const after = await (await gw('/neura/gateway')).json();
+  assert.ok(Math.abs(after.total.day - before - 4.096) < 0.01, `corte sin datos de consumo → se cobra lo reservado (4,096 €): ${after.total.day - before}`);
+  assert.equal(after.reserved, 0, 'no queda ninguna reserva colgando');
+  await configure({ enabled: false, budget: {} });
+});
+
+// ---------- búsqueda en internet a través del puente ----------
+const searx = http.createServer((req, res) => {
+  const q = new URL(req.url, 'http://x').searchParams.get('q');
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ results: [{ title: 'Resultado <b>uno</b>', url: 'https://ejemplo.org/1', content: `Sobre ${q}` }, { title: 'Dos', url: 'https://ejemplo.org/2', content: 'otro' }] }));
+});
+await new Promise((r) => searx.listen(0, '127.0.0.1', r));
+after(() => searx.close());
+test('web_search: sin buscador explica cómo configurarlo; con el del PC (SearXNG) devuelve resultados; list_models lo indica', async () => {
+  const sr = async (q) => (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'web_search', arguments: { query: q } } })).json()).result;
+  const lm = async () => (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).json()).result.structuredContent.search;
+  assert.equal((await sr('hola')).isError, true);
+  assert.equal(await lm(), null);
+  await configure({ enabled: false, search: { type: 'searxng', url: `http://127.0.0.1:${searx.address().port}` } });
+  const r = await sr('energía solar');
+  assert.equal(r.structuredContent.results.length, 2); assert.equal(r.structuredContent.results[0].snippet, 'Sobre energía solar');
+  assert.equal(await lm(), 'SearXNG');
+  await configure({ enabled: false, search: { type: 'searxng', url: 'javascript:alert(1)' } });
+  assert.equal(await lm(), null, 'una dirección que no es http(s) se ignora');
   await configure({ enabled: false });
 });

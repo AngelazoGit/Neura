@@ -7,7 +7,7 @@ let failures = 0; const ok = (c, m) => { console.log(c ? '✓' : '✗', m); if (
 const call = (port, token) => fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then((r) => r.status);
 (async () => {
   await mocks.start();
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   w.on('dialog', (d) => d.accept());

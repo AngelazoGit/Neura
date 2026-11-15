@@ -13,7 +13,7 @@ const idle = (w) => w.waitForFunction(() => document.querySelector('#send').text
 const send = async (w, t) => { await w.fill('#input', t); await w.click('#send'); await idle(w); };
 (async () => {
   await mocks.start();
-  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD] });
+  const app = await _electron.launch({ executablePath: require(ROOT + '/node_modules/electron'), cwd: ROOT, args: [ROOT, '--user-data-dir=' + UD, '--lang=es-ES'] });
   const w = await app.firstWindow();
   w.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
   await w.waitForFunction(() => [...document.querySelectorAll('#target option')].some((o) => o.textContent.includes('ESTE PC')), null, { timeout: 20000 });
@@ -40,7 +40,7 @@ const send = async (w, t) => { await w.fill('#input', t); await w.click('#send')
 
   // Móvil conectado al mismo puente: recibe habilidades y proyectos
   const info = await w.evaluate(() => window.neuraDesktop.bridge());
-  const b = await chromium.launch(); const m = await b.newPage();
+  const b = await chromium.launch(); const m = await b.newPage({ locale: 'es-ES' });
   m.on('pageerror', (e) => { console.log('PAGEERROR móvil', e.message); failures++; });
   const link = `http://127.0.0.1:${info.port}/#pair=${Buffer.from(JSON.stringify({ u: `http://127.0.0.1:${info.port}/mcp`, t: info.token, n: 'pc' })).toString('base64url')}`;
   await m.goto(link);
