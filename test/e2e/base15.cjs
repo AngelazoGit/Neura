@@ -56,7 +56,7 @@ const searx = http.createServer((req, res) => {
   await w.evaluate(() => { S.search = { type: 'brave', key: 'x' }; thread().private = true; renderTargets(); });
   ok(await w.isHidden('#webLbl'), 'en un hilo 🔒 PRIVADO, un buscador de internet (Brave) no se ofrece');
   await w.evaluate(() => { S.search = { type: 'searxng', url: 'http://127.0.0.1:5605' }; renderTargets(); });
-  ok(await w.isVisible('#webLbl'), '…pero un SearXNG de tu equipo sí');
+  ok(await w.isHidden('#webLbl'), '…ni un SearXNG de tu PC: reenvía la consulta a buscadores de internet');
   await w.evaluate(() => { thread().private = false; S.search = {}; save(); renderTargets(); });
 
   // ---- 2. Registro de privacidad ----

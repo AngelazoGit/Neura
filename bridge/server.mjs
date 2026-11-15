@@ -837,6 +837,8 @@ function budgetLeft() {
   return Math.min(b.day > 0 ? b.day - s.day : Infinity, b.month > 0 ? b.month - s.month : Infinity);
 }
 const capped = () => gateway.budget?.day > 0 || gateway.budget?.month > 0;
+// Función síncrona: entre comprobar el saldo y apuntar la reserva no hay ningún await, así que ninguna otra
+// petición (de la app o del Gateway) puede ejecutarse en medio y ver el mismo saldo libre.
 function reserve(eur) {
   if (!(eur >= 0) || budgetLeft() < eur) return null;
   const id = randomUUID();

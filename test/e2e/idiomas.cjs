@@ -39,12 +39,31 @@ const launch = () => _electron.launch({ executablePath: require(ROOT + '/node_mo
   await w.click('#btnAis');
   const set = await w.textContent('#settings');
   ok(/LEVEL/.test(set) && /FREE ONLY/.test(set) && !/MEMORIA DE CONTEXTO|SEGURIDAD DE LAS CLAVES/.test(set), 'los ajustes están en inglés');
+  // Nombres tuyos que coinciden con textos de la app: no se traducen.
+  await w.keyboard.press('Escape');
+  await w.evaluate(() => {
+    S.skills.push({ id: 'u1', name: 'Plan de proyecto', description: 'mía', instructions: 'x', version: 1, updatedAt: 1 });
+    S.projects.push({ id: 'p1', name: 'Resumir un documento', memory: '', updatedAt: 1 }); save();
+  });
+  await w.click('#btnSkills');
+  ok((await w.$$eval('#skillList .srv', (b) => b.map((x) => x.innerText))).includes('✦ Plan de proyecto'), 'el nombre de tu habilidad no se traduce aunque coincida con un texto de la app');
+  await w.keyboard.press('Escape'); await w.click('#btnThreads');
+  ok((await w.$$eval('#projectSel option', (o) => o.map((x) => x.textContent))).includes('📁 Resumir un documento') && /ALL THREADS/.test(await w.textContent('#projectSel')), '…ni el de tu proyecto (las opciones fijas sí)');
+  await w.keyboard.press('Escape'); await w.click('#btnAis');
   // Cambio a chino desde ⚙ (recarga la app).
   await Promise.all([w.waitForEvent('load'), w.selectOption('#langSel', 'zh')]);
   await w.waitForSelector('#send');
   ok(await w.evaluate(() => S.lang === 'zh' && /简体中文/.test(S.instructions)), 'al cambiar a chino, la interfaz y las instrucciones por defecto pasan al chino');
   ok(/发送/.test(await w.textContent('#send')), 'el botón de enviar está en chino');
   ok(await w.$$eval('#log .msg.user .body', (b) => b[0].innerText) === 'Hola, ¿qué tal? Responde en una tabla', '…y los mensajes siguen sin traducir');
+  await w.click('#btnSkills');
+  ok((await w.$$eval('#skillList .srv', (b) => b.map((x) => x.innerText))).includes('✦ Plan de proyecto'), '…ni el nombre de tu habilidad');
+  await w.keyboard.press('Escape');
+  // Y de vuelta al español: todo vuelve, sin restos de otros idiomas.
+  await w.click('#btnAis');
+  await Promise.all([w.waitForEvent('load'), w.selectOption('#langSel', 'es')]);
+  await w.waitForSelector('#send');
+  ok(/ENVIAR/.test(await w.textContent('#send')) && await w.evaluate(() => /Responde siempre en español/.test(S.instructions)) && !/[\u4e00-\u9fff]/.test(await w.textContent('#app')), 'de vuelta al español: interfaz e instrucciones en español, sin restos de chino');
   await app.close();
   console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

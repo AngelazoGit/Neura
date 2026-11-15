@@ -69,6 +69,7 @@ const openai = http.createServer(async (req, res) => {
       return reply(res, j.stream, `IMAGEN:${img ? 'sí' : 'no'} PDF:${/Factura numero 4242/.test(q) ? 'sí' : 'no'}`);
     }
     case 'tabla': return reply(res, j.stream, '## Tabla\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- uno\n- dos');
+    case 'cita': return reply(res, j.stream, 'Según la fuente [1], la final fue en julio; otra fuente [7] lo confirma.');
     case 'ciega': {
       if (Array.isArray(last.content)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'Image input is not supported for this model.' } })); }
       return reply(res, j.stream, 'ciega responde texto');
