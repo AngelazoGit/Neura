@@ -44,7 +44,7 @@ const searx = http.createServer((req, res) => {
   const n0 = mocks.log.length;
   await sendMsg('¿Cuándo fue la final del Mundial 2026?');
   const sent = mocks.log.slice(n0).find((x) => x.model === 'rapido');
-  ok(queries.at(-1) === '¿Cuándo fue la final del Mundial 2026?' && /Resultados de una búsqueda en internet/.test(sent?.q) && /\[1\] Mundial 2026 — https:\/\/deportes\.example\/mundial/.test(sent?.q) && /cítalas/.test(sent?.q),
+  ok(queries.at(-1) === '¿Cuándo fue la final del Mundial 2026?' && /<<<RESULTADOS DE INTERNET/.test(sent?.q) && /\[1\] Mundial 2026 — https:\/\/deportes\.example\/mundial/.test(sent?.q) && /cítalas/.test(sent?.q),
     'busca antes de preguntar y la IA recibe las fuentes numeradas con la orden de citarlas');
   ok(/19 de julio/.test(sent.q) && !/<strong>|<b>/.test(sent.q) && !/javascript:/.test(sent.q), 'los extractos llegan como texto limpio y los enlaces que no son web se descartan');
   ok(/🌐 2 fuentes de internet/.test(await w.textContent('#log')) && await w.getAttribute('.sources a', 'href') === 'https://deportes.example/mundial', 'el mensaje muestra las fuentes con sus enlaces');
@@ -71,11 +71,11 @@ const searx = http.createServer((req, res) => {
   ok(/MOCK/.test(au) && /127\.0\.0\.1:5601/.test(au) && /3 envíos/.test(au) && !/Neura inteligencia artificial/.test(au), 'el registro agrupa los envíos por destino (las pruebas de conexión y PROBAR BÚSQUEDA no cuentan) · ' + au.replace(/\s+/g, ' '));
   ok(/búsqueda: «¿Cuándo fue la final/.test(au) && /SearXNG/.test(au), 'incluye las búsquedas y adónde fueron');
   ok(/Adjuntos: .*foto\.png/.test(au), 'y qué adjuntos se enviaron');
-  ok(/Nada de este hilo ha salido a internet/.test(au), 'todo fue a servicios de tu equipo (127.0.0.1): lo dice claramente');
+  ok(/1 servicio de internet ha recibido/.test(au), 'la búsqueda cuenta como salida a internet (SearXNG reenvía la consulta); el resto fue a tu equipo');
   ok(await w.evaluate(() => {
     S.providers.push({ id: 'g', name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', models: [] });
     auditTarget({ pid: 'g', model: 'llama', label: 'Groq / llama' }, 'mensaje', [{ role: 'user', content: 'hola [Archivo adjunto: acta.pdf — al usar su contenido…]' }]);
-    const h = auditHTML(); S.providers.pop(); return /api\.groq\.com/.test(h) && /INTERNET/.test(h) && /1<\/b> servicio de internet/.test(h) && /acta\.pdf/.test(h);
+    const h = auditHTML(); S.providers.pop(); return /api\.groq\.com/.test(h) && /INTERNET/.test(h) && /2<\/b> servicios de internet/.test(h) && /acta\.pdf/.test(h);
   }), 'una IA de internet aparece marcada como INTERNET y se cuenta en el resumen');
   await w.keyboard.press('Escape');
 

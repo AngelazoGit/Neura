@@ -127,7 +127,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await w.selectOption('#tplBody [data-f=tono]', 'cordial');
   await w.click('[data-tpl=make]');
   const pr = await w.inputValue('#input');
-  ok(/\*\*Rol:\*\* Actúa como redactor profesional/.test(pr) && /Para quién es: un cliente que se queja/.test(pr) && /Tono: cordial/.test(pr) && /\*\*Criterios de calidad:\*\*/.test(pr) && /pregúntala antes de responder/.test(pr),
+  ok(/\*\*Rol:\*\* Actúa como redactor profesional/.test(pr) && /Para quién es: un cliente que se queja/.test(pr) && /Tono: cordial/.test(pr) && /\*\*Criterios de calidad:\*\*/.test(pr) && /Pregunta solo si falta información imprescindible/.test(pr),
     'el formulario monta una petición profesional (rol, objetivo, contexto, pasos, formato y criterios)');
   ok(!/\[completa:/.test(pr), 'con los campos obligatorios rellenos no quedan huecos');
   await w.fill('#input', '');

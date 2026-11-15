@@ -2436,6 +2436,7 @@ function renderThreads(withCard = true) {
   const projects = S.projects.filter((p) => !p.deleted);
   if (S.project && !projects.some((p) => p.id === S.project)) S.project = null;
   const pr = projects.find((p) => p.id === S.project);
+  $('#projectSel').setAttribute('aria-label', tr('Proyecto')); // la marca data-noi18n protege los nombres, no la etiqueta
   $('#projectSel').innerHTML = `<option value="">${tr('TODOS LOS HILOS')}</option>${projects.map((p) => `<option value="${p.id}">📁 ${esc(p.name)}</option>`).join('')}<option value="__new">${tr('+ NUEVO PROYECTO…')}</option>`;
   $('#projectSel').value = S.project || '';
   if (withCard) $('#projectCard').innerHTML = pr ? `<div class="card">
