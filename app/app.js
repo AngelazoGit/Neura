@@ -56,6 +56,8 @@ const PRESETS = {
   anthropic:  { name: 'Anthropic Claude', kind: 'anthropic', tier: 'paid', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], keyUrl: 'https://console.anthropic.com/settings/keys' },
   openai:     { name: 'OpenAI', kind: 'openai', tier: 'paid', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1-mini'], keyUrl: 'https://platform.openai.com/api-keys', stt: 'gpt-4o-mini-transcribe' },
   deepseek:   { name: 'DeepSeek', kind: 'openai', tier: 'paid', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat'], keyUrl: 'https://platform.deepseek.com/api_keys' },
+  // Sin cuenta ni clave (dirección antigua de Pollinations): experimental, con límites y sin garantías.
+  pollinations: { name: 'Pollinations (sin cuenta)', kind: 'openai', tier: 'free', baseUrl: 'https://text.pollinations.ai/openai', models: ['openai-fast'], keyless: true },
   custom:     { name: 'Otra (compatible OpenAI)', kind: 'openai', tier: 'other', baseUrl: '', models: [] },
 };
 
@@ -276,7 +278,7 @@ let busy = false, abortCtl = null, rpcId = 0, attach = [];
 
 function targets() {
   const t = [];
-  for (const p of S.providers) if (p.enabled !== false) for (const m of p.models) t.push({ key: `${p.id}::${m}`, pid: p.id, model: m, label: `${p.name} / ${m}`, kind: p.kind });
+  for (const p of S.providers) if (p.enabled !== false) for (const m of p.models) if (!p.freeOnly || /:free$/.test(m)) t.push({ key: `${p.id}::${m}`, pid: p.id, model: m, label: `${p.name} / ${m}`, kind: p.kind });
   for (const s of S.mcp) for (const m of s.models || []) t.push({ key: `mcp:${s.id}::${m}`, sid: s.id, model: m, label: `⬡ ${s.name} / ${m}`, kind: 'mcp' });
   return t;
 }
@@ -985,6 +987,7 @@ function failMsg(msg, e, t) {
   msg.pending = false; msg.content = '';
   msg.error = friendly(e);
   msg.detail = (e.status ? `[${e.status}] ` : '') + netHint(e);
+  if (PRESETS[S.providers.find((x) => x.id === t?.pid)?.preset]?.keyless) msg.error += ' ' + KEYLESS_FAIL;
   noteFail(t, e);
 }
 // Algunos modelos escriben su razonamiento interno (a menudo en inglés) entre <think>…</think>.
@@ -1870,11 +1873,17 @@ function wizardHTML() {
     <div class="row wrap wzLang">${langSelect('wzLang')}</div>
     <h4>EMPIEZA CON LA IA · GRATIS</h4>
     ${level}
+    <button type="button" class="btn wide oauthBtn" data-oauth="openrouter">🔑 CONECTAR MI CUENTA<small>sin copiar claves</small></button>
+    <div class="hint">Inicia sesión en <b>OpenRouter</b> (o crea una cuenta gratis) y pulsa «Authorize»: Neura recibe la clave sola y usa solo sus modelos gratuitos. Lo que escribes va a OpenRouter y al proveedor de cada modelo. Límite gratuito: unas 50 peticiones al día.</div>
+    <div class="hint oauthMsg" aria-live="polite"></div>
     <div class="tabs">
-      <button type="button" data-wz="local" class="${wzMode === 'local' ? 'on' : ''}">💻 IA EN ESTE EQUIPO<small>sin cuentas ni claves</small></button>
-      <button type="button" data-wz="cloud" class="${wzMode === 'cloud' ? 'on' : ''}">☁ IA EN INTERNET<small>gratis, con una cuenta</small></button>
+      <button type="button" data-wz="local" class="${wzMode === 'local' ? 'on' : ''}">💻 IA EN MI ORDENADOR<small>requiere instalar Ollama y un equipo compatible</small></button>
+      <button type="button" data-wz="cloud" class="${wzMode === 'cloud' ? 'on' : ''}">⚙ OTRO PROVEEDOR<small>Gemini, Groq…: copiando su clave</small></button>
     </div>
     <div id="wzBody">${wzMode === 'local' ? localAIHTML() : cloudHTML()}</div>
+    <details class="tryFree"><summary>⚡ Probar sin cuenta (experimental)</summary>
+      <div class="hint">Usa Pollinations, un servicio gratuito sin registro: puede ir lento, cambiar o dejar de funcionar sin aviso. Lo que escribes va a Pollinations: no lo uses para datos personales (en los hilos 🔒 PRIVADOS no se usa nunca).</div>
+      <button type="button" class="btn sm ghost" id="wzTry">PROBAR SIN CUENTA</button></details>
   </div>`;
 }
 function cloudHTML() {
@@ -1884,11 +1893,105 @@ function cloudHTML() {
     <div class="hint">2. <a id="wzKey" href="${esc(PRESETS[wzPreset].keyUrl)}" target="_blank" rel="noopener">Abre su página ▸</a></div>
     <ol class="steps">${g.steps.map((x) => `<li>${esc(x)}</li>`).join('')}</ol>
     ${g.note ? `<div class="hint warn">⚠️ ${esc(g.note)}</div>` : ''}
-    <label>3. PEGA LA CLAVE<input id="wzApiKey" type="password" autocomplete="off" placeholder="pega aquí tu clave"></label>
+    <label>3. PEGA LA CLAVE<span class="row"><input id="wzApiKey" type="password" autocomplete="off" placeholder="pega aquí tu clave"><button type="button" class="btn sm ghost" id="wzPaste">📋 PEGAR</button></span></label>
     <button class="btn wide" id="wzGo">CONECTAR Y PROBAR</button>
     <div class="hint" id="wzMsg">La clave se guarda solo en este dispositivo. Los límites gratuitos los fija cada proveedor y pueden cambiar.</div>`;
 }
 const renderWizard = () => { const b = document.getElementById('wzBody'); if (b) b.innerHTML = wzMode === 'local' ? localAIHTML() : cloudHTML(); renderLocalAI(); };
+
+// Comprueba una clave sin generar texto (no gasta cuota): una consulta que exige la clave y la lista de modelos.
+// La lista de OpenRouter es pública: allí se consultan los datos de la propia clave (/key).
+async function checkKey(p) {
+  if (p.preset === 'openrouter') {
+    const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/key', { headers: { Authorization: 'Bearer ' + p.apiKey } });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+  }
+  const list = await fetchModels(p);
+  if (!list.length) throw new Error('No se encontraron modelos');
+  p.models = list.sort((a, b) => modelRank(a) - modelRank(b));
+  refreshed.add(p.id);
+}
+// El formato de la clave sugiere el proveedor; no decide: la elección sigue en la lista.
+const KEY_PREFIX = [[/^AIza/, 'gemini'], [/^gsk_/, 'groq'], [/^sk-or-/, 'openrouter'], [/^nvapi-/, 'nvidia'], [/^csk-/, 'cerebras']];
+function suggestPreset(key) {
+  const k = KEY_PREFIX.find(([re]) => re.test(key))?.[1];
+  if (!k || k === wzPreset || !WIZ.includes(k)) return;
+  wzPreset = k; renderWizard();
+  $('#wzApiKey').value = key;
+  $('#wzMsg').textContent = `Parece una clave de ${PRESETS[k].name}: la he elegido en la lista. Si no lo es, cámbiala.`;
+}
+async function pasteKey() {
+  let key = '';
+  try { key = (await navigator.clipboard.readText()).trim(); } catch {}
+  const inp = $('#wzApiKey');
+  if (!key) { inp.focus(); return toast('No se pudo leer el portapapeles: mantén pulsado el campo (o Ctrl+V) y elige Pegar.', true); }
+  inp.value = key; suggestPreset(key);
+}
+
+// ---------- «Conectar mi cuenta»: OpenRouter con OAuth y PKCE (sin copiar claves) ----------
+// Se genera un secreto (code_verifier) y se envía solo su huella SHA-256; un «state» aleatorio liga la vuelta a esta petición.
+// Ambos caducan a los 10 minutos y se borran al primer uso. El código y la clave no se registran en ningún sitio.
+const OR_AUTH = 'https://openrouter.ai/auth', OR_KEYS = 'https://openrouter.ai/api/v1/auth/keys';
+const OAUTH_LS = 'neura-oauth', OAUTH_TTL = 10 * 60e3;
+const KEYLESS_FAIL = 'El acceso sin cuenta es experimental y puede no estar disponible: para algo más estable, pulsa «Conectar mi cuenta» en ⚙ → IAs (gratis, sin copiar claves).';
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const randToken = (n) => b64url(crypto.getRandomValues(new Uint8Array(n)));
+function oauthMsg(text, bad) {
+  for (const el of document.querySelectorAll('.oauthMsg')) { el.textContent = text; el.classList.toggle('red', !!bad); }
+  toast(text, bad);
+}
+async function connectOpenRouter() {
+  if (!crypto.subtle) return oauthMsg('Este navegador no permite conectar la cuenta aquí (hace falta una conexión segura https).', true);
+  const verifier = randToken(48), state = randToken(24);
+  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  let cb;
+  if (DESK?.oauthStart) cb = `http://localhost:${await DESK.oauthStart()}/callback?state=${state}`;
+  else if (CAP) cb = `neura://oauth/openrouter?state=${state}`;
+  else cb = `${location.origin}${location.pathname}?oauth=openrouter&state=${state}`;
+  localStorage.setItem(OAUTH_LS, JSON.stringify({ verifier, state, exp: Date.now() + OAUTH_TTL }));
+  oauthMsg(DESK || CAP ? 'Se ha abierto OpenRouter en tu navegador: inicia sesión y pulsa «Authorize». Neura seguirá sola al volver.' : 'Abriendo OpenRouter…');
+  openAuth(`${OR_AUTH}?callback_url=${encodeURIComponent(cb)}&code_challenge=${challenge}&code_challenge_method=S256`);
+}
+// En el PC y en el móvil se abre el navegador del sistema (no una ventana dentro de Neura); en la web, la misma pestaña.
+const openAuth = (url) => (DESK ? window.open(url, '_blank') : location.assign(url));
+async function finishOAuth({ code, state, error }) {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(OAUTH_LS)); } catch {}
+  localStorage.removeItem(OAUTH_LS); // un solo uso: una segunda vuelta con el mismo enlace ya no vale
+  if (!p || !state || p.state !== state) return oauthMsg('Este enlace de conexión no es válido o ya se usó. Pulsa otra vez «Conectar mi cuenta».', true);
+  if (Date.now() > p.exp) return oauthMsg('La conexión ha caducado (10 minutos). Pulsa otra vez «Conectar mi cuenta».', true);
+  if (!code || error) return oauthMsg('No se completó la conexión con OpenRouter. Puedes volver a intentarlo cuando quieras.', true);
+  oauthMsg('Conectando tu cuenta de OpenRouter…');
+  let key;
+  try {
+    const r = await xfetch(OR_KEYS, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, code_verifier: p.verifier, code_challenge_method: 'S256' }) });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+    key = (await r.json()).key;
+    if (!key) throw new Error('OpenRouter no devolvió la clave');
+  } catch (e) { return oauthMsg(`No se pudo conectar: ${friendly(e)} Vuelve a intentarlo.`, true); }
+  // Se comprueba antes de añadirla: si falla, no queda una IA a medias.
+  const old = S.providers.find((x) => x.oauth === 'openrouter');
+  const pr = { ...(old || { id: uid(), preset: 'openrouter', ...JSON.parse(JSON.stringify(PRESETS.openrouter)), oauth: 'openrouter' }), apiKey: key, freeOnly: true, tier: 'free', enabled: true };
+  try { await checkKey(pr); } catch (e) { return oauthMsg(`Tu cuenta se conectó, pero no se pudo comprobar: ${friendly(e)}`, true); }
+  if (old) Object.assign(old, pr); else S.providers.push(pr);
+  S.target = `${pr.id}::${pr.models[0]}`; S.wizardDone = true;
+  save(); renderTargets(); renderLog(); if ($('#sheetAis').classList.contains('open')) renderProviders();
+  oauthMsg(`✓ Cuenta de OpenRouter conectada: ${pr.models.length} modelos gratuitos. ¡Ya puedes escribir!`); $('#input').focus();
+}
+// Vuelta en la web (?oauth=openrouter&state=…&code=…): se procesa y se borra de la barra de direcciones.
+function oauthFromUrl(href) {
+  const u = new URL(href);
+  const ok = u.protocol === 'neura:' ? u.host === 'oauth' && u.pathname === '/openrouter' : u.searchParams.get('oauth') === 'openrouter';
+  if (!ok) return null;
+  return { code: u.searchParams.get('code') || '', state: u.searchParams.get('state') || '', error: u.searchParams.get('error') || '' };
+}
+function addKeyless(k) {
+  let p = S.providers.find((x) => x.preset === k);
+  if (!p) S.providers.push(p = { id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), apiKey: '', enabled: true });
+  p.enabled = true; S.target = `${p.id}::${p.models[0]}`; S.wizardDone = true;
+  save(); renderTargets(); renderLog();
+  toast('⚡ Modo sin cuenta (experimental). Para algo más estable: «Conectar mi cuenta» en ⚙ → IAs.'); $('#input').focus();
+}
 
 // ---------- IA en este equipo (Ollama), sin cuentas ----------
 // Neura no instala Ollama (pide permisos de administrador y cambia por sistema): detecta si falta y enlaza el instalador.
@@ -2082,8 +2185,13 @@ function learnProgress() {
   toast(`🎓 Reto conseguido: ${x.t}. ${x.tip}`);
 }
 document.addEventListener('click', async (e) => {
-  const d = e.target.dataset || {};
+  const d = { ...e.target.dataset };
   if (d.learnex) { const x = LEARN.find((l) => l.id === d.learnex); $('#input').value = x.ex; $('#input').dispatchEvent(new Event('input')); $('#input').focus(); }
+  const wzEl = e.target.closest?.('[data-wz],[data-oauth]'); // el clic puede caer en el texto pequeño del botón
+  if (wzEl) Object.assign(d, { wz: wzEl.dataset.wz, oauth: wzEl.dataset.oauth });
+  if (d.oauth === 'openrouter') connectOpenRouter().catch((err) => oauthMsg('No se pudo iniciar la conexión: ' + netHint(err), true));
+  if (e.target.id === 'wzPaste') pasteKey();
+  if (e.target.id === 'wzTry') addKeyless('pollinations');
   if (d.wz) { wzMode = d.wz; document.querySelectorAll('[data-wz]').forEach((b) => b.classList.toggle('on', b.dataset.wz === wzMode)); renderWizard(); }
   if (d.level) {
     S.level = d.level;
@@ -2097,6 +2205,7 @@ document.addEventListener('click', async (e) => {
   if (d.lai === 'use') useLocalModel(d.m);
 });
 $('#log').addEventListener('change', (e) => { if (e.target.id === 'wzPreset') { wzPreset = e.target.value; renderWizard(); } });
+$('#log').addEventListener('input', (e) => { if (e.target.id === 'wzApiKey') suggestPreset(e.target.value.trim()); });
 $('#log').addEventListener('click', async (e) => {
   if (e.target.id !== 'wzGo') return;
   const key = $('#wzApiKey').value.trim(), k = wzPreset, msg = $('#wzMsg');
@@ -2105,12 +2214,9 @@ $('#log').addEventListener('click', async (e) => {
   let p = S.providers.find((x) => x.wizard);
   if (!p) S.providers.push(p = { id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), enabled: true, wizard: true });
   Object.assign(p, { preset: k, name: PRESETS[k].name, baseUrl: PRESETS[k].baseUrl, models: [...PRESETS[k].models], apiKey: key });
-  refreshed.delete(p.id); await refreshModels(p, true);
-  const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
   try {
-    if (!p.models[0]) throw new Error('No se encontraron modelos');
-    await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, undefined, { purpose: 'prueba' });
-    delete p.wizard; S.target = t.key; S.wizardDone = true; save(); renderTargets(); renderLog();
+    await checkKey(p);
+    delete p.wizard; S.target = `${p.id}::${p.models[0]}`; S.wizardDone = true; save(); renderTargets(); renderLog();
     toast(`✓ ${p.name} conectada. ¡Ya puedes escribir!`); $('#input').focus();
   } catch (err) {
     msg.textContent = `No funcionó: ${friendly(err)} Revisa la clave y vuelve a intentarlo.`;
@@ -2162,7 +2268,9 @@ function renderProviders() {
         <button class="btn sm red" data-act="del">✕</button></div>
       <label>ENDPOINT<input data-f="baseUrl" value="${esc(p.baseUrl)}" placeholder="https://…/v1"></label>
       <label>CLAVE API ${help('clave')}<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
-      ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
+      ${p.oauth ? `<div class="hint">🔑 Conectada con tu cuenta (solo modelos gratuitos). Quitarla con ✕ borra la clave de este dispositivo; para anularla del todo, revócala en <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai ▸ Keys</a>.</div>`
+        : PRESETS[p.preset]?.keyless ? `<div class="hint">⚡ Sin cuenta ni clave (experimental): puede ir lento o dejar de funcionar. Lo que escribes va a ${esc(p.name)}.</div>`
+        : p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
       <label>MODELOS (separados por coma) ${help('modelo')}<input data-f="models" value="${esc(p.models.join(', '))}"></label>
       <div class="row2">
         <label>LÍMITE DIARIO (peticiones)<input data-f="dailyLimit" type="number" min="0" step="1" inputmode="numeric" value="${esc(p.dailyLimit || '')}" placeholder="sin límite"></label>
@@ -2219,7 +2327,7 @@ async function diagnose(allModels) {
   const el = () => document.getElementById('diagOut');
   const rows = [];
   const groups = [
-    ...S.providers.filter((p) => p.enabled !== false).map((p) => ({ name: p.name, list: (allModels ? p.models : p.models.filter((m) => S.health[`${p.id}::${m}`]?.reason !== 'RETIRADO').slice(0, 1)).map((m) => findT(`${p.id}::${m}`)).filter(Boolean), noKey: !p.apiKey && p.preset !== 'custom', empty: !p.models.length })),
+    ...S.providers.filter((p) => p.enabled !== false).map((p) => ({ name: p.name, list: (allModels ? p.models : p.models.filter((m) => S.health[`${p.id}::${m}`]?.reason !== 'RETIRADO').slice(0, 1)).map((m) => findT(`${p.id}::${m}`)).filter(Boolean), noKey: !p.apiKey && p.preset !== 'custom' && !PRESETS[p.preset]?.keyless, empty: !p.models.length })),
     ...S.mcp.map((s) => ({ name: `⬡ ${s.name}`, list: (allModels ? s.models || [] : (s.models || []).slice(0, 1)).map((m) => findT(`mcp:${s.id}::${m}`)).filter(Boolean), off: s.status !== 'on' && (s.error || 'sin conexión') })),
   ];
   const paint = () => {
@@ -3384,6 +3492,15 @@ async function boot() {
   // Abierta desde el QR de un PC: se conecta sola a ese puente.
   const p = parsePair(location.hash);
   if (p) { window.history.replaceState(null, '', location.pathname + location.search); pairWith(p); }
+  const back = !NATIVE && oauthFromUrl(location.href);
+  if (back) { window.history.replaceState(null, '', location.pathname + location.hash); finishOAuth(back); }
+  DESK?.onOAuth?.((d) => finishOAuth(d));
+  const capApp = CAP && window.Capacitor?.Plugins?.App;
+  if (capApp) {
+    const fromLink = (url) => { const r = url && oauthFromUrl(url); if (r) finishOAuth(r); };
+    capApp.addListener('appUrlOpen', (ev) => fromLink(ev.url));
+    capApp.getLaunchUrl?.().then((r) => fromLink(r?.url)).catch(() => {});
+  }
   save();
   renderTargets(); renderLog();
   S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));

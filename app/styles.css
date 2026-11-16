@@ -229,6 +229,11 @@ mark{background:rgba(255,122,0,.35);color:var(--text)}
 .wizard{text-align:left;max-width:420px;margin:20px auto 0;border-left-color:var(--green)}
 .wizard h4{margin:0;font:700 12px var(--cond);letter-spacing:.2em;color:var(--green)}
 .wizard select,.wizard input{width:100%}
+.oauthBtn{display:flex;flex-direction:column;align-items:center;gap:2px;margin:10px 0 4px}
+.oauthBtn small{font:400 10px var(--mono);letter-spacing:0;text-transform:none;opacity:.8}
+.oauthMsg:empty{display:none}
+.wizard label .row{display:flex;gap:6px}.wizard label .row input{flex:1;min-width:0}.wizard label .row .btn{flex:none;width:auto}
+.tryFree{margin-top:10px}.tryFree summary{cursor:pointer;color:var(--dim);font-size:12px}
 .msg.user .tag{justify-content:space-between}
 .msg .tag .acts button{background:none;border:1px solid var(--line);color:var(--dim);font:11px var(--mono);padding:1px 6px;cursor:pointer}
 .auto[hidden]{display:none}

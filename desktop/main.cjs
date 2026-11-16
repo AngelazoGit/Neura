@@ -207,6 +207,36 @@ ipcMain.handle('save-file', async (_e, name, text, encoding) => {
   return r.filePath;
 });
 
+// «Conectar mi cuenta»: el navegador vuelve a http://localhost:<puerto>/callback con el código.
+// Servidor temporal solo en la interfaz local, solo mientras hay una conexión pendiente (máx. 10 min) y para una sola vuelta.
+// No se registra el código en ningún sitio: pasa directamente a la app, que comprueba el «state» y lo canjea.
+let oauthSrv = null;
+const oauthStop = () => { if (oauthSrv) { clearTimeout(oauthSrv.timer); for (const s of oauthSrv.list) { s.close(); s.closeIdleConnections?.(); } oauthSrv = null; } };
+ipcMain.handle('oauth-start', async () => {
+  oauthStop();
+  const http = require('node:http');
+  const page = (ok) => `<!doctype html><meta charset="utf-8"><title>Neura</title><body style="font:16px system-ui;background:#07060a;color:#eee;text-align:center;padding:60px">${ok ? '✓ Listo. Ya puedes cerrar esta pestaña y volver a Neura.' : 'Enlace no válido.'}</body>`;
+  const handler = (req, res) => {
+    const u = new URL(req.url, 'http://localhost');
+    if (req.method !== 'GET' || u.pathname !== '/callback') { res.writeHead(404); return res.end(); }
+    const data = { code: u.searchParams.get('code') || '', state: u.searchParams.get('state') || '', error: u.searchParams.get('error') || '' };
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', connection: 'close' });
+    res.end(page(!!data.state));
+    if (!data.state) return;
+    oauthStop();
+    if (win && !win.isDestroyed()) { win.webContents.send('oauth-cb', data); if (win.isMinimized()) win.restore(); win.focus(); }
+  };
+  const main = http.createServer(handler);
+  await new Promise((ok, ko) => { main.once('error', ko); main.listen(0, '127.0.0.1', ok); });
+  const port = main.address().port, list = [main];
+  // «localhost» puede resolverse a ::1: se escucha también ahí, en el mismo puerto, si el sistema lo permite.
+  const v6 = http.createServer(handler);
+  v6.once('error', () => {}); v6.listen(port, '::1', () => list.push(v6));
+  oauthSrv = { list, timer: setTimeout(oauthStop, 10 * 60e3) };
+  return port;
+});
+ipcMain.handle('oauth-stop', () => oauthStop());
+
 // Peticiones de la app con streaming: cabecera, trozos y fin llegan como eventos.
 const pending = new Map();
 ipcMain.on('http', async (e, id, { url, method, headers, body }) => {
@@ -252,4 +282,4 @@ app.whenReady().then(async () => {
   if (state.error) dialog.showMessageBox({ type: 'warning', message: 'Puente MCP', detail: state.error });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', stopBridge);
+app.on('will-quit', () => { oauthStop(); stopBridge(); });
