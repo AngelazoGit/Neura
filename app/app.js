@@ -85,13 +85,20 @@ const DICT = LANG === 'es' ? null : window.NEURA_I18N?.[LANG] || null;
 // Trozos conocidos dentro de textos con partes variables («3 modelos», «Groq: CONECTADO»): de más largo a más corto.
 const SEG = DICT && new RegExp(`(^|[^\\p{L}\\p{N}])(${Object.keys(DICT).filter((k) => k.length > 1).sort((a, b) => b.length - a.length)
   .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\p{L}\\p{N}])`, 'gu');
-function tr(str) {
-  if (!DICT || !str || typeof str !== 'string') return str;
+// Moneda de los precios y del tope (⚙ → CONSUMO): solo cambia el símbolo, no convierte; la interfaz se escribe con «€».
+const CURS = { EUR: '€', USD: '$', JPY: '¥' };
+const CUR = CURS[S.currency] ? S.currency : 'EUR';
+function trText(str) {
   const [, a, core, b] = str.match(/^(\s*)([\s\S]*?)(\s*)$/);
   if (!core) return str;
   const hit = DICT[core.replace(/\s+/g, ' ')];
   if (hit != null) return a + hit + b;
   return a + core.replace(SEG, (x, pre, k) => pre + (DICT[k] ?? k)) + b;
+}
+function tr(str) {
+  if (!str || typeof str !== 'string') return str;
+  const t = DICT ? trText(str) : str;
+  return CUR === 'EUR' ? t : t.replaceAll('€', CURS[CUR]);
 }
 // Lo que es contenido (mensajes, respuestas, títulos de hilos, código, fuentes de internet) no se traduce.
 const NO_TR = '.txt, .msg.user .body, pre, code, .snip, textarea, .chatItem, .sources ol, #input, [data-noi18n]';
@@ -114,7 +121,7 @@ function trNode(n) {
     if (!skip) for (const c of n.childNodes) trNode(c);
   }
 }
-if (DICT) {
+if (DICT || CUR !== 'EUR') {
   new MutationObserver((ms) => {
     for (const m of ms) {
       if (m.type === 'childList') m.addedNodes.forEach(trNode);
@@ -385,7 +392,8 @@ function budgetUsed() {
 }
 const budgetLeft = () => { const b = S.budget || {}, x = budgetUsed(); return Math.min(+b.day > 0 ? b.day - x.day : Infinity, +b.month > 0 ? b.month - x.month : Infinity); };
 const overBudget = () => { const b = S.budget || {}, x = budgetUsed(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
-const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
+const money$ = (x) => x.toLocaleString(LANG === 'es' ? 'es-ES' : LANG, { style: 'currency', currency: CUR, currencyDisplay: 'narrowSymbol' });
+const eur = (x) => (x > 0 && x < (CUR === 'JPY' ? 1 : 0.01) ? '< ' + money$(CUR === 'JPY' ? 1 : 0.01) : money$(x));
 
 // ---------- registro de privacidad: qué salió de este dispositivo, adónde y cuándo ----------
 // Por hilo y solo en este dispositivo (no se sincroniza). Se apunta cada envío: mensajes a IAs, resúmenes,
@@ -2313,6 +2321,8 @@ function usageHTML() {
     ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
     <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
     <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
+    <label class="field">MONEDA<select id="currencySel" data-noi18n>${Object.entries(CURS).map(([k, v]) => `<option value="${k}" ${k === CUR ? 'selected' : ''}>${v} ${k}</option>`).join('')}</select></label>
+    <p class="hint">Solo cambia el símbolo, no convierte: pon los precios y el tope en la moneda elegida.</p>
     <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de cada llamada a una IA de pago, Neura le pide como máximo 4.096 tokens de respuesta y <b>reserva</b> su coste máximo (con la entrada estimada a la alta)${DESK ? ' en un saldo único que comparten la app y el Gateway de este PC' : ' en el saldo de este dispositivo'}; si no cabe, no la usa. Si una petición se corta y no se sabe cuánto consumió, se contabiliza lo reservado. Neura controla lo que contabiliza con tus precios y una estimación de la entrada; la factura del proveedor puede incluir otros conceptos y es la que vale. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
 }
 function usageSumHTML() {
@@ -3359,6 +3369,7 @@ $('#provList').addEventListener('click', async (e) => {
   save(); renderProviders(); renderTargets(); renderLog();
 });
 $('#settings').addEventListener('change', (e) => {
+  if (e.target.id === 'currencySel') { S.currency = e.target.value; save(); location.reload(); return; }
   if (e.target.id === 'budgetDay' || e.target.id === 'budgetMonth') {
     S.budget = { ...S.budget, [e.target.id === 'budgetDay' ? 'day' : 'month']: Math.max(0, +e.target.value || 0) };
     save(); renderTargets(); repaintUsage(); toast('TOPE DE GASTO GUARDADO');

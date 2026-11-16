@@ -95,6 +95,13 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await w.waitForFunction(() => /POR EL GATEWAY/.test(document.querySelector('#usagePanel').textContent), null, { timeout: 5000 })
     .then(() => ok(true, 'el panel muestra aparte lo que ha pasado por el Gateway'), () => ok(false, 'consumo del Gateway en el panel'));
   ok(/gratis\/rapido/.test(await w.textContent('#usagePanel')), '…por destino');
+
+  // Moneda: solo cambia el símbolo (precios, tope e importes), sin convertir.
+  await w.selectOption('#currencySel', 'JPY');
+  await w.waitForFunction(() => typeof S !== 'undefined' && document.readyState === 'complete', null, { timeout: 15000 });
+  await w.waitForTimeout(500); await w.click('#btnAis');
+  const yen = await w.textContent('#sheetAis');
+  ok(/TOPE ¥ \/ DÍA/.test(yen) && /¥ \/ 1M TOKENS ENTRADA/.test(yen) && /¥/.test(await w.textContent('#usagePanel')) && !/€/.test(yen.replace(/€ EUR/, '')), 'en ⚙ → CONSUMO se elige la moneda (€, $ o ¥) y se ve en etiquetas, tope e importes');
   await app.close();
   console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
