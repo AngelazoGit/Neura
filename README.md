@@ -1,5 +1,7 @@
 # Neura
 
+[English](README.en.md) · **Español**
+
 Todas las IAs públicas en un solo chat, aprovechando sus niveles gratuitos, más un menú para conectarte a servidores MCP que hacen de puente con la IA local de tus ordenadores y servidores.
 
 ```
@@ -130,7 +132,7 @@ Las imágenes fuente están en `assets/`. Si las cambias: `npm run assets`.
 
 ## Web app (gratis, sin tiendas)
 
-La carpeta `app/` se publica sola en un repositorio público aparte, `AngelazoGit/neura-web`, con GitHub Pages. El código fuente, el puente y los proyectos nativos siguen en este repo privado.
+La carpeta `app/` se publica sola en un repositorio público aparte, `AngelazoGit/neura-web`, con GitHub Pages. El código fuente, el puente y los proyectos nativos siguen en este repositorio.
 
 **Enlace:** https://angelazogit.github.io/neura-web/
 
