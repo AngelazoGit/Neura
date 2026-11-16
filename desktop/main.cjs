@@ -231,11 +231,10 @@ ipcMain.handle('oauth-start', async () => {
   const port = main.address().port, list = [main];
   // «localhost» puede resolverse a ::1: se escucha también ahí, en el mismo puerto, si el sistema lo permite.
   const v6 = http.createServer(handler);
-  v6.once('error', () => {}); v6.listen(port, '::1', () => list.push(v6));
+  v6.once('error', () => {}); v6.listen(port, '::1'); list.push(v6);
   oauthSrv = { list, timer: setTimeout(oauthStop, 10 * 60e3) };
   return port;
 });
-ipcMain.handle('oauth-stop', () => oauthStop());
 
 // Peticiones de la app con streaming: cabecera, trozos y fin llegan como eventos.
 const pending = new Map();

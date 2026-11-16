@@ -1906,6 +1906,7 @@ async function checkKey(p) {
     const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/key', { headers: { Authorization: 'Bearer ' + p.apiKey } });
     if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
   }
+  // shortcut: si un proveedor publica su lista sin pedir clave, una clave mala pasa aquí y falla en la primera pregunta (con «clave no válida»); añadir su consulta de cuenta si pasa.
   const list = await fetchModels(p);
   if (!list.length) throw new Error('No se encontraron modelos');
   p.models = list.sort((a, b) => modelRank(a) - modelRank(b));
@@ -1917,7 +1918,7 @@ function suggestPreset(key) {
   const k = KEY_PREFIX.find(([re]) => re.test(key))?.[1];
   if (!k || k === wzPreset || !WIZ.includes(k)) return;
   wzPreset = k; renderWizard();
-  $('#wzApiKey').value = key;
+  $('#wzApiKey').value = key; $('#wzApiKey').focus();
   $('#wzMsg').textContent = `Parece una clave de ${PRESETS[k].name}: la he elegido en la lista. Si no lo es, cámbiala.`;
 }
 async function pasteKey() {
@@ -1957,8 +1958,8 @@ const openAuth = (url) => (DESK ? window.open(url, '_blank') : location.assign(u
 async function finishOAuth({ code, state, error }) {
   let p = null;
   try { p = JSON.parse(localStorage.getItem(OAUTH_LS)); } catch {}
-  localStorage.removeItem(OAUTH_LS); // un solo uso: una segunda vuelta con el mismo enlace ya no vale
   if (!p || !state || p.state !== state) return oauthMsg('Este enlace de conexión no es válido o ya se usó. Pulsa otra vez «Conectar mi cuenta».', true);
+  localStorage.removeItem(OAUTH_LS); // un solo uso: una segunda vuelta con el mismo enlace ya no vale; una ajena no anula la pendiente
   if (Date.now() > p.exp) return oauthMsg('La conexión ha caducado (10 minutos). Pulsa otra vez «Conectar mi cuenta».', true);
   if (!code || error) return oauthMsg('No se completó la conexión con OpenRouter. Puedes volver a intentarlo cuando quieras.', true);
   oauthMsg('Conectando tu cuenta de OpenRouter…');
@@ -3497,7 +3498,7 @@ async function boot() {
   DESK?.onOAuth?.((d) => finishOAuth(d));
   const capApp = CAP && window.Capacitor?.Plugins?.App;
   if (capApp) {
-    const fromLink = (url) => { const r = url && oauthFromUrl(url); if (r) finishOAuth(r); };
+    const fromLink = (url) => { const r = url && oauthFromUrl(url); if (r && localStorage.getItem(OAUTH_LS)) finishOAuth(r); }; // getLaunchUrl repite el enlace en cada recarga
     capApp.addListener('appUrlOpen', (ev) => fromLink(ev.url));
     capApp.getLaunchUrl?.().then((r) => fromLink(r?.url)).catch(() => {});
   }

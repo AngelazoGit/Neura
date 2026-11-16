@@ -26,6 +26,5 @@ contextBridge.exposeInMainWorld('neuraDesktop', {
   saveFile: (name, text, encoding) => ipcRenderer.invoke('save-file', name, text, encoding),
   savePdf: (name) => ipcRenderer.invoke('save-pdf', name),
   oauthStart: () => ipcRenderer.invoke('oauth-start'),
-  oauthStop: () => ipcRenderer.invoke('oauth-stop'),
   onOAuth: (cb) => ipcRenderer.on('oauth-cb', (_e, d) => cb(d)),
 });

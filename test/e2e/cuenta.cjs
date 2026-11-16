@@ -62,10 +62,11 @@ const get = (url) => new Promise((ok2) => http.get(url, (r) => { r.resume(); r.o
   const listens = lan && await new Promise((r) => { const c = require('net').connect({ host: lan, port: +cb.port }); c.setTimeout(800); c.on('connect', () => { c.destroy(); r(true); }); c.on('error', () => r(false)); c.on('timeout', () => { c.destroy(); r(false); }); });
   ok(!listens, 'el servidor temporal solo escucha en la interfaz local (no en la red)');
 
-  // ---- Vuelta con un «state» que no es el nuestro: no se canjea y la conexión pendiente se anula ----
+  // ---- Vuelta con un «state» que no es el nuestro: no se canjea ni anula la conexión pendiente ----
   await get(`http://127.0.0.1:${cb.port}/callback?state=OTRO&code=CODIGO-OK`);
   await w.waitForFunction(() => /no es válido o ya se usó/.test(document.querySelector('.oauthMsg')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
   ok(/no es válido o ya se usó/.test(await w.textContent('.wizard .oauthMsg')) && !OR.exchanges.length && !(await w.evaluate(() => S.providers.length)), 'un «state» ajeno no canjea nada ni crea la IA');
+  ok(await w.evaluate(() => !!localStorage.getItem('neura-oauth')), '…ni borra la conexión pendiente (una vuelta ajena no puede cancelar la buena)');
   ok((await get(`http://127.0.0.1:${cb.port}/callback?state=x`)) === 0, 'tras una vuelta, el servidor temporal se cierra');
 
   // ---- Cancelar (sin código) ----
