@@ -217,7 +217,7 @@ ipcMain.handle('oauth-start', async () => {
   const http = require('node:http');
   const page = (ok) => `<!doctype html><meta charset="utf-8"><title>Neura</title><body style="font:16px system-ui;background:#07060a;color:#eee;text-align:center;padding:60px">${ok ? '✓ Listo. Ya puedes cerrar esta pestaña y volver a Neura.' : 'Enlace no válido.'}</body>`;
   const handler = (req, res) => {
-    const u = new URL(req.url, 'http://localhost');
+    const u = new URL(req.url.replace(/(\?[^?#]*)\?/, '$1&'), 'http://localhost'); // por si se añade «?code=» tras nuestro «?state=»
     if (req.method !== 'GET' || u.pathname !== '/callback') { res.writeHead(404); return res.end(); }
     const data = { code: u.searchParams.get('code') || '', state: u.searchParams.get('state') || '', error: u.searchParams.get('error') || '' };
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', connection: 'close' });

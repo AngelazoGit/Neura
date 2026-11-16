@@ -79,7 +79,7 @@ const get = (url) => new Promise((ok2) => http.get(url, (r) => { r.resume(); r.o
   ({ cb } = await start());
   const st = cb.searchParams.get('state');
   ok(await w.evaluate(() => !!localStorage.getItem('neura-oauth')), 'mientras está pendiente, el secreto se guarda solo en este dispositivo');
-  await get(`http://127.0.0.1:${cb.port}/callback?state=${st}&code=CODIGO-OK`);
+  await get(`http://127.0.0.1:${cb.port}/callback?state=${st}?code=CODIGO-OK`); // como si OpenRouter añadiera «?code=» sin mirar nuestro «?state=»
   await w.waitForFunction(() => S.providers.some((p) => p.oauth), null, { timeout: 10000 }).catch(() => {});
   const pr = await w.evaluate(() => { const p = S.providers.find((x) => x.oauth); return p && { key: p.apiKey, models: p.models, free: p.freeOnly, target: S.target, wiz: !!document.querySelector('.wizard'), pend: localStorage.getItem('neura-oauth') }; });
   ok(pr && pr.key === 'sk-or-v1-PRUEBA' && OR.exchanges.length === 1 && OR.keyChecks === 1 && OR.gens === 0, 'canjea el código con el secreto PKCE, comprueba la clave consultando sus datos (sin generar texto)');
@@ -136,7 +136,7 @@ const get = (url) => new Promise((ok2) => http.get(url, (r) => { r.resume(); r.o
   OR.exchanges = [];
   await p.route('https://openrouter.ai/**', async (route) => {
     const r = route.request(), url = new URL(r.url());
-    if (url.pathname === '/auth') { OR.challenge = url.searchParams.get('code_challenge'); return route.fulfill({ status: 302, headers: { location: url.searchParams.get('callback_url') + '&code=CODIGO-OK' } }); }
+    if (url.pathname === '/auth') { OR.challenge = url.searchParams.get('code_challenge'); return route.fulfill({ status: 302, headers: { location: url.searchParams.get('callback_url') + '?code=CODIGO-OK' } }); }
     if (r.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
     const [c, o] = handle(r.method(), url.pathname, r.headers().authorization, r.postData());
     return route.fulfill({ status: c, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(o) });

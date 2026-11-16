@@ -1989,7 +1989,7 @@ async function finishOAuth({ code, state, error }) {
 }
 // Vuelta en la web (?oauth=openrouter&state=…&code=…): se procesa y se borra de la barra de direcciones.
 function oauthFromUrl(href) {
-  const u = new URL(href);
+  const u = new URL(href.replace(/(\?[^?#]*)\?/, '$1&')); // por si el servicio añade «?code=» a una vuelta que ya lleva «?state=»
   const ok = u.protocol === 'neura:' ? u.host === 'oauth' && u.pathname === '/openrouter' : u.searchParams.get('oauth') === 'openrouter';
   if (!ok) return null;
   return { code: u.searchParams.get('code') || '', state: u.searchParams.get('state') || '', error: u.searchParams.get('error') || '' };
