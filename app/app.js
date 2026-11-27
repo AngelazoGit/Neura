@@ -145,6 +145,19 @@ document.addEventListener('change', (e) => { if (e.target.classList?.contains('l
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
 // Nivel de uso: los usuarios existentes siguen en profesional; los nuevos eligen al empezar.
 if (S.level == null && (S.providers.length || S.threads.some((t) => t.messages.length))) S.level = 'pro';
+// ---------- máscaras (apariencia) ----------
+// Mando es el aspecto original: quien ya usaba Neura lo conserva; quien empieza, arranca con Serio (más sobrio).
+const MASKS = { serio: 'Serio', limpio: 'Limpio', sereno: 'Sereno', neutro: 'Neutro', mando: 'Mando' };
+if (!MASKS[S.mask]) S.mask = S.providers.length || S.threads.length ? 'mando' : 'serio';
+function applyMask(m) {
+  S.mask = MASKS[m] ? m : 'serio';
+  document.documentElement.dataset.mask = S.mask;
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--chrome').trim() || '#07060a');
+  for (const b of document.querySelectorAll('[data-maskset]')) b.classList.toggle('on', b.dataset.maskset === S.mask);
+}
+applyMask(S.mask);
+const maskPicker = () => `<div class="masks" role="group" aria-label="Apariencia">${Object.entries(MASKS).map(([k, v]) => `<button type="button" data-maskset="${k}" class="${k === S.mask ? 'on' : ''}"><i class="m-${k}"></i>${v}</button>`).join('')}</div>`;
+document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-maskset]'); if (b) { applyMask(b.dataset.maskset); save(); } });
 // Gemini retiró los 2.5: se pasa a los alias que siempre apuntan al modelo vigente.
 const GEMINI_OLD = { 'gemini-2.5-flash': 'gemini-flash-latest', 'gemini-2.5-flash-lite': 'gemini-flash-lite-latest' };
 S.providers.filter((p) => p.preset === 'gemini').forEach((p) => { p.models = [...new Set(p.models.map((m) => GEMINI_OLD[m] || m))]; });
@@ -1829,19 +1842,49 @@ function renderLog() {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
-      <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
+      <div class="big">NEURA</div><div class="sub">${S.mask === 'mando' ? 'ESPERANDO ENTRADA' : 'Todas tus IAs en un solo chat'}</div>
       ${S.providers.length || S.wizardDone ? '' : wizardHTML()}
       ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>${targets().length ? learnHTML(true) : ''}` : ''}
-      <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
-      <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
-      <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li>
-      <li><b>⚖ CONSEJO</b>: pregunta a varias IAs a la vez y recibe la mejor respuesta combinada.</li></ol></div>`;
+      ${n ? homeHTML(n) : S.providers.length || S.wizardDone ? '<p class="hint">Pulsa <b>⚙</b> y añade una IA (o «Conectar mi cuenta», sin copiar claves) para empezar.</p>' : ''}</div>`;
     renderLocalAI();
     return;
   }
   log.innerHTML = logHTML(th);
   if (stick) log.scrollTop = log.scrollHeight;
 }
+
+// Inicio: qué puedes hacer y tus hilos recientes, a un toque.
+const HOME = [
+  ['ask', '💬', 'Preguntar algo', 'Escribe abajo; cuanto más contexto, mejor respuesta.'],
+  ['tpl', '✨', 'Usar una plantilla', 'Correo, resumen, informe, acta…: rellenas unos campos y listo.'],
+  ['doc', '📄', 'Trabajar con un documento', 'Adjunta un PDF, una foto o un texto y pregunta sobre él.'],
+  ['web', '🌐', 'Buscar en internet', 'Respuestas con las fuentes citadas.'],
+  ['council', '⚖', 'Comparar varias IAs', 'Responden a la vez y una combina lo mejor.'],
+  ['skills', '✦', 'Mis habilidades', 'Procedimientos que repites, aplicados con cualquier IA.'],
+];
+function homeHTML(n) {
+  const recent = S.threads.filter((t) => !t.deleted && t.messages.length && t.id !== S.active).sort((a, b) => b.ts - a.ts).slice(0, 4);
+  return `<div class="home">
+    <div class="homeHead"><b>¿Qué quieres hacer?</b><span class="hint">${n} modelos listos · AUTO-SALTO ${S.autoSkip ? 'activado' : 'desactivado'}</span></div>
+    <div class="homeGrid">${HOME.filter(([k]) => k !== 'council' || S.level !== 'basic').map(([k, ic, t, d]) => `<button type="button" class="homeCard" data-home="${k}"><span>${ic}</span><b>${t}</b><small>${d}</small></button>`).join('')}</div>
+    ${recent.length ? `<div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div>` : ''}
+  </div>`;
+}
+$('#log').addEventListener('click', (e) => {
+  const r = e.target.closest('[data-tid-open]');
+  if (r) { S.active = r.dataset.tidOpen; save(); renderLog(); return; }
+  const k = e.target.closest('[data-home]')?.dataset.home;
+  if (!k) return;
+  if (k === 'ask') $('#input').focus();
+  if (k === 'tpl') openTemplates();
+  if (k === 'doc') $('#fileIn').click();
+  if (k === 'skills') $('#btnSkills').click();
+  if (k === 'council') { S.council = true; $('#council').checked = true; save(); toast(`⚖ CONSEJO: ${councilMembers(findT(S.target)).length} IAs responderán a la vez`); $('#input').focus(); }
+  if (k === 'web') {
+    if (!searchReady(thread())) { openSheet('#sheetAis'); return toast(thread().private ? 'En un hilo 🔒 PRIVADO no se busca en internet.' : 'Elige un buscador en ⚙ → 🌐 BÚSQUEDA EN INTERNET (SearXNG es gratis).', true); }
+    S.web = true; $('#web').checked = true; save(); toast('🌐 WEB: Neura buscará en internet y la IA citará las fuentes'); $('#input').focus();
+  }
+});
 
 const pend = new Set();
 function schedule(m) {
@@ -1879,6 +1922,7 @@ function wizardHTML() {
     </div>`;
   return `<div class="card wizard">
     <div class="row wrap wzLang">${langSelect('wzLang')}</div>
+    ${maskPicker()}
     <h4>EMPIEZA CON LA IA · GRATIS</h4>
     ${level}
     <button type="button" class="btn wide oauthBtn" data-oauth="openrouter">🔑 CONECTAR MI CUENTA<small>sin copiar claves</small></button>
@@ -2399,6 +2443,9 @@ function renderSettings() {
   $('#settings').innerHTML = `
     <h3>🌐 IDIOMA · LANGUAGE</h3>
     ${langSelect('langSel')}
+    <h3>🎭 APARIENCIA</h3>
+    ${maskPicker()}
+    <p class="hint">Mando es el aspecto original de Neura; Limpio es claro, para quien se cansa con los fondos oscuros.</p>
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
