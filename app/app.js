@@ -145,6 +145,42 @@ document.addEventListener('change', (e) => { if (e.target.classList?.contains('l
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
 // Nivel de uso: los usuarios existentes siguen en profesional; los nuevos eligen al empezar.
 if (S.level == null && (S.providers.length || S.threads.some((t) => t.messages.length))) S.level = 'pro';
+// ---------- ⏰ Tareas programadas ----------
+// Una pregunta que Neura envía sola a la hora elegida, en su propio hilo («⏰ nombre»), con 🌐 WEB si lo marcas.
+// Solo mientras Neura está abierta (en el PC conviene dejarla abierta o minimizada).
+const DAYS = { diaria: [0, 1, 2, 3, 4, 5, 6], laborables: [1, 2, 3, 4, 5], lunes: [1], martes: [2], 'miércoles': [3], jueves: [4], viernes: [5], 'sábado': [6], domingo: [0] };
+const DAY_LABEL = { diaria: 'Todos los días', laborables: 'De lunes a viernes', lunes: 'Los lunes', martes: 'Los martes', 'miércoles': 'Los miércoles', jueves: 'Los jueves', viernes: 'Los viernes', 'sábado': 'Los sábados', domingo: 'Los domingos' };
+function dueSchedules(now = new Date()) {
+  const d = today(), hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  return (S.schedules || []).filter((x) => x.on !== false && x.last !== d && (DAYS[x.days] || DAYS.diaria).includes(now.getDay()) && hm >= x.time);
+}
+async function runSchedule(x) {
+  const back = S.active;
+  let th = S.threads.find((t) => t.id === x.tid && !t.deleted);
+  if (!th) { th = { id: uid(), title: `⏰ ${x.name}`, messages: [], ts: Date.now() }; S.threads.unshift(th); x.tid = th.id; }
+  x.last = today(); S.active = th.id; save(); renderLog();
+  await send(x.prompt, [], { web: !!x.web, display: `⏰ ${x.name} · ${x.prompt}` });
+  th.title = `⏰ ${x.name}`;
+  const ans = [...th.messages].reverse().find((m) => m.role === 'assistant' && !m.skipped);
+  try { if ('Notification' in window && Notification.permission === 'granted') new Notification(`⏰ ${x.name}`, { body: String(ans?.content || ans?.error || '').slice(0, 160) }); } catch {}
+  toast(`⏰ ${x.name}: ${tr('lista. Está en su hilo.')}`);
+  if (S.active === th.id && back && back !== th.id && S.threads.some((t) => t.id === back)) { S.active = back; save(); renderLog(); }
+}
+setInterval(() => { if (!busy) { const x = dueSchedules()[0]; if (x) runSchedule(x); } }, 30000);
+function schedulesHTML() {
+  const list = S.schedules || [];
+  return `<h3>⏰ TAREAS PROGRAMADAS</h3>
+    ${list.map((x) => `<div class="folder"><span><b data-noi18n>${esc(x.name)}</b> <small class="mono">${tr(DAY_LABEL[x.days] || x.days)} · ${esc(x.time)}${x.web ? ' · 🌐' : ''}${x.last ? ` · ${tr('última')}: ${esc(x.last)}` : ''}</small></span><span><button class="btn sm ghost" data-schedrun="${x.id}">${tr('PROBAR')}</button> <button class="btn sm red" data-scheddel="${x.id}" aria-label="${tr('Borrar')}">✕</button></span></div>`).join('')}
+    <div class="card schedForm">
+      <label>NOMBRE<input id="schName" maxlength="40" placeholder="Noticias de mi sector"></label>
+      <label>QUÉ PEDIR<textarea id="schPrompt" rows="2" placeholder="Resúmeme en 5 puntos las noticias de hoy sobre energía solar en España."></textarea></label>
+      <div class="row2"><label>CUÁNDO<select id="schDays">${Object.keys(DAYS).map((k) => `<option value="${k}">${DAY_LABEL[k]}</option>`).join('')}</select></label><label>HORA<input id="schTime" type="time" value="09:00"></label></div>
+      <label class="auto"><input type="checkbox" id="schWeb"> 🌐 BUSCAR EN INTERNET</label>
+      <button class="btn sm" id="schAdd">+ PROGRAMAR</button>
+    </div>
+    <p class="hint">Funciona mientras Neura está abierta (si estaba cerrada a esa hora, se hace al abrirla ese día). Cada tarea tiene su propio hilo ⏰ y se avisa al terminar.</p>`;
+}
+
 // ---------- máscaras (apariencia) ----------
 // Mando es el aspecto original: quien ya usaba Neura lo conserva; quien empieza, arranca con Serio (más sobrio).
 const MASKS = { serio: 'Serio', limpio: 'Limpio', sereno: 'Sereno', neutro: 'Neutro', mando: 'Mando' };
@@ -279,7 +315,7 @@ async function hydrateFiles() {
     try { const v = await blobs.get(f.ref); if (v == null) f.missing = true; else f[field(f)] = f.kind === 'image' ? await toDataUrl(v) : v; }
     catch { f.missing = true; }
   }
-  try { for (const k of await blobs.keys()) if (!used.has(k)) await blobs.del(k); } catch {}
+  try { for (const k of await blobs.keys()) if (!used.has(k) && !String(k).startsWith('lib:')) await blobs.del(k); } catch {}
 }
 // Las referencias son de este dispositivo: al exportar o sincronizar viaja el contenido original.
 const portable = (list) => JSON.parse(JSON.stringify(list, (k, v) => (k === 'ref' || k === 'missing' ? undefined : v)));
@@ -1020,6 +1056,7 @@ const activeProject = () => { const id = thread().project; return id ? S.project
 function withInstructions(hist, skill = activeSkill()) {
   const sys = [];
   if (S.instructions?.trim()) sys.push(S.instructions.trim());
+  if (S.profile?.on !== false && S.profile?.text?.trim()) sys.push(`Sobre el usuario (tenlo en cuenta sin repetirlo):\n${S.profile.text.trim()}`);
   const pr = activeProject();
   if (pr?.memory?.trim()) sys.push(`Proyecto «${pr.name}». Información y preferencias que debes tener en cuenta:\n${pr.memory.trim()}`);
   if (skill) sys.push(`Habilidad activa: «${skill.name}» (v${skill.version}). Sigue este procedimiento:\n\n${skill.instructions}`);
@@ -1045,7 +1082,7 @@ async function runTarget(t, hist, msg, signal, tools, sk = null, purpose) {
 // opt.web: buscar en internet en este mensaje; opt.searchQuery: qué buscar (si no, el propio mensaje).
 async function send(text, files = [], opt = {}) {
   const th = thread(), msgs = th.messages;
-  if (!msgs.length) th.title = (opt.display || text || files[0]?.name || 'HILO').slice(0, 48);
+  if (!msgs.length) th.title = (opt.blind ? `⚔ ${text}` : opt.display || text || files[0]?.name || 'HILO').slice(0, 48);
   th.ts = Date.now();
   msgs.push({ id: uid(), role: 'user', content: text, ...(opt.display ? { display: opt.display } : {}), ...(opt.searchQuery ? { searchQuery: opt.searchQuery } : {}), ...(files.length ? { files } : {}), ts: Date.now() });
   save();
@@ -1067,9 +1104,11 @@ async function send(text, files = [], opt = {}) {
     // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
     const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
     // 🌐 WEB: se busca antes y los resultados van con la pregunta; la IA debe citar las fuentes.
+    hist = await withLibrary(th, userMsg, hist);
     if ((S.web || opt.web) && th.private) userMsg.searchError = tr('hilo 🔒 PRIVADO: la búsqueda saldría a buscadores de internet');
     else if ((S.web || opt.web) && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
-    if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
+    if (opt.blind) await sendBlind(th, hist, first, signal, needs, skill);
+    else if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
     // Con resultados web en la pregunta, sin herramientas: un texto de terceros no puede hacer que la IA lea tus archivos.
     else await respond(th, hist, first, signal, needs, skill, { tools: S.useTools && !userMsg.sources?.length, extra: userMsg.sources?.length ? { srcN: userMsg.sources.length } : null,
       why: routed && routed.key !== S.target ? `🧭 Enrutado por tarea: ${taskName(task)} → ${routed.label}.` : undefined });
@@ -1741,6 +1780,107 @@ async function sendCouncil(th, hist, first, signal, needs = {}, skill = null) {
   }
 }
 
+// ---------- 📚 Biblioteca del proyecto ----------
+// Documentos de un 📁 proyecto que las IAs consultan en cada pregunta de sus hilos: se eligen los trozos que más
+// se parecen a la pregunta (por palabras, en el dispositivo) y se envían con su página para citarla.
+// La lista va en S.library (este dispositivo); el texto, en IndexedDB. No se sincronizan.
+// shortcut: búsqueda por palabras, no semántica; con muchos documentos parecidos puede elegir mal: pasar a embeddings (Ollama) si se queda corta.
+const libDocs = (pid) => (S.library ||= {})[pid] ||= [];
+async function addToLibrary(pid, list) {
+  for (const f of list) {
+    try {
+      const parts = await readFile(f, 400000, 20e6);
+      const text = parts.filter((x) => x.text).map((x) => x.text).join('\n');
+      if (!text.trim()) { toast(`${f.name}: ${tr('sin texto que leer (¿PDF escaneado?)')}`, true); continue; }
+      const chunks = [];
+      for (const pg of text.split(/^--- pág\. (?=\d+ ---$)/m)) {
+        const n = +pg.match(/^(\d+) ---/)?.[1] || null, body = pg.replace(/^\d+ ---\n?/, '');
+        for (let i = 0; i < body.length; i += 1500) { const t = body.slice(i, i + 1500).trim(); if (t) chunks.push({ p: n, t }); }
+      }
+      const id = 'lib:' + uid();
+      await blobs.put(id, JSON.stringify(chunks));
+      libDocs(pid).push({ id, name: f.name, chunks: chunks.length, pages: Math.max(0, ...chunks.map((c) => c.p || 0)) || null });
+      save(); toast(`📚 ${f.name}: ${tr('añadido a la biblioteca')}`);
+    } catch (e) { toast(`${f.name}: ${e.message}`, true); }
+  }
+  renderThreads();
+}
+async function withLibrary(th, userMsg, hist) {
+  const docs = th.project ? libDocs(th.project) : [];
+  const q = [...words(textOf(userMsg.content))];
+  if (!docs.length || !q.length) return hist;
+  const scored = [];
+  for (const d of docs) {
+    let chunks; try { chunks = JSON.parse(await blobs.get(d.id) || '[]'); } catch { continue; }
+    for (const c of chunks) {
+      const w = words(c.t), n = q.filter((x) => [...w].some((y) => y.slice(0, 5) === x.slice(0, 5))).length;
+      if (n) scored.push({ n, d, c });
+    }
+  }
+  const top = scored.sort((a, b) => b.n - a.n).slice(0, 4);
+  if (!top.length) return hist;
+  userMsg.lib = top.map((x) => `${x.d.name}${x.c.p ? ` · ${tr('pág.')} ${x.c.p}` : ''}`);
+  const add = `\n\n<<<${tr('FRAGMENTOS DE LOS DOCUMENTOS DEL PROYECTO')}>>>\n\n${top.map((x) => `[${x.d.name}${x.c.p ? `, ${tr('pág.')} ${x.c.p}` : ''}]\n${x.c.t}`).join('\n\n')}\n\n<<<${tr('FIN DE LOS FRAGMENTOS')}>>>\n${tr('Si usas estos fragmentos, cita el documento y la página entre corchetes, p. ej. [informe.pdf, pág. 3]. Si no bastan para responder, dilo.')}`;
+  const last = hist[hist.length - 1];
+  const content = Array.isArray(last.content) ? last.content.map((c, k) => (k === 0 && c.type === 'text' ? { ...c, text: c.text + add } : c)) : last.content + add;
+  return [...hist.slice(0, -1), { ...last, content }];
+}
+
+// Con 🌐 WEB activado se busca una vez con el objetivo y los resultados acompañan a cada paso.
+// shortcut: de los adjuntos solo se usa el texto (no las imágenes); si hace falta, mandarlas en el hilo normal.
+async function runSteps(goal, files = []) {
+  const th = thread();
+  if (!th.messages.length) th.title = `🧩 ${goal}`.slice(0, 48);
+  const root = { id: uid(), role: 'user', content: goal, display: `🧩 /pasos ${goal}`, ...(files.length ? { files } : {}), ts: Date.now() };
+  th.messages.push(root); th.ts = Date.now();
+  save(); setBusy(true); renderLog();
+  const signal = abortCtl.signal, first = findT(S.target);
+  const material = files.filter((f) => f.text).map((f) => `### ${f.name}\n${f.text.slice(0, 20000)}`).join('\n\n');
+  try {
+    let web = '';
+    if (S.web && th.private) root.searchError = tr('hilo 🔒 PRIVADO: la búsqueda saldría a buscadores de internet');
+    else if (S.web && searchReady(th)) web = textOf((await withSearch(th, root, [{ role: 'user', content: '' }], signal))[0].content);
+    const base = `${tr('Objetivo')}: ${goal}${material ? `\n\n${tr('Material del usuario')}:\n${material}` : ''}${web}`;
+    const ask = async (content, step) => {
+      const n0 = th.messages.length;
+      const ok = await respond(th, [{ role: 'user', content }], first, signal, {}, null, { tools: false, noFit: true, extra: { step } });
+      return ok ? th.messages.slice(n0).reverse().find((x) => x.content && !x.error)?.content || '' : null;
+    };
+    const planTxt = await ask(`${base}\n\n${tr('Divide este objetivo en 3 a 5 pasos concretos (reunir información, organizar, redactar, revisar…). Responde solo con la lista numerada, un paso por línea, sin explicaciones.')}`, tr('Plan'));
+    if (planTxt == null) return;
+    const steps = (planTxt.split('\n').map((l) => l.match(/^\s*\d+[.)]\s*(.+)/)?.[1]?.replace(/\*\*/g, '').trim()).filter(Boolean).slice(0, 5));
+    if (!steps.length) steps.push(goal);
+    const plan = steps.map((x, j) => `${j + 1}. ${x}`).join('\n'), done = [];
+    for (let i = 0; i < steps.length && !signal.aborted; i++) {
+      const prev = done.length ? `\n\n${tr('Lo hecho hasta ahora')}:\n\n${done.map((d, j) => `## ${tr('Paso')} ${j + 1}\n${d.slice(0, 4000)}`).join('\n\n')}` : '';
+      const out = await ask(`${base}\n\n${tr('Plan')}:\n${plan}${prev}\n\n${tr('Haz ahora solo el paso')} ${i + 1}: ${steps[i]}`, `${tr('Paso')} ${i + 1}/${steps.length} · ${steps[i]}`);
+      if (out == null) return;
+      done.push(out);
+    }
+    if (!signal.aborted) await ask(`${base}\n\n${tr('Trabajo de cada paso')}:\n\n${done.map((d, j) => `## ${steps[j]}\n${d.slice(0, 6000)}`).join('\n\n')}\n\n${tr('Entrega el resultado final completo para el usuario: revisa errores e incoherencias, quita repeticiones y no menciones los pasos.')}`, tr('Resultado final'));
+  } catch (e) {
+    if (e.name !== 'AbortError') th.messages.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
+  } finally {
+    th.messages.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
+    th.ts = Date.now(); setBusy(false); save(); renderLog(); renderTargets(); syncAll();
+  }
+}
+
+// A ciegas: dos IAs de proveedores distintos responden como «A» y «B»; al elegir la mejor se revela cuál era cada una
+// y el voto cuenta para el enrutado por tarea, como en el CONSEJO.
+async function sendBlind(th, hist, first, signal, needs = {}, skill = null) {
+  const pair = councilMembers(first, needs).slice(0, 2);
+  if (pair.length < 2) { th.messages.push({ id: uid(), role: 'assistant', error: 'Para comparar a ciegas hacen falta dos IAs disponibles de proveedores distintos.', ts: Date.now() }); return; }
+  if (Math.random() < 0.5) pair.reverse();
+  const group = uid();
+  const runs = pair.map((t, i) => {
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, blind: 'AB'[i], ts: Date.now(), why: '⚔ A CIEGAS: dos IAs responden sin que sepas cuál es cuál.' };
+    th.messages.push(msg); return { t, msg };
+  });
+  renderLog();
+  await Promise.all(runs.map(async ({ t, msg }) => { try { await runTarget(t, hist, msg, signal, false, skill); } catch (e) { failMsg(msg, e, t); } schedule(msg); }));
+}
+
 function setBusy(b) {
   busy = b;
   abortCtl = b ? new AbortController() : null;
@@ -1762,7 +1902,7 @@ function replyHTML(m) {
     if (m.skipped) return `<div class="reply err skip"><div class="txt">✕ ${esc(m.label || 'NEURA')}: ${esc(m.error)} → probando otra IA${detail}</div></div>`;
     return `<div class="reply err"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}</span></div><div class="txt">${esc(m.error)}${detail}</div></div>`;
   }
-  const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
+  const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" ${m.blind ? 'class="blindVote"' : ''} title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
     : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-check="${m.id}" title="Revisa esta respuesta: qué es dudoso y cómo verificarlo (con fuentes de internet si tienes buscador)">🔎 COMPROBAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
@@ -1773,14 +1913,33 @@ function replyHTML(m) {
   const citeWarn = !cites ? '' : !cites.length ? `<span class="chip off">⚠ ${tr('No cita las fuentes')}</span>`
     : cites.filter((n) => n < 1 || n > m.srcN).map((n) => `<span class="chip off">⚠ [${n}] ${tr('no corresponde a ninguna fuente')}</span>`).join('');
   const whyBtn = m.why && !m.pending ? `<button type="button" class="whyb" data-why="${m.id}" aria-label="¿Por qué esta IA?" title="¿Por qué esta IA?">ⓘ</button>` : '';
-  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span><span data-noi18n>${esc(m.label)}</span> ${whyBtn}${skill}${citeWarn}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
+  const hidden = m.blind && !thread().messages.some((x) => x.group === m.group && x.voted);
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${m.step ? `<span class="chip route step">🧩 <span data-noi18n>${esc(m.step)}</span></span> ` : ''}${hidden ? `<b>${tr('Respuesta')} ${m.blind}</b>` : `<span data-noi18n>${esc(m.label)}</span>`} ${whyBtn}${skill}${citeWarn}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div>${previewHTML(m)}</div>`;
 }
 function sourcesHTML(m) {
+  const lib = m.lib?.length ? `<div class="sources">📚 ${tr('Consultado en la biblioteca')}: <span data-noi18n>${m.lib.map(esc).join(' · ')}</span></div>` : '';
+  return lib + webSourcesHTML(m);
+}
+function webSourcesHTML(m) {
   if (m.searchError) return `<div class="sources off">🌐 Sin búsqueda: ${esc(m.searchError)}</div>`;
   if (!m.sources?.length) return '';
   return `<details class="sources"><summary>🌐 ${m.sources.length} fuentes de internet${m.query ? ` · ${tr('búsqueda')}: <span data-noi18n>«${esc(m.query.slice(0, 80))}»</span>` : ''}</summary><ol>${m.sources.map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)}</a> <small>${esc(hostOf(x.url))}</small></li>`).join('')}</ol></details>`;
 }
 // Ajustes de un toque bajo la última respuesta: se envían como un mensaje normal (y se ve qué se pidió).
+function previewHTML(m) {
+  if (m.pending || !m.content) return '';
+  const blocks = [...m.content.matchAll(/```(html|svg|xml)?\s*\n([\s\S]*?)```/gi)].filter((b) => /<svg[\s>]/i.test(b[2]) || /<(html|body|!doctype)/i.test(b[2]) || b[1]?.toLowerCase() === 'html');
+  return blocks.map((b, i) => (/^\s*<svg[\s>]/i.test(b[2]) && !/<script/i.test(b[2])
+    ? `<div class="preview"><img alt="${tr('Vista previa')}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(b[2].trim())}"></div>`
+    : `<button type="button" class="btn sm" data-openhtml="${m.id}:${i}">🌐 ${DESK ? tr('ABRIR LA PÁGINA EN EL NAVEGADOR') : tr('DESCARGAR LA PÁGINA (.html)')}</button>`)).join('');
+}
+async function openHtml(ref) {
+  const [id, i] = ref.split(':'), m = thread().messages.find((x) => x.id === id);
+  const b = [...(m?.content || '').matchAll(/```(html|svg|xml)?\s*\n([\s\S]*?)```/gi)].filter((x) => /<svg[\s>]/i.test(x[2]) || /<(html|body|!doctype)/i.test(x[2]) || x[1]?.toLowerCase() === 'html')[+i];
+  if (!b) return;
+  if (DESK?.openHtml) return DESK.openHtml(b[2]);
+  download('neura-pagina.html', b[2], 'text/html');
+}
 const ADJUST = [
   ['✂ Más corta', 'Hazla más corta: quédate solo con lo esencial.'],
   ['🧒 Más sencilla', 'Explícalo de forma más sencilla, sin tecnicismos, para alguien que empieza.'],
@@ -1817,6 +1976,7 @@ function logHTML(th) {
       while (i < msgs.length && msgs[i].group === m.group) g.push(msgs[i++]);
       i--;
       const answers = g.filter((x) => !x.synth), synth = g.find((x) => x.synth);
+      if (m.blind) { const shown = g.some((x) => x.voted); out.push(`<div class="msg council blindSet"><div class="tag">⚔ ${tr('A CIEGAS')} · ${shown ? tr('revelado') : tr('elige la mejor sin saber de qué IA es')}</div><div class="cgrid">${answers.map(replyHTML).join('')}</div></div>`); continue; }
       out.push(`<div class="msg council"><div class="tag">⚖ CONSEJO · ${answers.length} IAs</div><div class="cgrid">${answers.map(replyHTML).join('')}</div>${synth ? replyHTML(synth) : ''}</div>`);
     } else out.push(msgHTML(m).replace(/<\/div>$/, m.id === lastReply && lastOk && !busy && !th.batch ? `${adjustHTML()}</div>` : '</div>'));
     if (th.summary?.upto === m.id && i < msgs.length - 1) {
@@ -1861,13 +2021,15 @@ const HOME = [
   ['web', '🌐', 'Buscar en internet', 'Respuestas con las fuentes citadas.'],
   ['council', '⚖', 'Comparar varias IAs', 'Responden a la vez y una combina lo mejor.'],
   ['skills', '✦', 'Mis habilidades', 'Procedimientos que repites, aplicados con cualquier IA.'],
+  ['steps', '🧩', 'Tarea en varios pasos', 'Planifica, investiga, redacta y revisa por ti.'],
+  ['blind', '⚔', 'Comparar a ciegas', 'Dos IAs responden sin decir cuál es cuál: elige la mejor.'],
 ];
 function homeHTML(n) {
-  const recent = S.threads.filter((t) => !t.deleted && t.messages.length && t.id !== S.active).sort((a, b) => b.ts - a.ts).slice(0, 4);
+  const recent = S.threads.filter((t) => !t.deleted && t.messages.length && t.id !== S.active).sort((a, b) => !!b.pinned - !!a.pinned || b.ts - a.ts).slice(0, 4);
   return `<div class="home">
     <div class="homeHead"><b>¿Qué quieres hacer?</b><span class="hint">${n} modelos listos · AUTO-SALTO ${S.autoSkip ? 'activado' : 'desactivado'}</span></div>
     <div class="homeGrid">${HOME.filter(([k]) => k !== 'council' || S.level !== 'basic').map(([k, ic, t, d]) => `<button type="button" class="homeCard" data-home="${k}"><span>${ic}</span><b>${t}</b><small>${d}</small></button>`).join('')}</div>
-    ${recent.length ? `<div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div>` : ''}
+    ${recent.length ? `<div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${t.pinned ? '📌 ' : ''}${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div>` : ''}
   </div>`;
 }
 $('#log').addEventListener('click', (e) => {
@@ -1879,6 +2041,7 @@ $('#log').addEventListener('click', (e) => {
   if (k === 'tpl') openTemplates();
   if (k === 'doc') $('#fileIn').click();
   if (k === 'skills') $('#btnSkills').click();
+  if (k === 'steps' || k === 'blind') { input.value = k === 'steps' ? '/pasos ' : '/ciegas '; input.focus(); }
   if (k === 'council') { S.council = true; $('#council').checked = true; save(); toast(`⚖ CONSEJO: ${councilMembers(findT(S.target)).length} IAs responderán a la vez`); $('#input').focus(); }
   if (k === 'web') {
     if (!searchReady(thread())) { openSheet('#sheetAis'); return toast(thread().private ? 'En un hilo 🔒 PRIVADO no se busca en internet.' : 'Elige un buscador en ⚙ → 🌐 BÚSQUEDA EN INTERNET (SearXNG es gratis).', true); }
@@ -2360,6 +2523,8 @@ function usageHTML() {
   const head = '<thead><tr><th>IA</th><th>HOY</th><th>TOKENS</th><th>€ HOY</th><th>€ MES</th></tr></thead>';
   return `<h3>📊 CONSUMO ${help('token')}</h3>
     <p class="hint" id="usageSum">${usageSumHTML()}</p>
+    ${quotaHTML()}
+    ${savedHTML()}
     ${rows ? `<table class="usage">${head}<tbody>${rows}</tbody></table>` : '<p class="hint">Aún no has usado ninguna IA hoy.</p>'}
     ${gwRows ? `<h4>🔌 POR EL GATEWAY (otras herramientas)</h4><table class="usage">${head}<tbody>${gwRows}</tbody></table>${gw.cache?.hits ? `<p class="hint">Caché: ${gw.cache.hits} respuestas repetidas servidas sin llamar a ninguna IA.</p>` : ''}` : ''}
     ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
@@ -2368,6 +2533,38 @@ function usageHTML() {
     <label class="field">MONEDA<select id="currencySel" data-noi18n>${Object.entries(CURS).map(([k, v]) => `<option value="${k}" ${k === CUR ? 'selected' : ''}>${v} ${k}</option>`).join('')}</select></label>
     <p class="hint">Solo cambia el símbolo, no convierte: pon los precios y el tope en la moneda elegida.</p>
     <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de cada llamada a una IA de pago, Neura le pide como máximo 4.096 tokens de respuesta y <b>reserva</b> su coste máximo (con la entrada estimada a la alta)${DESK ? ' en un saldo único que comparten la app y el Gateway de este PC' : ' en el saldo de este dispositivo'}; si no cabe, no la usa. Si una petición se corta y no se sabe cuánto consumió, se contabiliza lo reservado. Neura controla lo que contabiliza con tus precios y una estimación de la entrada; la factura del proveedor puede incluir otros conceptos y es la que vale. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+}
+// Cuota gratuita de hoy por proveedor: peticiones hechas, tu límite, si está en pausa y cuál conviene usar ahora.
+// Los límites reales los fija cada proveedor y cambian: Neura muestra lo que ha visto (pausas por cuota) y lo que tú pusiste.
+const KNOWN_DAY = { openrouter: 50 };
+function quotaHTML() {
+  const U = S.usage?.[today()] || {}, free = S.providers.filter((p) => p.enabled !== false && p.tier === 'free');
+  if (!free.length) return '';
+  const rows = free.map((p) => {
+    const used = Object.entries(U).filter(([k]) => k.startsWith(p.id + '::')).reduce((a, [, u]) => a + u.n + (u.err || 0), 0);
+    const lim = +p.dailyLimit || (p.oauth || p.preset === 'openrouter' ? KNOWN_DAY.openrouter : 0);
+    const cold = p.models.map((m) => `${p.id}::${m}`).filter(cooling);
+    const st = !p.models.length ? '—' : cold.length === p.models.length ? `⏳ ${coolText(cold[0])}` : cold.length ? `✓ ${p.models.length - cold.length}/${p.models.length} ${tr('modelos disponibles')}` : `✓ ${tr('disponible')}`;
+    return `<tr><td data-noi18n>${esc(p.name)}${lim ? `<progress max="${lim}" value="${Math.min(used, lim)}"></progress>` : ''}</td><td>${used}${lim ? ` / ~${lim}` : ''}</td><td class="st">${st}</td></tr>`;
+  }).join('');
+  const best = plan(findT(S.target))[0];
+  return `<h4>⛽ ${tr('CUOTA GRATIS DE HOY')}</h4><table class="usage quota"><thead><tr><th>IA</th><th>${tr('PETICIONES')}</th><th>${tr('ESTADO')}</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="hint">${best ? `${tr('Ahora conviene usar')}: <b data-noi18n>${esc(best.label)}</b>. ` : ''}${tr('Los límites los fija cada proveedor y cambian; «~» es orientativo. Cuando uno se agota, AUTO-SALTO pasa a otro.')}</p>`;
+}
+// Lo que habría costado lo hecho este mes con IAs gratuitas y tus equipos, a precio de un modelo de pago de referencia.
+const REF_PRICE = { in: 2.5, out: 10 }; // por millón de tokens, del orden de GPT-4o
+function savedHTML() {
+  let tin = 0, tout = 0;
+  for (const [d, v] of Object.entries(S.usage || {})) {
+    if (monthOf(d) !== monthOf(today())) continue;
+    for (const [k, u] of Object.entries(v)) {
+      const p = S.providers.find((x) => k.startsWith(x.id + '::'));
+      if (k.startsWith('mcp:') || p?.tier === 'free') { tin += u.in || 0; tout += u.out || 0; }
+    }
+  }
+  const v = (tin * REF_PRICE.in + tout * REF_PRICE.out) / 1e6;
+  if (!tin && !tout) return '';
+  return `<p class="hint saved">💰 ${tr('Este mes, lo que has hecho con IAs gratis y tus equipos habría costado unos')} <b>${eur(v)}</b> ${tr('con un modelo de pago de referencia')} (${REF_PRICE.in} / ${REF_PRICE.out} ${tr('por millón de tokens, del orden de GPT-4o')}; ${fmtTok(tin + tout)} tokens).</p>`;
 }
 function usageSumHTML() {
   const x = spent();
@@ -2443,6 +2640,11 @@ function renderSettings() {
   $('#settings').innerHTML = `
     <h3>🌐 IDIOMA · LANGUAGE</h3>
     ${langSelect('langSel')}
+    ${schedulesHTML()}
+    <h3>🧠 MEMORIA PERSONAL</h3>
+    <label class="auto"><input type="checkbox" id="profileOn" ${S.profile?.on === false ? '' : 'checked'}> USAR MI MEMORIA EN TODAS LAS IAs</label>
+    <textarea id="profileText" class="wide-input" rows="4" placeholder="Ej.: Soy enfermera en Madrid. Prefiero respuestas cortas, con ejemplos y sin tecnicismos. Escribo correos formales.">${esc(S.profile?.text || '')}</textarea>
+    <p class="hint">Lo que pongas aquí lo reciben todas las IAs que uses, para no repetirlo en cada hilo. Se guarda en este dispositivo y viaja con cada pregunta a la IA que responda: no pongas contraseñas ni datos que no compartirías.</p>
     <h3>🎭 APARIENCIA</h3>
     ${maskPicker()}
     <p class="hint">Mando es el aspecto original de Neura; Limpio es claro, para quien se cansa con los fondos oscuros.</p>
@@ -2609,13 +2811,20 @@ function renderThreads(withCard = true) {
       <label>NOMBRE DEL PROYECTO<input id="prName" value="${esc(pr.name)}" maxlength="80"></label>
       <label>MEMORIA DEL PROYECTO (la reciben todas las IAs en sus hilos)<textarea id="prMemory" rows="4" placeholder="Datos, contexto y preferencias: p. ej. «Tesis sobre energía solar, estilo académico, citar fuentes»">${esc(pr.memory || '')}</textarea></label>
       <label>HABILIDAD POR DEFECTO EN SUS HILOS NUEVOS<select id="prSkill" data-noi18n><option value="">${tr('— ninguna —')}</option>${liveSkills().map((k) => `<option value="${k.id}" ${pr.skill === k.id ? 'selected' : ''}>✦ ${esc(k.name)}</option>`).join('')}</select></label>
+      <label>📚 BIBLIOTECA (las IAs la consultan en los hilos de este proyecto y citan la página)</label>
+      ${libDocs(pr.id).map((d) => `<div class="folder"><span class="mono" data-noi18n>📄 ${esc(d.name)}${d.pages ? ` · ${d.pages} ${tr('págs.')}` : ''}</span><button class="btn sm red" data-libdel="${d.id}" aria-label="${tr('Quitar')}">✕</button></div>`).join('') || `<p class="hint">${tr('Sin documentos. Añade PDF o textos: contratos, apuntes, manuales…')}</p>`}
+      <button class="btn sm" id="libAdd">+ ${tr('AÑADIR DOCUMENTOS')}</button><input type="file" id="libFile" multiple hidden accept="application/pdf,.pdf,text/*,.md,.csv,.json,.txt">
+      <p class="hint">${tr('Se guardan solo en este dispositivo. En cada pregunta se envían a la IA los fragmentos que más se parecen a lo que preguntas.')}</p>
       <div class="row wrap">${thread().project !== pr.id ? '<button class="btn sm" id="prAdd">AÑADIR EL HILO ACTUAL</button>' : ''}<button class="btn sm red" id="prDel">BORRAR PROYECTO</button></div>
     </div>` : '';
   const q = norm($('#threadSearch').value.trim());
   const rows = [];
-  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active) && (!S.project || x.project === S.project)).sort((a, b) => b.ts - a.ts)) {
+  const tagQ = q.startsWith('#') ? q.slice(1) : null;
+  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active) && (!S.project || x.project === S.project)).sort((a, b) => !!b.pinned - !!a.pinned || b.ts - a.ts)) {
     let snip = '';
-    if (q) {
+    if (tagQ != null) { if (!(t.tags || []).some((g) => norm(g).startsWith(tagQ))) continue; }
+    else if (q && (t.tags || []).some((g) => norm(g).includes(q))) { /* coincide por etiqueta */ }
+    else if (q) {
       if (!norm(t.title).includes(q)) {
         const m = t.messages.find((x) => norm(x.content).includes(q));
         if (!m) continue;
@@ -2624,7 +2833,7 @@ function renderThreads(withCard = true) {
       }
     }
     const tp = !S.project && t.project && projects.find((p) => p.id === t.project);
-    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${tp ? `<small class="proj">📁 ${esc(tp.name)}</small> ` : ''}${t.source ? `<small class="proj">↘ ${esc(t.source)}</small> ` : ''}${esc(t.title)}${snip}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
+    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${tp ? `<small class="proj">📁 ${esc(tp.name)}</small> ` : ''}${t.source ? `<small class="proj">↘ ${esc(t.source)}</small> ` : ''}${t.pinned ? '📌 ' : ''}${esc(t.title)}${(t.tags || []).map((g) => ` <small class="tagc">#${esc(g)}</small>`).join('')}${snip}${tagEdit === t.id ? `<input class="tagIn" data-tagin="${t.id}" value="${esc((t.tags || []).join(', '))}" placeholder="${tr('trabajo, viaje…')}" aria-label="${tr('Etiquetas')}">` : ''}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm ghost" data-pin="${t.id}" aria-label="${t.pinned ? tr('Desfijar') : tr('Fijar arriba')}" title="${t.pinned ? tr('Desfijar') : tr('Fijar arriba')}">📌</button><button class="btn sm ghost" data-tags="${t.id}" aria-label="${tr('Etiquetas')}" title="${tr('Etiquetas')}">#</button><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
   }
   $('#threadList').innerHTML = rows.join('') || `<p class="hint">${q ? 'Nada coincide con la búsqueda.' : ''}</p>`;
 }
@@ -3256,8 +3465,33 @@ $('#projectCard').addEventListener('click', (e) => {
   }
   save(); renderThreads(); renderLog(); syncAll();
 });
+// Etiquetas: se editan en la propia lista (separadas por comas); Intro o salir del campo las guarda.
+let tagEdit = null;
+function saveTags(el) {
+  const t = S.threads.find((x) => x.id === el.dataset.tagin);
+  tagEdit = null;
+  if (!t) return;
+  t.tags = [...new Set(el.value.split(',').map((x) => x.trim().replace(/^#/, '')).filter(Boolean))].slice(0, 8);
+  t.ts = Date.now(); save(); renderThreads(); syncAll();
+}
+$('#threadList').addEventListener('keydown', (e) => { if (e.target.classList.contains('tagIn') && e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
+$('#threadList').addEventListener('focusout', (e) => { if (e.target.classList.contains('tagIn')) saveTags(e.target); });
+$('#projectCard').addEventListener('click', async (e) => {
+  if (e.target.id === 'libAdd') return $('#libFile').click();
+  const del = e.target.dataset?.libdel;
+  if (del && S.project) { S.library[S.project] = libDocs(S.project).filter((d) => d.id !== del); try { await blobs.del(del); } catch {} save(); renderThreads(); }
+});
+$('#projectCard').addEventListener('change', (e) => { if (e.target.id === 'libFile' && S.project) { addToLibrary(S.project, [...e.target.files]); e.target.value = ''; } });
 $('#threadList').addEventListener('click', (e) => {
   if (busy) return toast('Espera a que termine la respuesta');
+  const pin = e.target.dataset.pin, tg = e.target.dataset.tags;
+  if (pin || tg) {
+    const t = S.threads.find((x) => x.id === (pin || tg));
+    if (tg) { tagEdit = tg; renderThreads(); $('#threadList .tagIn')?.focus(); return; }
+    t.pinned = !t.pinned; t.ts = Date.now(); // se sincroniza como cualquier cambio del hilo
+    save(); renderThreads(); syncAll(); return;
+  }
+  if (e.target.classList.contains('tagIn')) return;
   const del = e.target.dataset.del;
   if (del) {
     if (!confirm('¿Borrar este hilo? Se borrará también en los equipos sincronizados.')) return;
@@ -3325,12 +3559,91 @@ input.addEventListener('paste', (e) => {
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) { e.preventDefault(); addFiles(files); }
 });
+// Órdenes rápidas: «/resumir texto». Sin texto, se aplican a la última respuesta.
+const CMDS = [
+  ['resumir', 'Resume en 5 puntos clave, claros y breves'],
+  ['traducir', 'Traduce'],
+  ['corregir', 'Corrige la ortografía, la gramática y el estilo. Devuelve primero el texto corregido y después una lista breve de los cambios'],
+  ['tabla', 'Organiza esta información en una tabla clara'],
+  ['explicar', 'Explícalo de forma sencilla, sin tecnicismos y con un ejemplo'],
+  ['ciegas', ''], ['pasos', ''], ['imagen', ''],
+];
+const CMD_HELP = { resumir: 'resume un texto o la última respuesta', traducir: '«/traducir francés: texto» (por defecto, al inglés)', corregir: 'ortografía, gramática y estilo', tabla: 'lo pone en una tabla', explicar: 'más sencillo y con un ejemplo', ciegas: 'dos IAs responden sin decir cuál es cuál', pasos: 'tarea en varios pasos: planifica, investiga, redacta y revisa', imagen: 'crea una imagen en tu PC' };
+function expandCmd(text) {
+  const m = text.match(/^\/([a-záéíóú]+)\b\s*([\s\S]*)$/i);
+  const c = m && CMDS.find(([k]) => k === m[1].toLowerCase());
+  if (!c || !c[1]) return null;
+  let body = m[2].trim(), lang = c[0] === 'traducir' ? (LANG === 'en' ? 'español' : 'inglés') : '';
+  if (c[0] === 'traducir') { const l = body.match(/^([\p{L} ]{2,20}):\s*([\s\S]*)$/u); if (l) { lang = l[1].trim(); body = l[2]; } }
+  const last = [...thread().messages].reverse().find((x) => x.role === 'assistant' && x.content && !x.error)?.content;
+  const target = body || last;
+  if (!target) return { error: 'Escribe el texto después de la orden, por ejemplo: /' + c[0] + ' …' };
+  const verb = c[0] === 'traducir' ? `${tr('Traduce el texto siguiente y devuelve solo la traducción. Idioma de destino')}: ${tr(lang)}` : c[1];
+  return { text: `${verb}:\n\n${target}`, display: body ? text : `${text} ${tr('(la última respuesta)')}` };
+}
+function renderCmdHint() {
+  const v = input.value, el = $('#skillHint');
+  if (!/^\/[a-záéíóú]*$/i.test(v)) { if (el.dataset.cmd) { el.hidden = true; delete el.dataset.cmd; } return; }
+  const list = CMDS.filter(([k]) => k.startsWith(v.slice(1).toLowerCase()) && (k !== 'imagen' || DESK || S.mcp.some((x) => x.status === 'on')));
+  if (!list.length) { el.hidden = true; return; }
+  el.dataset.cmd = '1';
+  el.innerHTML = `<span>⌘</span>${list.map(([k]) => `<button type="button" class="btn sm ghost" data-cmd="${k}">/${k}</button> <small class="hint">${CMD_HELP[k]}</small>`).join(' · ')}`;
+  el.hidden = false;
+}
+input.addEventListener('input', renderCmdHint);
+$('#skillHint').addEventListener('click', (e) => { const k = e.target.dataset?.cmd; if (k) { input.value = `/${k} `; input.focus(); $('#skillHint').hidden = true; } });
+// ---------- ⚡ Atajo rápido (PC): Ctrl+Mayús+Espacio desde cualquier programa ----------
+// Trae Neura delante; si has copiado un texto, ofrece resumirlo, traducirlo, corregirlo o explicarlo en un toque.
+DESK?.onQuick?.((text) => {
+  input.focus();
+  const el = $('#skillHint'), t = String(text || '').trim();
+  if (!t) return;
+  quickText = t;
+  el.dataset.cmd = '1';
+  el.innerHTML = `<span>📋 ${tr('Con lo que has copiado')} (<span data-noi18n>${esc(t.slice(0, 40))}${t.length > 40 ? '…' : ''}</span>):</span> ${['resumir', 'traducir', 'corregir', 'explicar'].map((k) => `<button type="button" class="btn sm" data-quick="${k}">/${k}</button>`).join(' ')} <button type="button" class="btn sm ghost" data-quick="x">✕</button>`;
+  el.hidden = false;
+});
+let quickText = '';
+$('#skillHint').addEventListener('click', (e) => {
+  const k = e.target.dataset?.quick; if (!k) return;
+  $('#skillHint').hidden = true;
+  if (k === 'x' || busy) return;
+  input.value = `/${k} ${quickText}`; quickText = '';
+  $('#composer').requestSubmit();
+});
+// ---------- 📸 Captura y pregunta (PC) ----------
+async function captureScreen() {
+  const data = await DESK.captureScreen().catch(() => null);
+  if (!data) return toast(tr('No se pudo capturar la pantalla.'), true);
+  const bin = atob(data.split(',')[1]), bytes = new Uint8Array(bin.length); // sin fetch(): la CSP no permite leer data: con él
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
+  await addFiles([new File([blob], `${tr('captura')}-${hhmm(Date.now()).replace(':', '')}.jpg`, { type: 'image/jpeg' })]);
+  input.focus(); toast(tr('📸 Captura adjunta: pregunta lo que quieras sobre ella (usa una IA con visión).'));
+}
 $('#composer').onsubmit = (e) => {
   e.preventDefault();
   if (busy) { abortCtl?.abort(); return; }
   const text = input.value.trim();
   if (!text && !attach.length) return;
   if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
+  const special = text.match(/^\/(ciegas|pasos)\b\s*([\s\S]*)$/i);
+  if (special) {
+    if (!special[2].trim()) return toast(special[1].toLowerCase() === 'ciegas' ? 'Escribe la pregunta después: /ciegas ¿…?' : 'Escribe el objetivo después: /pasos Escribe un informe sobre…', true);
+    input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true;
+    const opt = special[1].toLowerCase() === 'ciegas' ? { blind: true, display: text } : { steps: true, display: text };
+    const files = attach; attach = []; renderAttach();
+    if (guardSend(special[2].trim(), files, opt)) return;
+    return opt.steps ? runSteps(special[2].trim(), files) : send(special[2].trim(), files, opt);
+  }
+  const cmd = text.startsWith('/') && expandCmd(text);
+  if (cmd?.error) return toast(cmd.error, true);
+  if (cmd) {
+    input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true;
+    const files = attach; attach = []; renderAttach();
+    if (guardSend(cmd.text, files, { display: cmd.display })) return;
+    return send(cmd.text, files, { display: cmd.display });
+  }
   // Una petición estructurada con huecos sin rellenar suele dar una respuesta genérica.
   if ((text.includes('[completa:') || text.includes(`[${tr('completa')}:`)) && !confirm('Quedan huecos [completa: …] sin rellenar. ¿Enviar igualmente?')) return;
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
@@ -3341,6 +3654,8 @@ $('#composer').onsubmit = (e) => {
   send(text, files, opt);
 };
 $('#attachBtn').onclick = () => $('#fileIn').click();
+$('#shotBtn').hidden = !DESK?.captureScreen;
+$('#shotBtn').onclick = captureScreen;
 $('#structBtn').onclick = () => openTemplates();
 $('#fileIn').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
 $('#attachBar').addEventListener('click', (e) => { const i = e.target.dataset.unattach; if (i != null) { attach.splice(+i, 1); renderAttach(); } });
@@ -3356,6 +3671,7 @@ $('#log').addEventListener('click', (e) => {
   if (e.target.dataset?.check) return checkReply(e.target.dataset.check);
   if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(tr(t)); }
   if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
+  if (e.target.dataset?.openhtml) return openHtml(e.target.dataset.openhtml);
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);
   const { branch: br, edit } = e.target.dataset || {};
@@ -3415,7 +3731,21 @@ $('#provList').addEventListener('click', async (e) => {
   }
   save(); renderProviders(); renderTargets(); renderLog();
 });
+$('#settings').addEventListener('click', (e) => {
+  const d = e.target.dataset || {};
+  if (e.target.id === 'schAdd') {
+    const name = $('#schName').value.trim(), prompt = $('#schPrompt').value.trim();
+    if (!name || !prompt) return toast(tr('Pon un nombre y qué pedir.'), true);
+    (S.schedules ||= []).push({ id: uid(), name, prompt, days: $('#schDays').value, time: $('#schTime').value || '09:00', web: $('#schWeb').checked, last: null, on: true });
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+    save(); renderSettings(); toast(`⏰ ${name}: ${tr('programada')}`);
+  }
+  if (d.scheddel) { S.schedules = S.schedules.filter((x) => x.id !== d.scheddel); save(); renderSettings(); }
+  if (d.schedrun) { if (busy) return toast('Espera a que termine la respuesta'); closeSheets(); runSchedule(S.schedules.find((x) => x.id === d.schedrun)); }
+});
+$('#settings').addEventListener('input', (e) => { if (e.target.id === 'profileText') { S.profile = { ...S.profile, text: e.target.value.slice(0, 4000) }; save(); } });
 $('#settings').addEventListener('change', (e) => {
+  if (e.target.id === 'profileOn') { S.profile = { ...S.profile, on: e.target.checked }; save(); return; }
   if (e.target.id === 'currencySel') { S.currency = e.target.value; save(); location.reload(); return; }
   if (e.target.id === 'budgetDay' || e.target.id === 'budgetMonth') {
     S.budget = { ...S.budget, [e.target.id === 'budgetDay' ? 'day' : 'month']: Math.max(0, +e.target.value || 0) };

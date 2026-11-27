@@ -433,3 +433,15 @@ html[data-mask]:not([data-mask=mando]) .recent{border-radius:10px;overflow:hidde
   .homeCard small{display:none}
   .empty:has(.home){padding:8px 4px}
 }
+/* hilos: fijados y etiquetas; a ciegas; cuotas */
+.tagc{font:11px var(--mono);color:var(--purple2);margin-left:2px}
+.tagIn{display:block;width:100%;margin-top:6px;font-size:13px}
+.chatItem .btn.sm.ghost{padding:3px 6px}
+.blindSet>.tag{color:var(--orange2)}
+.blindVote{font-weight:700}
+table.quota td.st{text-align:left}
+.saved b{color:var(--green)}
+.preview{margin-top:8px;padding:8px;background:#fff;border:1px solid var(--line);display:inline-block;max-width:100%}
+.preview img{display:block;max-width:100%;max-height:420px}
+.reply [data-openhtml]{margin-top:8px}
+.chip.step{font-size:11px}

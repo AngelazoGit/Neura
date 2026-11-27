@@ -43,7 +43,7 @@ const user = (extra) => ({
   // ---- Inicio: tarjetas e hilos recientes ----
   await p.keyboard.press('Escape');
   await p.evaluate(() => { S.active = null; renderLog(); });
-  ok((await p.$$('.homeCard')).length === 6 && /¿Qué quieres hacer\?/.test(await p.textContent('.home')), 'el inicio muestra «¿Qué quieres hacer?» con sus tarjetas');
+  ok((await p.$$('.homeCard')).length === 8 && /¿Qué quieres hacer\?/.test(await p.textContent('.home')), 'el inicio muestra «¿Qué quieres hacer?» con sus tarjetas');
   await p.click('[data-home=council]');
   ok(await p.evaluate(() => S.council && document.querySelector('#council').checked), '«Comparar varias IAs» activa el CONSEJO');
   await p.click('[data-home=web]');
@@ -58,7 +58,7 @@ const user = (extra) => ({
 
   // ---- Principiante: sin la tarjeta del CONSEJO (opción avanzada) ----
   p = await page(user({ level: 'basic' }));
-  ok(!(await p.$('[data-home=council]')) && (await p.$$('.homeCard')).length === 5, 'en modo principiante no se ofrece el CONSEJO en el inicio');
+  ok(!(await p.$('[data-home=council]')) && (await p.$$('.homeCard')).length === 7, 'en modo principiante no se ofrece el CONSEJO en el inicio');
   await b.close(); br.kill();
   console.log(failures ? `FALLOS: ${failures}` : 'TODO OK'); process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

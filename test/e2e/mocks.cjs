@@ -43,6 +43,8 @@ const openai = http.createServer(async (req, res) => {
   if (/Conversación a resumir/.test(q)) return reply(res, j.stream, 'RESUMEN: el usuario habló de números largos.');
   if (j.messages.some((m) => m.role === 'system' && /experto en escribir peticiones/.test(textOf(m.content)))) return reply(res, j.stream, `**Rol:** redactor profesional.\n**Objetivo:** ${q}\n**Formato de la respuesta:** correo breve.\n**Contexto:** [completa: para quién es]`);
   if (/Respuestas de varias IAs/.test(q)) return reply(res, j.stream, 'SÍNTESIS FINAL combinada');
+  if (/Divide este objetivo en 3 a 5 pasos/.test(q)) return reply(res, j.stream, '1. Reunir datos\n2. **Redactar** el texto');
+  if (j.model === 'svg') return reply(res, j.stream, 'Aquí tienes:\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><circle cx="20" cy="20" r="15" fill="red"/></svg>\n```\n\n```html\n<!doctype html><html><body><h1>Hola</h1></body></html>\n```');
   switch (j.model) {
     case 'gemini-2.5-flash':
       res.writeHead(404, { 'content-type': 'application/json' });

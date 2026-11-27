@@ -4,7 +4,7 @@
 //  · el puente MCP (bridge/server.mjs) integrado: expone Ollama/LM Studio, carpetas para la IA
 //    y guarda los hilos para que el móvil y la web los compartan,
 //  · emparejamiento con el móvil por QR y acceso fuera de casa con Tailscale.
-const { app, BrowserWindow, ipcMain, shell, net, dialog, safeStorage, session } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, net, dialog, safeStorage, session, globalShortcut, clipboard, desktopCapturer, screen } = require('electron');
 const { spawn, execFile } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
@@ -236,6 +236,25 @@ ipcMain.handle('oauth-start', async () => {
   return port;
 });
 
+// 📸 Captura de la pantalla (sin la ventana de Neura) para preguntar a una IA con visión.
+// shortcut: pantalla completa del monitor principal; recortar una zona exige una ventana de selección propia.
+ipcMain.handle('capture-screen', async () => {
+  const was = win && !win.isMinimized() && win.isVisible();
+  if (was) { win.minimize(); await new Promise((r) => setTimeout(r, 450)); }
+  try {
+    const d = screen.getPrimaryDisplay();
+    const size = { width: Math.round(d.size.width * d.scaleFactor), height: Math.round(d.size.height * d.scaleFactor) };
+    const src = (await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: size }))[0];
+    return src ? 'data:image/jpeg;base64,' + src.thumbnail.toJPEG(82).toString('base64') : null;
+  } finally { if (was) { win.restore(); win.focus(); } }
+});
+// Página HTML generada por una IA: se abre en el navegador del sistema desde un archivo temporal (lo pide el usuario con un clic).
+ipcMain.handle('open-html', async (_e, html) => {
+  const f = path.join(os.tmpdir(), `neura-${randomBytes(6).toString('hex')}.html`);
+  fs.writeFileSync(f, String(html));
+  await shell.openExternal(require('node:url').pathToFileURL(f).href);
+});
+
 // Peticiones de la app con streaming: cabecera, trozos y fin llegan como eventos.
 const pending = new Map();
 ipcMain.on('http', async (e, id, { url, method, headers, body }) => {
@@ -277,8 +296,15 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, perm) => allowed.has(perm));
   await startBridge();
   createWindow();
+  // ⚡ Atajo rápido: trae Neura delante desde cualquier programa, con lo que hayas copiado listo para usar.
+  globalShortcut.register('CommandOrControl+Shift+Space', () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+    win.webContents.send('quick', clipboard.readText().slice(0, 20000));
+  });
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
   if (state.error) dialog.showMessageBox({ type: 'warning', message: 'Puente MCP', detail: state.error });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => { oauthStop(); stopBridge(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); oauthStop(); stopBridge(); });
