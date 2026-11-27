@@ -35,7 +35,8 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
 
   // ---- 4. Órdenes con «/» ----
   await w.fill('#input', '/'); await w.dispatchEvent('#input', 'input');
-  ok(/\/resumir/.test(await w.textContent('#skillHint')) && /\/pasos/.test(await w.textContent('#skillHint')), 'al escribir «/» se ven las órdenes disponibles');
+  await w.waitForTimeout(600); // los consejos al escribir llegan después y no deben taparla
+  ok(await w.isVisible('#skillHint') && /\/resumir/.test(await w.textContent('#skillHint')) && /\/pasos/.test(await w.textContent('#skillHint')), 'al escribir «/» se ven las órdenes disponibles (y no las tapan los consejos)');
   await sendText('/traducir francés: buenos días');
   ok(/Idioma de destino: francés/.test(lastReq().q) && /buenos días/.test(lastReq().q), '/traducir francés: … pide la traducción al francés');
   await sendText('/tabla');
@@ -112,6 +113,7 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await newThread();
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('quick', 'El informe trimestral muestra un aumento de ventas.'));
   await w.waitForSelector('[data-quick=resumir]');
+  ok(!/informe trimestral/.test(await w.textContent('#skillHint')) && /caracteres/.test(await w.textContent('#skillHint')), 'el atajo no enseña en pantalla lo copiado (podría ser una contraseña), solo su tamaño');
   await w.click('[data-quick=resumir]'); await w.waitForTimeout(150); await idle();
   ok(/^Resume en 5 puntos clave/.test(lastReq().q) && /informe trimestral/.test(lastReq().q), 'con lo copiado, un toque lo resume');
 
@@ -128,7 +130,9 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   await w.fill('#schName', 'Resumen diario'); await w.fill('#schPrompt', 'Dame el resumen del día');
   await w.fill('#schTime', '00:00'); await w.click('#schAdd');
   ok(/Resumen diario/.test(await w.textContent('#settings')), 'se programa una tarea con nombre, qué pedir y hora');
-  ok(await w.evaluate(() => dueSchedules().length === 1), 'a su hora queda pendiente de hacerse');
+  ok(await w.evaluate(() => dueSchedules().length === 0 && S.schedules[0].last === today()), 'creada después de su hora, no se hace hasta mañana');
+  await w.evaluate(() => { S.schedules[0].last = '2000-01-01'; }); // como si fuera el día siguiente
+  ok(await w.evaluate(() => dueSchedules().length === 1), 'al día siguiente, a su hora, queda pendiente de hacerse');
   await w.keyboard.press('Escape');
   const back = await w.evaluate(() => S.active);
   await w.evaluate(() => runSchedule(dueSchedules()[0]));

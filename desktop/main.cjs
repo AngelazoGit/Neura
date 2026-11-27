@@ -290,8 +290,8 @@ function createWindow() {
 
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.whenReady().then(async () => {
-  // Solo se conceden el micrófono (dictado) y el portapapeles.
-  const allowed = new Set(['media', 'clipboard-sanitized-write', 'clipboard-read']);
+  // Solo se conceden el micrófono (dictado), el portapapeles y los avisos (tareas programadas).
+  const allowed = new Set(['media', 'clipboard-sanitized-write', 'clipboard-read', 'notifications']);
   session.defaultSession.setPermissionRequestHandler((_wc, perm, cb, details) => cb(allowed.has(perm) && !(details?.mediaTypes || []).includes('video')));
   session.defaultSession.setPermissionCheckHandler((_wc, perm) => allowed.has(perm));
   await startBridge();

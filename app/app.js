@@ -1313,6 +1313,7 @@ let assistWeb = false, structUndo = null;
 function renderAssist() {
   const t = $('#input').value, el = $('#skillHint');
   if (guardPending) return;
+  if (/^\/[a-záéíóú]*$/i.test(t)) return renderCmdHint();
   el.className = 'hintbar';
   const k = suggestSkill(t);
   if (k) { renderSkillHint(); return; }
@@ -1784,6 +1785,7 @@ async function sendCouncil(th, hist, first, signal, needs = {}, skill = null) {
 // Documentos de un 📁 proyecto que las IAs consultan en cada pregunta de sus hilos: se eligen los trozos que más
 // se parecen a la pregunta (por palabras, en el dispositivo) y se envían con su página para citarla.
 // La lista va en S.library (este dispositivo); el texto, en IndexedDB. No se sincronizan.
+// shortcut: de cada PDF se leen unos 60.000 caracteres (readPdf); ampliar readPdf si se usan manuales largos.
 // shortcut: búsqueda por palabras, no semántica; con muchos documentos parecidos puede elegir mal: pasar a embeddings (Ollama) si se queda corta.
 const libDocs = (pid) => (S.library ||= {})[pid] ||= [];
 async function addToLibrary(pid, list) {
@@ -3461,6 +3463,8 @@ $('#projectCard').addEventListener('click', (e) => {
   if (e.target.id === 'prDel') {
     if (!confirm(`¿Borrar el proyecto «${pr.name}»? Sus hilos se conservan, sin proyecto.`)) return;
     Object.assign(pr, { deleted: true, memory: '', updatedAt: Date.now() });
+    for (const d of libDocs(pr.id)) blobs.del(d.id).catch(() => {});
+    delete S.library[pr.id];
     S.project = null;
   }
   save(); renderThreads(); renderLog(); syncAll();
@@ -3600,7 +3604,7 @@ DESK?.onQuick?.((text) => {
   if (!t) return;
   quickText = t;
   el.dataset.cmd = '1';
-  el.innerHTML = `<span>📋 ${tr('Con lo que has copiado')} (<span data-noi18n>${esc(t.slice(0, 40))}${t.length > 40 ? '…' : ''}</span>):</span> ${['resumir', 'traducir', 'corregir', 'explicar'].map((k) => `<button type="button" class="btn sm" data-quick="${k}">/${k}</button>`).join(' ')} <button type="button" class="btn sm ghost" data-quick="x">✕</button>`;
+  el.innerHTML = `<span>📋 ${tr('Con lo que has copiado')} (${t.length} ${tr('caracteres')}):</span> ${['resumir', 'traducir', 'corregir', 'explicar'].map((k) => `<button type="button" class="btn sm" data-quick="${k}">/${k}</button>`).join(' ')} <button type="button" class="btn sm ghost" data-quick="x">✕</button>`;
   el.hidden = false;
 });
 let quickText = '';
@@ -3736,7 +3740,10 @@ $('#settings').addEventListener('click', (e) => {
   if (e.target.id === 'schAdd') {
     const name = $('#schName').value.trim(), prompt = $('#schPrompt').value.trim();
     if (!name || !prompt) return toast(tr('Pon un nombre y qué pedir.'), true);
-    (S.schedules ||= []).push({ id: uid(), name, prompt, days: $('#schDays').value, time: $('#schTime').value || '09:00', web: $('#schWeb').checked, last: null, on: true });
+    const x = { id: uid(), name, prompt, days: $('#schDays').value, time: $('#schTime').value || '09:00', web: $('#schWeb').checked, last: null, on: true };
+    const now = new Date(), hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    if (x.time <= hm) x.last = today(); // ya pasó su hora hoy: empieza mañana (PROBAR la hace ahora)
+    (S.schedules ||= []).push(x);
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
     save(); renderSettings(); toast(`⏰ ${name}: ${tr('programada')}`);
   }
