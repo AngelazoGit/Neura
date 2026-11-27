@@ -19,6 +19,11 @@ No incluyas claves, tokens ni contenido privado en los registros.
 | 10 | **Búsqueda con fuentes** | Con SearXNG (en tu PC) o una clave de Brave: preguntas de actualidad con 🌐 WEB; que las citas [n] correspondan a las fuentes y que los enlaces abran. Probar desde el móvil emparejado usando el buscador del PC. |
 | 11 | **Registro de privacidad** | Tras usar una IA de internet, la local, la búsqueda y el dictado: que «¿Adónde fueron mis datos?» refleje cada destino y lo entiendan personas sin conocimientos técnicos. |
 | 12 | **Lotes** | 10–20 archivos reales (PDF y texto) y un documento largo, con IAs gratuitas: tiempo total, que AUTO-SALTO resuelva los límites por minuto y que PARAR/CONTINUAR no pierda ni duplique nada. |
+| 13 | **Conectar mi cuenta (OpenRouter real)** | En el PC, el móvil Android (con la app abierta y cerrada del todo) y la web: cuenta nueva y cuenta existente, cancelar en OpenRouter, volver pasados 10 minutos y abrir dos veces el mismo enlace. Que solo aparezcan modelos `:free`, que quitarla con ✕ borre la clave y que revocarla en openrouter.ai la deje sin acceso. En iOS, el esquema `neura://` necesita una compilación en Mac. |
+| 14 | **Probar sin cuenta (Pollinations)** | Que responda, el tiempo de respuesta y que, si falla, el mensaje proponga conectar la cuenta. |
+| 15 | **Atajo y captura en el PC real** | Ctrl+Mayús+Espacio en Windows, macOS y Linux (que no choque con otro programa) y 📸 con dos monitores. En macOS, la primera captura pide el permiso «Grabación de pantalla». |
+| 16 | **Biblioteca con documentos reales** | Un proyecto con 5–10 PDF largos: que los fragmentos elegidos respondan a la pregunta y que las citas de página sean correctas. |
+| 17 | **Tareas programadas y en pasos** | Una tarea diaria con 🌐 WEB durante una semana con Neura abierta; y `/pasos` con IAs gratuitas: tiempo total y calidad del resultado final. |
 | 9 | **Diagnóstico** | PROBAR TODAS MIS IAs con tus claves reales: que los motivos de fallo se entiendan. |
 
 ## Plantilla de registro (una fila por prueba)

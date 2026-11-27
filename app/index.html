@@ -67,6 +67,7 @@
   <form id="composer">
     <button type="button" class="ico tool" id="attachBtn" aria-label="Adjuntar imagen, PDF o texto" title="Adjuntar imagen, PDF o texto">📎</button>
     <input type="file" id="fileIn" multiple hidden accept="image/*,application/pdf,.pdf,text/*,.md,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.log,.sql,.java,.c,.cpp,.cs,.go,.rs,.php,.rb,.sh">
+    <button type="button" class="ico tool" id="shotBtn" hidden aria-label="Capturar la pantalla y preguntar" title="📸 Captura tu pantalla (sin Neura) y pregunta sobre ella">📸</button>
     <button type="button" class="ico tool" id="structBtn" aria-label="Plantillas PRO y estructurar la petición" title="✨ Convierte lo que escribes en una petición profesional, o elige una plantilla PRO">✨</button>
     <textarea id="input" rows="1" placeholder="ESCRIBE AQUÍ…" enterkeyhint="send"></textarea>
     <button type="button" class="ico tool" id="mic" aria-label="Dictar por voz" aria-pressed="false" title="Dictar por voz">🎤</button>
@@ -125,6 +126,8 @@
       <select id="presetSel"></select>
       <button class="btn" id="addProv">+ AÑADIR</button>
     </div>
+    <button class="btn wide oauthBtn" data-oauth="openrouter">🔑 CONECTAR MI CUENTA<small>OpenRouter · sin copiar claves · solo modelos gratuitos</small></button>
+    <div class="hint oauthMsg" aria-live="polite"></div>
     <div id="provList"></div>
     <p class="hint">Las claves se guardan solo en este dispositivo y se envían únicamente a su proveedor.</p>
     <div id="settings"></div>

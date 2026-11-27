@@ -13,8 +13,9 @@ const add = (t) => {
   t = t.replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
   if (!t || !/\p{L}{2}/u.test(t)) return;
   if (/^[a-z][\w-]*$/.test(t) || /^[\w-]+(\.[\w-]+)+$/.test(t) || /^[#.\[]/.test(t)) return; // identificadores, selectores
+  if (/^[?&][\w-]+=|^(neura|lib):$|^(AB|Notification)$/.test(t)) return; // trozos de URL y valores internos
   if (/[{}]|=>|;\s*$|;\s*(const|let|var|return|if)\b|https?:\/\/|^\/|^[a-z-]+:[^ ]/.test(t)) return; // código, URLs
-  if (/="|^[<>"]|^--|^[a-z]+\/[a-z+.-]+$|^[A-Z][a-z]+(-[A-Z][a-z]+)+$|^(GET|POST|PBKDF2|AES-GCM|SHA-256|NFD|IndexedDB|AbortError|Bearer|Escape|Enter|PK|EUR|HTTP|use strict)$|^[a-z0-9.]+:\d|^_|^\d/.test(t)) return; // atributos, tipos MIME, cabeceras, constantes
+  if (/="|^[<>"]|^--|^[a-z]+\/[a-z+.-]+$|^[A-Z][a-z]+(-[A-Z][a-z]+)+$|^(GET|POST|PBKDF2|AES-GCM|SHA-256|NFD|IndexedDB|AbortError|Bearer|Escape|Enter|PK|EUR|USD|JPY|HTTP|use strict)$|^[a-z0-9.]+:\d|^_|^\d/.test(t)) return; // atributos, tipos MIME, cabeceras, constantes
   out.add(t);
 };
 const fromMarkup = (s) => {

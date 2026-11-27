@@ -25,4 +25,9 @@ contextBridge.exposeInMainWorld('neuraDesktop', {
   tailscale: (on) => ipcRenderer.invoke('tailscale', on),
   saveFile: (name, text, encoding) => ipcRenderer.invoke('save-file', name, text, encoding),
   savePdf: (name) => ipcRenderer.invoke('save-pdf', name),
+  oauthStart: () => ipcRenderer.invoke('oauth-start'),
+  onOAuth: (cb) => ipcRenderer.on('oauth-cb', (_e, d) => cb(d)),
+  onQuick: (cb) => ipcRenderer.on('quick', (_e, text) => cb(text)),
+  captureScreen: () => ipcRenderer.invoke('capture-screen'),
+  openHtml: (html) => ipcRenderer.invoke('open-html', html),
 });

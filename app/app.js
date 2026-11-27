@@ -56,6 +56,8 @@ const PRESETS = {
   anthropic:  { name: 'Anthropic Claude', kind: 'anthropic', tier: 'paid', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], keyUrl: 'https://console.anthropic.com/settings/keys' },
   openai:     { name: 'OpenAI', kind: 'openai', tier: 'paid', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1-mini'], keyUrl: 'https://platform.openai.com/api-keys', stt: 'gpt-4o-mini-transcribe' },
   deepseek:   { name: 'DeepSeek', kind: 'openai', tier: 'paid', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat'], keyUrl: 'https://platform.deepseek.com/api_keys' },
+  // Sin cuenta ni clave (dirección antigua de Pollinations): experimental, con límites y sin garantías.
+  pollinations: { name: 'Pollinations (sin cuenta)', kind: 'openai', tier: 'free', baseUrl: 'https://text.pollinations.ai/openai', models: ['openai-fast'], keyless: true },
   custom:     { name: 'Otra (compatible OpenAI)', kind: 'openai', tier: 'other', baseUrl: '', models: [] },
 };
 
@@ -83,13 +85,20 @@ const DICT = LANG === 'es' ? null : window.NEURA_I18N?.[LANG] || null;
 // Trozos conocidos dentro de textos con partes variables («3 modelos», «Groq: CONECTADO»): de más largo a más corto.
 const SEG = DICT && new RegExp(`(^|[^\\p{L}\\p{N}])(${Object.keys(DICT).filter((k) => k.length > 1).sort((a, b) => b.length - a.length)
   .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\p{L}\\p{N}])`, 'gu');
-function tr(str) {
-  if (!DICT || !str || typeof str !== 'string') return str;
+// Moneda de los precios y del tope (⚙ → CONSUMO): solo cambia el símbolo, no convierte; la interfaz se escribe con «€».
+const CURS = { EUR: '€', USD: '$', JPY: '¥' };
+const CUR = CURS[S.currency] ? S.currency : 'EUR';
+function trText(str) {
   const [, a, core, b] = str.match(/^(\s*)([\s\S]*?)(\s*)$/);
   if (!core) return str;
   const hit = DICT[core.replace(/\s+/g, ' ')];
   if (hit != null) return a + hit + b;
   return a + core.replace(SEG, (x, pre, k) => pre + (DICT[k] ?? k)) + b;
+}
+function tr(str) {
+  if (!str || typeof str !== 'string') return str;
+  const t = DICT ? trText(str) : str;
+  return CUR === 'EUR' ? t : t.replaceAll('€', CURS[CUR]);
 }
 // Lo que es contenido (mensajes, respuestas, títulos de hilos, código, fuentes de internet) no se traduce.
 const NO_TR = '.txt, .msg.user .body, pre, code, .snip, textarea, .chatItem, .sources ol, #input, [data-noi18n]';
@@ -112,7 +121,7 @@ function trNode(n) {
     if (!skip) for (const c of n.childNodes) trNode(c);
   }
 }
-if (DICT) {
+if (DICT || CUR !== 'EUR') {
   new MutationObserver((ms) => {
     for (const m of ms) {
       if (m.type === 'childList') m.addedNodes.forEach(trNode);
@@ -136,6 +145,55 @@ document.addEventListener('change', (e) => { if (e.target.classList?.contains('l
 if (S.messages) { if (S.messages.length) S.threads.unshift({ id: S.active = uid(), title: S.messages.find((m) => m.role === 'user')?.content.slice(0, 48) || 'HILO', messages: S.messages, ts: Date.now() }); delete S.messages; }
 // Nivel de uso: los usuarios existentes siguen en profesional; los nuevos eligen al empezar.
 if (S.level == null && (S.providers.length || S.threads.some((t) => t.messages.length))) S.level = 'pro';
+// ---------- ⏰ Tareas programadas ----------
+// Una pregunta que Neura envía sola a la hora elegida, en su propio hilo («⏰ nombre»), con 🌐 WEB si lo marcas.
+// Solo mientras Neura está abierta (en el PC conviene dejarla abierta o minimizada).
+const DAYS = { diaria: [0, 1, 2, 3, 4, 5, 6], laborables: [1, 2, 3, 4, 5], lunes: [1], martes: [2], 'miércoles': [3], jueves: [4], viernes: [5], 'sábado': [6], domingo: [0] };
+const DAY_LABEL = { diaria: 'Todos los días', laborables: 'De lunes a viernes', lunes: 'Los lunes', martes: 'Los martes', 'miércoles': 'Los miércoles', jueves: 'Los jueves', viernes: 'Los viernes', 'sábado': 'Los sábados', domingo: 'Los domingos' };
+function dueSchedules(now = new Date()) {
+  const d = today(), hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  return (S.schedules || []).filter((x) => x.on !== false && x.last !== d && (DAYS[x.days] || DAYS.diaria).includes(now.getDay()) && hm >= x.time);
+}
+async function runSchedule(x) {
+  const back = S.active;
+  let th = S.threads.find((t) => t.id === x.tid && !t.deleted);
+  if (!th) { th = { id: uid(), title: `⏰ ${x.name}`, messages: [], ts: Date.now() }; S.threads.unshift(th); x.tid = th.id; }
+  x.last = today(); S.active = th.id; save(); renderLog();
+  await send(x.prompt, [], { web: !!x.web, display: `⏰ ${x.name} · ${x.prompt}` });
+  th.title = `⏰ ${x.name}`;
+  const ans = [...th.messages].reverse().find((m) => m.role === 'assistant' && !m.skipped);
+  try { if ('Notification' in window && Notification.permission === 'granted') new Notification(`⏰ ${x.name}`, { body: String(ans?.content || ans?.error || '').slice(0, 160) }); } catch {}
+  toast(`⏰ ${x.name}: ${tr('lista. Está en su hilo.')}`);
+  if (S.active === th.id && back && back !== th.id && S.threads.some((t) => t.id === back)) { S.active = back; save(); renderLog(); }
+}
+setInterval(() => { if (!busy) { const x = dueSchedules()[0]; if (x) runSchedule(x); } }, 30000);
+function schedulesHTML() {
+  const list = S.schedules || [];
+  return `<h3>⏰ TAREAS PROGRAMADAS</h3>
+    ${list.map((x) => `<div class="folder"><span><b data-noi18n>${esc(x.name)}</b> <small class="mono">${tr(DAY_LABEL[x.days] || x.days)} · ${esc(x.time)}${x.web ? ' · 🌐' : ''}${x.last ? ` · ${tr('última')}: ${esc(x.last)}` : ''}</small></span><span><button class="btn sm ghost" data-schedrun="${x.id}">${tr('PROBAR')}</button> <button class="btn sm red" data-scheddel="${x.id}" aria-label="${tr('Borrar')}">✕</button></span></div>`).join('')}
+    <div class="card schedForm">
+      <label>NOMBRE<input id="schName" maxlength="40" placeholder="Noticias de mi sector"></label>
+      <label>QUÉ PEDIR<textarea id="schPrompt" rows="2" placeholder="Resúmeme en 5 puntos las noticias de hoy sobre energía solar en España."></textarea></label>
+      <div class="row2"><label>CUÁNDO<select id="schDays">${Object.keys(DAYS).map((k) => `<option value="${k}">${DAY_LABEL[k]}</option>`).join('')}</select></label><label>HORA<input id="schTime" type="time" value="09:00"></label></div>
+      <label class="auto"><input type="checkbox" id="schWeb"> 🌐 BUSCAR EN INTERNET</label>
+      <button class="btn sm" id="schAdd">+ PROGRAMAR</button>
+    </div>
+    <p class="hint">Funciona mientras Neura está abierta (si estaba cerrada a esa hora, se hace al abrirla ese día). Cada tarea tiene su propio hilo ⏰ y se avisa al terminar.</p>`;
+}
+
+// ---------- máscaras (apariencia) ----------
+// Mando es el aspecto original: quien ya usaba Neura lo conserva; quien empieza, arranca con Serio (más sobrio).
+const MASKS = { serio: 'Serio', limpio: 'Limpio', sereno: 'Sereno', neutro: 'Neutro', mando: 'Mando' };
+if (!MASKS[S.mask]) S.mask = S.providers.length || S.threads.length ? 'mando' : 'serio';
+function applyMask(m) {
+  S.mask = MASKS[m] ? m : 'serio';
+  document.documentElement.dataset.mask = S.mask;
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--chrome').trim() || '#07060a');
+  for (const b of document.querySelectorAll('[data-maskset]')) b.classList.toggle('on', b.dataset.maskset === S.mask);
+}
+applyMask(S.mask);
+const maskPicker = () => `<div class="masks" role="group" aria-label="Apariencia">${Object.entries(MASKS).map(([k, v]) => `<button type="button" data-maskset="${k}" class="${k === S.mask ? 'on' : ''}"><i class="m-${k}"></i>${v}</button>`).join('')}</div>`;
+document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-maskset]'); if (b) { applyMask(b.dataset.maskset); save(); } });
 // Gemini retiró los 2.5: se pasa a los alias que siempre apuntan al modelo vigente.
 const GEMINI_OLD = { 'gemini-2.5-flash': 'gemini-flash-latest', 'gemini-2.5-flash-lite': 'gemini-flash-lite-latest' };
 S.providers.filter((p) => p.preset === 'gemini').forEach((p) => { p.models = [...new Set(p.models.map((m) => GEMINI_OLD[m] || m))]; });
@@ -257,7 +315,7 @@ async function hydrateFiles() {
     try { const v = await blobs.get(f.ref); if (v == null) f.missing = true; else f[field(f)] = f.kind === 'image' ? await toDataUrl(v) : v; }
     catch { f.missing = true; }
   }
-  try { for (const k of await blobs.keys()) if (!used.has(k)) await blobs.del(k); } catch {}
+  try { for (const k of await blobs.keys()) if (!used.has(k) && !String(k).startsWith('lib:')) await blobs.del(k); } catch {}
 }
 // Las referencias son de este dispositivo: al exportar o sincronizar viaja el contenido original.
 const portable = (list) => JSON.parse(JSON.stringify(list, (k, v) => (k === 'ref' || k === 'missing' ? undefined : v)));
@@ -276,7 +334,7 @@ let busy = false, abortCtl = null, rpcId = 0, attach = [];
 
 function targets() {
   const t = [];
-  for (const p of S.providers) if (p.enabled !== false) for (const m of p.models) t.push({ key: `${p.id}::${m}`, pid: p.id, model: m, label: `${p.name} / ${m}`, kind: p.kind });
+  for (const p of S.providers) if (p.enabled !== false) for (const m of p.models) if (!p.freeOnly || /:free$/.test(m)) t.push({ key: `${p.id}::${m}`, pid: p.id, model: m, label: `${p.name} / ${m}`, kind: p.kind });
   for (const s of S.mcp) for (const m of s.models || []) t.push({ key: `mcp:${s.id}::${m}`, sid: s.id, model: m, label: `⬡ ${s.name} / ${m}`, kind: 'mcp' });
   return t;
 }
@@ -383,7 +441,8 @@ function budgetUsed() {
 }
 const budgetLeft = () => { const b = S.budget || {}, x = budgetUsed(); return Math.min(+b.day > 0 ? b.day - x.day : Infinity, +b.month > 0 ? b.month - x.month : Infinity); };
 const overBudget = () => { const b = S.budget || {}, x = budgetUsed(); return (+b.day > 0 && x.day >= +b.day) || (+b.month > 0 && x.month >= +b.month); };
-const eur = (x) => (x > 0 && x < 0.01 ? '< 0,01 €' : x.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' }));
+const money$ = (x) => x.toLocaleString(LANG === 'es' ? 'es-ES' : LANG, { style: 'currency', currency: CUR, currencyDisplay: 'narrowSymbol' });
+const eur = (x) => (x > 0 && x < (CUR === 'JPY' ? 1 : 0.01) ? '< ' + money$(CUR === 'JPY' ? 1 : 0.01) : money$(x));
 
 // ---------- registro de privacidad: qué salió de este dispositivo, adónde y cuándo ----------
 // Por hilo y solo en este dispositivo (no se sincroniza). Se apunta cada envío: mensajes a IAs, resúmenes,
@@ -985,6 +1044,7 @@ function failMsg(msg, e, t) {
   msg.pending = false; msg.content = '';
   msg.error = friendly(e);
   msg.detail = (e.status ? `[${e.status}] ` : '') + netHint(e);
+  if (PRESETS[S.providers.find((x) => x.id === t?.pid)?.preset]?.keyless) msg.error += ' ' + KEYLESS_FAIL;
   noteFail(t, e);
 }
 // Algunos modelos escriben su razonamiento interno (a menudo en inglés) entre <think>…</think>.
@@ -996,6 +1056,7 @@ const activeProject = () => { const id = thread().project; return id ? S.project
 function withInstructions(hist, skill = activeSkill()) {
   const sys = [];
   if (S.instructions?.trim()) sys.push(S.instructions.trim());
+  if (S.profile?.on !== false && S.profile?.text?.trim()) sys.push(`Sobre el usuario (tenlo en cuenta sin repetirlo):\n${S.profile.text.trim()}`);
   const pr = activeProject();
   if (pr?.memory?.trim()) sys.push(`Proyecto «${pr.name}». Información y preferencias que debes tener en cuenta:\n${pr.memory.trim()}`);
   if (skill) sys.push(`Habilidad activa: «${skill.name}» (v${skill.version}). Sigue este procedimiento:\n\n${skill.instructions}`);
@@ -1021,7 +1082,7 @@ async function runTarget(t, hist, msg, signal, tools, sk = null, purpose) {
 // opt.web: buscar en internet en este mensaje; opt.searchQuery: qué buscar (si no, el propio mensaje).
 async function send(text, files = [], opt = {}) {
   const th = thread(), msgs = th.messages;
-  if (!msgs.length) th.title = (opt.display || text || files[0]?.name || 'HILO').slice(0, 48);
+  if (!msgs.length) th.title = (opt.blind ? `⚔ ${text}` : opt.display || text || files[0]?.name || 'HILO').slice(0, 48);
   th.ts = Date.now();
   msgs.push({ id: uid(), role: 'user', content: text, ...(opt.display ? { display: opt.display } : {}), ...(opt.searchQuery ? { searchQuery: opt.searchQuery } : {}), ...(files.length ? { files } : {}), ts: Date.now() });
   save();
@@ -1043,9 +1104,11 @@ async function send(text, files = [], opt = {}) {
     // Solo cuenta si el mensaje actual lleva imágenes; las de mensajes anteriores se adaptan por modelo.
     const needs = { vision: Array.isArray(hist[hist.length - 1]?.content) };
     // 🌐 WEB: se busca antes y los resultados van con la pregunta; la IA debe citar las fuentes.
+    hist = await withLibrary(th, userMsg, hist);
     if ((S.web || opt.web) && th.private) userMsg.searchError = tr('hilo 🔒 PRIVADO: la búsqueda saldría a buscadores de internet');
     else if ((S.web || opt.web) && searchReady(th)) hist = await withSearch(th, userMsg, hist, signal);
-    if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
+    if (opt.blind) await sendBlind(th, hist, first, signal, needs, skill);
+    else if (S.council && first && plan(first, needs).length) await sendCouncil(th, hist, first, signal, needs, skill);
     // Con resultados web en la pregunta, sin herramientas: un texto de terceros no puede hacer que la IA lea tus archivos.
     else await respond(th, hist, first, signal, needs, skill, { tools: S.useTools && !userMsg.sources?.length, extra: userMsg.sources?.length ? { srcN: userMsg.sources.length } : null,
       why: routed && routed.key !== S.target ? `🧭 Enrutado por tarea: ${taskName(task)} → ${routed.label}.` : undefined });
@@ -1250,6 +1313,7 @@ let assistWeb = false, structUndo = null;
 function renderAssist() {
   const t = $('#input').value, el = $('#skillHint');
   if (guardPending) return;
+  if (/^\/[a-záéíóú]*$/i.test(t)) return renderCmdHint();
   el.className = 'hintbar';
   const k = suggestSkill(t);
   if (k) { renderSkillHint(); return; }
@@ -1717,6 +1781,108 @@ async function sendCouncil(th, hist, first, signal, needs = {}, skill = null) {
   }
 }
 
+// ---------- 📚 Biblioteca del proyecto ----------
+// Documentos de un 📁 proyecto que las IAs consultan en cada pregunta de sus hilos: se eligen los trozos que más
+// se parecen a la pregunta (por palabras, en el dispositivo) y se envían con su página para citarla.
+// La lista va en S.library (este dispositivo); el texto, en IndexedDB. No se sincronizan.
+// shortcut: de cada PDF se leen unos 60.000 caracteres (readPdf); ampliar readPdf si se usan manuales largos.
+// shortcut: búsqueda por palabras, no semántica; con muchos documentos parecidos puede elegir mal: pasar a embeddings (Ollama) si se queda corta.
+const libDocs = (pid) => (S.library ||= {})[pid] ||= [];
+async function addToLibrary(pid, list) {
+  for (const f of list) {
+    try {
+      const parts = await readFile(f, 400000, 20e6);
+      const text = parts.filter((x) => x.text).map((x) => x.text).join('\n');
+      if (!text.trim()) { toast(`${f.name}: ${tr('sin texto que leer (¿PDF escaneado?)')}`, true); continue; }
+      const chunks = [];
+      for (const pg of text.split(/^--- pág\. (?=\d+ ---$)/m)) {
+        const n = +pg.match(/^(\d+) ---/)?.[1] || null, body = pg.replace(/^\d+ ---\n?/, '');
+        for (let i = 0; i < body.length; i += 1500) { const t = body.slice(i, i + 1500).trim(); if (t) chunks.push({ p: n, t }); }
+      }
+      const id = 'lib:' + uid();
+      await blobs.put(id, JSON.stringify(chunks));
+      libDocs(pid).push({ id, name: f.name, chunks: chunks.length, pages: Math.max(0, ...chunks.map((c) => c.p || 0)) || null });
+      save(); toast(`📚 ${f.name}: ${tr('añadido a la biblioteca')}`);
+    } catch (e) { toast(`${f.name}: ${e.message}`, true); }
+  }
+  renderThreads();
+}
+async function withLibrary(th, userMsg, hist) {
+  const docs = th.project ? libDocs(th.project) : [];
+  const q = [...words(textOf(userMsg.content))];
+  if (!docs.length || !q.length) return hist;
+  const scored = [];
+  for (const d of docs) {
+    let chunks; try { chunks = JSON.parse(await blobs.get(d.id) || '[]'); } catch { continue; }
+    for (const c of chunks) {
+      const w = words(c.t), n = q.filter((x) => [...w].some((y) => y.slice(0, 5) === x.slice(0, 5))).length;
+      if (n) scored.push({ n, d, c });
+    }
+  }
+  const top = scored.sort((a, b) => b.n - a.n).slice(0, 4);
+  if (!top.length) return hist;
+  userMsg.lib = top.map((x) => `${x.d.name}${x.c.p ? ` · ${tr('pág.')} ${x.c.p}` : ''}`);
+  const add = `\n\n<<<${tr('FRAGMENTOS DE LOS DOCUMENTOS DEL PROYECTO')}>>>\n\n${top.map((x) => `[${x.d.name}${x.c.p ? `, ${tr('pág.')} ${x.c.p}` : ''}]\n${x.c.t}`).join('\n\n')}\n\n<<<${tr('FIN DE LOS FRAGMENTOS')}>>>\n${tr('Si usas estos fragmentos, cita el documento y la página entre corchetes, p. ej. [informe.pdf, pág. 3]. Si no bastan para responder, dilo.')}`;
+  const last = hist[hist.length - 1];
+  const content = Array.isArray(last.content) ? last.content.map((c, k) => (k === 0 && c.type === 'text' ? { ...c, text: c.text + add } : c)) : last.content + add;
+  return [...hist.slice(0, -1), { ...last, content }];
+}
+
+// Con 🌐 WEB activado se busca una vez con el objetivo y los resultados acompañan a cada paso.
+// shortcut: de los adjuntos solo se usa el texto (no las imágenes); si hace falta, mandarlas en el hilo normal.
+async function runSteps(goal, files = []) {
+  const th = thread();
+  if (!th.messages.length) th.title = `🧩 ${goal}`.slice(0, 48);
+  const root = { id: uid(), role: 'user', content: goal, display: `🧩 /pasos ${goal}`, ...(files.length ? { files } : {}), ts: Date.now() };
+  th.messages.push(root); th.ts = Date.now();
+  save(); setBusy(true); renderLog();
+  const signal = abortCtl.signal, first = findT(S.target);
+  const material = files.filter((f) => f.text).map((f) => `### ${f.name}\n${f.text.slice(0, 20000)}`).join('\n\n');
+  try {
+    let web = '';
+    if (S.web && th.private) root.searchError = tr('hilo 🔒 PRIVADO: la búsqueda saldría a buscadores de internet');
+    else if (S.web && searchReady(th)) web = textOf((await withSearch(th, root, [{ role: 'user', content: '' }], signal))[0].content);
+    const base = `${tr('Objetivo')}: ${goal}${material ? `\n\n${tr('Material del usuario')}:\n${material}` : ''}${web}`;
+    const ask = async (content, step) => {
+      const n0 = th.messages.length;
+      const ok = await respond(th, [{ role: 'user', content }], first, signal, {}, null, { tools: false, noFit: true, extra: { step } });
+      return ok ? th.messages.slice(n0).reverse().find((x) => x.content && !x.error)?.content || '' : null;
+    };
+    const planTxt = await ask(`${base}\n\n${tr('Divide este objetivo en 3 a 5 pasos concretos (reunir información, organizar, redactar, revisar…). Responde solo con la lista numerada, un paso por línea, sin explicaciones.')}`, tr('Plan'));
+    if (planTxt == null) return;
+    const steps = (planTxt.split('\n').map((l) => l.match(/^\s*\d+[.)]\s*(.+)/)?.[1]?.replace(/\*\*/g, '').trim()).filter(Boolean).slice(0, 5));
+    if (!steps.length) steps.push(goal);
+    const plan = steps.map((x, j) => `${j + 1}. ${x}`).join('\n'), done = [];
+    for (let i = 0; i < steps.length && !signal.aborted; i++) {
+      const prev = done.length ? `\n\n${tr('Lo hecho hasta ahora')}:\n\n${done.map((d, j) => `## ${tr('Paso')} ${j + 1}\n${d.slice(0, 4000)}`).join('\n\n')}` : '';
+      const out = await ask(`${base}\n\n${tr('Plan')}:\n${plan}${prev}\n\n${tr('Haz ahora solo el paso')} ${i + 1}: ${steps[i]}`, `${tr('Paso')} ${i + 1}/${steps.length} · ${steps[i]}`);
+      if (out == null) return;
+      done.push(out);
+    }
+    if (!signal.aborted) await ask(`${base}\n\n${tr('Trabajo de cada paso')}:\n\n${done.map((d, j) => `## ${steps[j]}\n${d.slice(0, 6000)}`).join('\n\n')}\n\n${tr('Entrega el resultado final completo para el usuario: revisa errores e incoherencias, quita repeticiones y no menciones los pasos.')}`, tr('Resultado final'));
+  } catch (e) {
+    if (e.name !== 'AbortError') th.messages.push({ id: uid(), role: 'assistant', error: netHint(e), ts: Date.now() });
+  } finally {
+    th.messages.forEach((m) => { if (m.pending) { m.pending = false; m.error ||= 'Cancelado'; } });
+    th.ts = Date.now(); setBusy(false); save(); renderLog(); renderTargets(); syncAll();
+  }
+}
+
+// A ciegas: dos IAs de proveedores distintos responden como «A» y «B»; al elegir la mejor se revela cuál era cada una
+// y el voto cuenta para el enrutado por tarea, como en el CONSEJO.
+async function sendBlind(th, hist, first, signal, needs = {}, skill = null) {
+  const pair = councilMembers(first, needs).slice(0, 2);
+  if (pair.length < 2) { th.messages.push({ id: uid(), role: 'assistant', error: 'Para comparar a ciegas hacen falta dos IAs disponibles de proveedores distintos.', ts: Date.now() }); return; }
+  if (Math.random() < 0.5) pair.reverse();
+  const group = uid();
+  const runs = pair.map((t, i) => {
+    const msg = { id: uid(), role: 'assistant', label: t.label, key: t.key, content: '', pending: true, group, blind: 'AB'[i], ts: Date.now(), why: '⚔ A CIEGAS: dos IAs responden sin que sepas cuál es cuál.' };
+    th.messages.push(msg); return { t, msg };
+  });
+  renderLog();
+  await Promise.all(runs.map(async ({ t, msg }) => { try { await runTarget(t, hist, msg, signal, false, skill); } catch (e) { failMsg(msg, e, t); } schedule(msg); }));
+}
+
 function setBusy(b) {
   busy = b;
   abortCtl = b ? new AbortController() : null;
@@ -1738,7 +1904,7 @@ function replyHTML(m) {
     if (m.skipped) return `<div class="reply err skip"><div class="txt">✕ ${esc(m.label || 'NEURA')}: ${esc(m.error)} → probando otra IA${detail}</div></div>`;
     return `<div class="reply err"><div class="tag"><span>✕ ${esc(m.label || 'NEURA')}</span></div><div class="txt">${esc(m.error)}${detail}</div></div>`;
   }
-  const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
+  const voteBtn = m.group && !m.synth && !m.pending && m.key ? (m.voted ? '<span class="chip voted">👍 ELEGIDA</span>' : `<button data-vote="${m.id}" ${m.blind ? 'class="blindVote"' : ''} title="Marca la mejor respuesta: Neura aprende qué IA prefieres para este tipo de tarea">👍 MEJOR</button>`) : '';
   const tools = (m.tools || []).length ? `<div class="chips">${m.tools.map((x) => `<span class="chip tool ${x.ok ? '' : 'off'}" title="${esc(JSON.stringify(x.args ?? {}))}">ƒ ${esc(x.name)}</span>`).join('')}</div>` : '';
   const acts = m.pending ? '<span class="processing">PROCESANDO</span>'
     : `${voteBtn}${m.ms ? `<small class="ms">${(m.ms / 1000).toFixed(1)} s</small>` : ''}${CAN_SPEAK ? `<button data-speak="${m.id}">LEER</button>` : ''}${m.files?.some((f) => f.kind === 'image' && f.data) ? `<button data-saveimg="${m.id}">GUARDAR</button>` : ''}<button data-copy="${m.id}">COPIAR</button><button data-check="${m.id}" title="Revisa esta respuesta: qué es dudoso y cómo verificarlo (con fuentes de internet si tienes buscador)">🔎 COMPROBAR</button><button data-skillify="${m.id}" title="Crear una habilidad reutilizable a partir de esta respuesta">✦ HABILIDAD</button><button data-branch="${m.id}" title="Nuevo hilo con la conversación hasta aquí">⑂ RAMA</button>`;
@@ -1749,14 +1915,33 @@ function replyHTML(m) {
   const citeWarn = !cites ? '' : !cites.length ? `<span class="chip off">⚠ ${tr('No cita las fuentes')}</span>`
     : cites.filter((n) => n < 1 || n > m.srcN).map((n) => `<span class="chip off">⚠ [${n}] ${tr('no corresponde a ninguna fuente')}</span>`).join('');
   const whyBtn = m.why && !m.pending ? `<button type="button" class="whyb" data-why="${m.id}" aria-label="¿Por qué esta IA?" title="¿Por qué esta IA?">ⓘ</button>` : '';
-  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span><span data-noi18n>${esc(m.label)}</span> ${whyBtn}${skill}${citeWarn}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div></div>`;
+  const hidden = m.blind && !thread().messages.some((x) => x.group === m.group && x.voted);
+  return `<div class="reply ${m.pending ? 'pending' : ''} ${m.synth ? 'synth' : ''}" data-id="${m.id}"><div class="tag"><span>${m.step ? `<span class="chip route step">🧩 <span data-noi18n>${esc(m.step)}</span></span> ` : ''}${hidden ? `<b>${tr('Respuesta')} ${m.blind}</b>` : `<span data-noi18n>${esc(m.label)}</span>`} ${whyBtn}${skill}${citeWarn}</span><span class="acts">${acts}</span></div>${tools}${files}<div class="txt">${md(m.content)}</div>${previewHTML(m)}</div>`;
 }
 function sourcesHTML(m) {
+  const lib = m.lib?.length ? `<div class="sources">📚 ${tr('Consultado en la biblioteca')}: <span data-noi18n>${m.lib.map(esc).join(' · ')}</span></div>` : '';
+  return lib + webSourcesHTML(m);
+}
+function webSourcesHTML(m) {
   if (m.searchError) return `<div class="sources off">🌐 Sin búsqueda: ${esc(m.searchError)}</div>`;
   if (!m.sources?.length) return '';
   return `<details class="sources"><summary>🌐 ${m.sources.length} fuentes de internet${m.query ? ` · ${tr('búsqueda')}: <span data-noi18n>«${esc(m.query.slice(0, 80))}»</span>` : ''}</summary><ol>${m.sources.map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title || x.url)}</a> <small>${esc(hostOf(x.url))}</small></li>`).join('')}</ol></details>`;
 }
 // Ajustes de un toque bajo la última respuesta: se envían como un mensaje normal (y se ve qué se pidió).
+function previewHTML(m) {
+  if (m.pending || !m.content) return '';
+  const blocks = [...m.content.matchAll(/```(html|svg|xml)?\s*\n([\s\S]*?)```/gi)].filter((b) => /<svg[\s>]/i.test(b[2]) || /<(html|body|!doctype)/i.test(b[2]) || b[1]?.toLowerCase() === 'html');
+  return blocks.map((b, i) => (/^\s*<svg[\s>]/i.test(b[2]) && !/<script/i.test(b[2])
+    ? `<div class="preview"><img alt="${tr('Vista previa')}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(b[2].trim())}"></div>`
+    : `<button type="button" class="btn sm" data-openhtml="${m.id}:${i}">🌐 ${DESK ? tr('ABRIR LA PÁGINA EN EL NAVEGADOR') : tr('DESCARGAR LA PÁGINA (.html)')}</button>`)).join('');
+}
+async function openHtml(ref) {
+  const [id, i] = ref.split(':'), m = thread().messages.find((x) => x.id === id);
+  const b = [...(m?.content || '').matchAll(/```(html|svg|xml)?\s*\n([\s\S]*?)```/gi)].filter((x) => /<svg[\s>]/i.test(x[2]) || /<(html|body|!doctype)/i.test(x[2]) || x[1]?.toLowerCase() === 'html')[+i];
+  if (!b) return;
+  if (DESK?.openHtml) return DESK.openHtml(b[2]);
+  download('neura-pagina.html', b[2], 'text/html');
+}
 const ADJUST = [
   ['✂ Más corta', 'Hazla más corta: quédate solo con lo esencial.'],
   ['🧒 Más sencilla', 'Explícalo de forma más sencilla, sin tecnicismos, para alguien que empieza.'],
@@ -1793,6 +1978,7 @@ function logHTML(th) {
       while (i < msgs.length && msgs[i].group === m.group) g.push(msgs[i++]);
       i--;
       const answers = g.filter((x) => !x.synth), synth = g.find((x) => x.synth);
+      if (m.blind) { const shown = g.some((x) => x.voted); out.push(`<div class="msg council blindSet"><div class="tag">⚔ ${tr('A CIEGAS')} · ${shown ? tr('revelado') : tr('elige la mejor sin saber de qué IA es')}</div><div class="cgrid">${answers.map(replyHTML).join('')}</div></div>`); continue; }
       out.push(`<div class="msg council"><div class="tag">⚖ CONSEJO · ${answers.length} IAs</div><div class="cgrid">${answers.map(replyHTML).join('')}</div>${synth ? replyHTML(synth) : ''}</div>`);
     } else out.push(msgHTML(m).replace(/<\/div>$/, m.id === lastReply && lastOk && !busy && !th.batch ? `${adjustHTML()}</div>` : '</div>'));
     if (th.summary?.upto === m.id && i < msgs.length - 1) {
@@ -1818,19 +2004,52 @@ function renderLog() {
     const n = targets().length;
     log.innerHTML = `<div class="empty">
       <svg viewBox="0 0 40 46" class="biglogo" aria-hidden="true">${$('.logo').innerHTML}</svg>
-      <div class="big">NEURA</div><div class="sub">ESPERANDO ENTRADA</div>
+      <div class="big">NEURA</div><div class="sub">${S.mask === 'mando' ? 'ESPERANDO ENTRADA' : 'Todas tus IAs en un solo chat'}</div>
       ${S.providers.length || S.wizardDone ? '' : wizardHTML()}
       ${S.level === 'basic' ? `<div class="tips"><b>💡 CÓMO USAR BIEN LAS IAs</b><ul>${TIPS.map((t) => `<li>${t}</li>`).join('')}</ul></div>${targets().length ? learnHTML(true) : ''}` : ''}
-      <ol><li>${n ? `<b>${n} modelos</b> conectados.` : 'Pulsa <b>⚙</b> y añade IAs públicas con su clave gratuita (Gemini, Groq, OpenRouter…).'}</li>
-      <li>Pulsa <b>⬡</b> para conectar tu IA local mediante un servidor MCP.</li>
-      <li><b>AUTO-SALTO</b>: si una IA agota sus tokens gratis, contesta otra.</li>
-      <li><b>⚖ CONSEJO</b>: pregunta a varias IAs a la vez y recibe la mejor respuesta combinada.</li></ol></div>`;
+      ${n ? homeHTML(n) : S.providers.length || S.wizardDone ? '<p class="hint">Pulsa <b>⚙</b> y añade una IA (o «Conectar mi cuenta», sin copiar claves) para empezar.</p>' : ''}</div>`;
     renderLocalAI();
     return;
   }
   log.innerHTML = logHTML(th);
   if (stick) log.scrollTop = log.scrollHeight;
 }
+
+// Inicio: qué puedes hacer y tus hilos recientes, a un toque.
+const HOME = [
+  ['ask', '💬', 'Preguntar algo', 'Escribe abajo; cuanto más contexto, mejor respuesta.'],
+  ['tpl', '✨', 'Usar una plantilla', 'Correo, resumen, informe, acta…: rellenas unos campos y listo.'],
+  ['doc', '📄', 'Trabajar con un documento', 'Adjunta un PDF, una foto o un texto y pregunta sobre él.'],
+  ['web', '🌐', 'Buscar en internet', 'Respuestas con las fuentes citadas.'],
+  ['council', '⚖', 'Comparar varias IAs', 'Responden a la vez y una combina lo mejor.'],
+  ['skills', '✦', 'Mis habilidades', 'Procedimientos que repites, aplicados con cualquier IA.'],
+  ['steps', '🧩', 'Tarea en varios pasos', 'Planifica, investiga, redacta y revisa por ti.'],
+  ['blind', '⚔', 'Comparar a ciegas', 'Dos IAs responden sin decir cuál es cuál: elige la mejor.'],
+];
+function homeHTML(n) {
+  const recent = S.threads.filter((t) => !t.deleted && t.messages.length && t.id !== S.active).sort((a, b) => !!b.pinned - !!a.pinned || b.ts - a.ts).slice(0, 4);
+  return `<div class="home">
+    <div class="homeHead"><b>¿Qué quieres hacer?</b><span class="hint">${n} modelos listos · AUTO-SALTO ${S.autoSkip ? 'activado' : 'desactivado'}</span></div>
+    <div class="homeGrid">${HOME.filter(([k]) => k !== 'council' || S.level !== 'basic').map(([k, ic, t, d]) => `<button type="button" class="homeCard" data-home="${k}"><span>${ic}</span><b>${t}</b><small>${d}</small></button>`).join('')}</div>
+    ${recent.length ? `<div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${t.pinned ? '📌 ' : ''}${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div>` : ''}
+  </div>`;
+}
+$('#log').addEventListener('click', (e) => {
+  const r = e.target.closest('[data-tid-open]');
+  if (r) { S.active = r.dataset.tidOpen; save(); renderLog(); return; }
+  const k = e.target.closest('[data-home]')?.dataset.home;
+  if (!k) return;
+  if (k === 'ask') $('#input').focus();
+  if (k === 'tpl') openTemplates();
+  if (k === 'doc') $('#fileIn').click();
+  if (k === 'skills') $('#btnSkills').click();
+  if (k === 'steps' || k === 'blind') { input.value = k === 'steps' ? '/pasos ' : '/ciegas '; input.focus(); }
+  if (k === 'council') { S.council = true; $('#council').checked = true; save(); toast(`⚖ CONSEJO: ${councilMembers(findT(S.target)).length} IAs responderán a la vez`); $('#input').focus(); }
+  if (k === 'web') {
+    if (!searchReady(thread())) { openSheet('#sheetAis'); return toast(thread().private ? 'En un hilo 🔒 PRIVADO no se busca en internet.' : 'Elige un buscador en ⚙ → 🌐 BÚSQUEDA EN INTERNET (SearXNG es gratis).', true); }
+    S.web = true; $('#web').checked = true; save(); toast('🌐 WEB: Neura buscará en internet y la IA citará las fuentes'); $('#input').focus();
+  }
+});
 
 const pend = new Set();
 function schedule(m) {
@@ -1868,13 +2087,20 @@ function wizardHTML() {
     </div>`;
   return `<div class="card wizard">
     <div class="row wrap wzLang">${langSelect('wzLang')}</div>
+    ${maskPicker()}
     <h4>EMPIEZA CON LA IA · GRATIS</h4>
     ${level}
+    <button type="button" class="btn wide oauthBtn" data-oauth="openrouter">🔑 CONECTAR MI CUENTA<small>sin copiar claves</small></button>
+    <div class="hint">Inicia sesión en <b>OpenRouter</b> (o crea una cuenta gratis) y pulsa «Authorize»: Neura recibe la clave sola y usa solo sus modelos gratuitos. Lo que escribes va a OpenRouter y al proveedor de cada modelo. Límite gratuito: unas 50 peticiones al día.</div>
+    <div class="hint oauthMsg" aria-live="polite"></div>
     <div class="tabs">
-      <button type="button" data-wz="local" class="${wzMode === 'local' ? 'on' : ''}">💻 IA EN ESTE EQUIPO<small>sin cuentas ni claves</small></button>
-      <button type="button" data-wz="cloud" class="${wzMode === 'cloud' ? 'on' : ''}">☁ IA EN INTERNET<small>gratis, con una cuenta</small></button>
+      <button type="button" data-wz="local" class="${wzMode === 'local' ? 'on' : ''}">💻 IA EN MI ORDENADOR<small>requiere instalar Ollama y un equipo compatible</small></button>
+      <button type="button" data-wz="cloud" class="${wzMode === 'cloud' ? 'on' : ''}">⚙ OTRO PROVEEDOR<small>Gemini, Groq…: copiando su clave</small></button>
     </div>
     <div id="wzBody">${wzMode === 'local' ? localAIHTML() : cloudHTML()}</div>
+    <details class="tryFree"><summary>⚡ Probar sin cuenta (experimental)</summary>
+      <div class="hint">Usa Pollinations, un servicio gratuito sin registro: puede ir lento, cambiar o dejar de funcionar sin aviso. Lo que escribes va a Pollinations: no lo uses para datos personales (en los hilos 🔒 PRIVADOS no se usa nunca).</div>
+      <button type="button" class="btn sm ghost" id="wzTry">PROBAR SIN CUENTA</button></details>
   </div>`;
 }
 function cloudHTML() {
@@ -1884,11 +2110,106 @@ function cloudHTML() {
     <div class="hint">2. <a id="wzKey" href="${esc(PRESETS[wzPreset].keyUrl)}" target="_blank" rel="noopener">Abre su página ▸</a></div>
     <ol class="steps">${g.steps.map((x) => `<li>${esc(x)}</li>`).join('')}</ol>
     ${g.note ? `<div class="hint warn">⚠️ ${esc(g.note)}</div>` : ''}
-    <label>3. PEGA LA CLAVE<input id="wzApiKey" type="password" autocomplete="off" placeholder="pega aquí tu clave"></label>
+    <label>3. PEGA LA CLAVE<span class="row"><input id="wzApiKey" type="password" autocomplete="off" placeholder="pega aquí tu clave"><button type="button" class="btn sm ghost" id="wzPaste">📋 PEGAR</button></span></label>
     <button class="btn wide" id="wzGo">CONECTAR Y PROBAR</button>
     <div class="hint" id="wzMsg">La clave se guarda solo en este dispositivo. Los límites gratuitos los fija cada proveedor y pueden cambiar.</div>`;
 }
 const renderWizard = () => { const b = document.getElementById('wzBody'); if (b) b.innerHTML = wzMode === 'local' ? localAIHTML() : cloudHTML(); renderLocalAI(); };
+
+// Comprueba una clave sin generar texto (no gasta cuota): una consulta que exige la clave y la lista de modelos.
+// La lista de OpenRouter es pública: allí se consultan los datos de la propia clave (/key).
+async function checkKey(p) {
+  if (p.preset === 'openrouter') {
+    const r = await xfetch(p.baseUrl.replace(/\/+$/, '') + '/key', { headers: { Authorization: 'Bearer ' + p.apiKey } });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+  }
+  // shortcut: si un proveedor publica su lista sin pedir clave, una clave mala pasa aquí y falla en la primera pregunta (con «clave no válida»); añadir su consulta de cuenta si pasa.
+  const list = await fetchModels(p);
+  if (!list.length) throw new Error('No se encontraron modelos');
+  p.models = list.sort((a, b) => modelRank(a) - modelRank(b));
+  refreshed.add(p.id);
+}
+// El formato de la clave sugiere el proveedor; no decide: la elección sigue en la lista.
+const KEY_PREFIX = [[/^AIza/, 'gemini'], [/^gsk_/, 'groq'], [/^sk-or-/, 'openrouter'], [/^nvapi-/, 'nvidia'], [/^csk-/, 'cerebras']];
+function suggestPreset(key) {
+  const k = KEY_PREFIX.find(([re]) => re.test(key))?.[1];
+  if (!k || k === wzPreset || !WIZ.includes(k)) return;
+  wzPreset = k; renderWizard();
+  $('#wzApiKey').value = key; $('#wzApiKey').focus();
+  $('#wzMsg').textContent = `Parece una clave de ${PRESETS[k].name}: la he elegido en la lista. Si no lo es, cámbiala.`;
+}
+async function pasteKey() {
+  let key = '';
+  try { key = (await navigator.clipboard.readText()).trim(); } catch {}
+  const inp = $('#wzApiKey');
+  if (!key) { inp.focus(); return toast('No se pudo leer el portapapeles: mantén pulsado el campo (o Ctrl+V) y elige Pegar.', true); }
+  inp.value = key; suggestPreset(key);
+}
+
+// ---------- «Conectar mi cuenta»: OpenRouter con OAuth y PKCE (sin copiar claves) ----------
+// Se genera un secreto (code_verifier) y se envía solo su huella SHA-256; un «state» aleatorio liga la vuelta a esta petición.
+// Ambos caducan a los 10 minutos y se borran al primer uso. El código y la clave no se registran en ningún sitio.
+const OR_AUTH = 'https://openrouter.ai/auth', OR_KEYS = 'https://openrouter.ai/api/v1/auth/keys';
+const OAUTH_LS = 'neura-oauth', OAUTH_TTL = 10 * 60e3;
+const KEYLESS_FAIL = 'El acceso sin cuenta es experimental y puede no estar disponible: para algo más estable, pulsa «Conectar mi cuenta» en ⚙ → IAs (gratis, sin copiar claves).';
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const randToken = (n) => b64url(crypto.getRandomValues(new Uint8Array(n)));
+function oauthMsg(text, bad) {
+  for (const el of document.querySelectorAll('.oauthMsg')) { el.textContent = text; el.classList.toggle('red', !!bad); }
+  toast(text, bad);
+}
+async function connectOpenRouter() {
+  if (!crypto.subtle) return oauthMsg('Este navegador no permite conectar la cuenta aquí (hace falta una conexión segura https).', true);
+  const verifier = randToken(48), state = randToken(24);
+  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  let cb;
+  if (DESK?.oauthStart) cb = `http://localhost:${await DESK.oauthStart()}/callback?state=${state}`;
+  else if (CAP) cb = `neura://oauth/openrouter?state=${state}`;
+  else cb = `${location.origin}${location.pathname}?oauth=openrouter&state=${state}`;
+  localStorage.setItem(OAUTH_LS, JSON.stringify({ verifier, state, exp: Date.now() + OAUTH_TTL }));
+  oauthMsg(DESK || CAP ? 'Se ha abierto OpenRouter en tu navegador: inicia sesión y pulsa «Authorize». Neura seguirá sola al volver.' : 'Abriendo OpenRouter…');
+  openAuth(`${OR_AUTH}?callback_url=${encodeURIComponent(cb)}&code_challenge=${challenge}&code_challenge_method=S256`);
+}
+// En el PC y en el móvil se abre el navegador del sistema (no una ventana dentro de Neura); en la web, la misma pestaña.
+const openAuth = (url) => (DESK ? window.open(url, '_blank') : location.assign(url));
+async function finishOAuth({ code, state, error }) {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(OAUTH_LS)); } catch {}
+  if (!p || !state || p.state !== state) return oauthMsg('Este enlace de conexión no es válido o ya se usó. Pulsa otra vez «Conectar mi cuenta».', true);
+  localStorage.removeItem(OAUTH_LS); // un solo uso: una segunda vuelta con el mismo enlace ya no vale; una ajena no anula la pendiente
+  if (Date.now() > p.exp) return oauthMsg('La conexión ha caducado (10 minutos). Pulsa otra vez «Conectar mi cuenta».', true);
+  if (!code || error) return oauthMsg('No se completó la conexión con OpenRouter. Puedes volver a intentarlo cuando quieras.', true);
+  oauthMsg('Conectando tu cuenta de OpenRouter…');
+  let key;
+  try {
+    const r = await xfetch(OR_KEYS, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, code_verifier: p.verifier, code_challenge_method: 'S256' }) });
+    if (!r.ok) throw httpErr(r.status, await r.text(), r.headers);
+    key = (await r.json()).key;
+    if (!key) throw new Error('OpenRouter no devolvió la clave');
+  } catch (e) { return oauthMsg(`No se pudo conectar: ${friendly(e)} Vuelve a intentarlo.`, true); }
+  // Se comprueba antes de añadirla: si falla, no queda una IA a medias.
+  const old = S.providers.find((x) => x.oauth === 'openrouter');
+  const pr = { ...(old || { id: uid(), preset: 'openrouter', ...JSON.parse(JSON.stringify(PRESETS.openrouter)), oauth: 'openrouter' }), apiKey: key, freeOnly: true, tier: 'free', enabled: true };
+  try { await checkKey(pr); } catch (e) { return oauthMsg(`Tu cuenta se conectó, pero no se pudo comprobar: ${friendly(e)}`, true); }
+  if (old) Object.assign(old, pr); else S.providers.push(pr);
+  S.target = `${pr.id}::${pr.models[0]}`; S.wizardDone = true;
+  save(); renderTargets(); renderLog(); if ($('#sheetAis').classList.contains('open')) renderProviders();
+  oauthMsg(`✓ Cuenta de OpenRouter conectada: ${pr.models.length} modelos gratuitos. ¡Ya puedes escribir!`); $('#input').focus();
+}
+// Vuelta en la web (?oauth=openrouter&state=…&code=…): se procesa y se borra de la barra de direcciones.
+function oauthFromUrl(href) {
+  const u = new URL(href.replace(/(\?[^?#]*)\?/, '$1&')); // por si el servicio añade «?code=» a una vuelta que ya lleva «?state=»
+  const ok = u.protocol === 'neura:' ? u.host === 'oauth' && u.pathname === '/openrouter' : u.searchParams.get('oauth') === 'openrouter';
+  if (!ok) return null;
+  return { code: u.searchParams.get('code') || '', state: u.searchParams.get('state') || '', error: u.searchParams.get('error') || '' };
+}
+function addKeyless(k) {
+  let p = S.providers.find((x) => x.preset === k);
+  if (!p) S.providers.push(p = { id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), apiKey: '', enabled: true });
+  p.enabled = true; S.target = `${p.id}::${p.models[0]}`; S.wizardDone = true;
+  save(); renderTargets(); renderLog();
+  toast('⚡ Modo sin cuenta (experimental). Para algo más estable: «Conectar mi cuenta» en ⚙ → IAs.'); $('#input').focus();
+}
 
 // ---------- IA en este equipo (Ollama), sin cuentas ----------
 // Neura no instala Ollama (pide permisos de administrador y cambia por sistema): detecta si falta y enlaza el instalador.
@@ -2082,8 +2403,13 @@ function learnProgress() {
   toast(`🎓 Reto conseguido: ${x.t}. ${x.tip}`);
 }
 document.addEventListener('click', async (e) => {
-  const d = e.target.dataset || {};
+  const d = { ...e.target.dataset };
   if (d.learnex) { const x = LEARN.find((l) => l.id === d.learnex); $('#input').value = x.ex; $('#input').dispatchEvent(new Event('input')); $('#input').focus(); }
+  const wzEl = e.target.closest?.('[data-wz],[data-oauth]'); // el clic puede caer en el texto pequeño del botón
+  if (wzEl) Object.assign(d, { wz: wzEl.dataset.wz, oauth: wzEl.dataset.oauth });
+  if (d.oauth === 'openrouter') connectOpenRouter().catch((err) => oauthMsg('No se pudo iniciar la conexión: ' + netHint(err), true));
+  if (e.target.id === 'wzPaste') pasteKey();
+  if (e.target.id === 'wzTry') addKeyless('pollinations');
   if (d.wz) { wzMode = d.wz; document.querySelectorAll('[data-wz]').forEach((b) => b.classList.toggle('on', b.dataset.wz === wzMode)); renderWizard(); }
   if (d.level) {
     S.level = d.level;
@@ -2097,6 +2423,7 @@ document.addEventListener('click', async (e) => {
   if (d.lai === 'use') useLocalModel(d.m);
 });
 $('#log').addEventListener('change', (e) => { if (e.target.id === 'wzPreset') { wzPreset = e.target.value; renderWizard(); } });
+$('#log').addEventListener('input', (e) => { if (e.target.id === 'wzApiKey') suggestPreset(e.target.value.trim()); });
 $('#log').addEventListener('click', async (e) => {
   if (e.target.id !== 'wzGo') return;
   const key = $('#wzApiKey').value.trim(), k = wzPreset, msg = $('#wzMsg');
@@ -2105,12 +2432,9 @@ $('#log').addEventListener('click', async (e) => {
   let p = S.providers.find((x) => x.wizard);
   if (!p) S.providers.push(p = { id: uid(), preset: k, ...JSON.parse(JSON.stringify(PRESETS[k])), enabled: true, wizard: true });
   Object.assign(p, { preset: k, name: PRESETS[k].name, baseUrl: PRESETS[k].baseUrl, models: [...PRESETS[k].models], apiKey: key });
-  refreshed.delete(p.id); await refreshModels(p, true);
-  const t = { key: `${p.id}::${p.models[0]}`, pid: p.id, model: p.models[0], kind: p.kind };
   try {
-    if (!p.models[0]) throw new Error('No se encontraron modelos');
-    await callTarget(t, [{ role: 'user', content: 'Responde solo: OK' }], () => {}, undefined, { purpose: 'prueba' });
-    delete p.wizard; S.target = t.key; S.wizardDone = true; save(); renderTargets(); renderLog();
+    await checkKey(p);
+    delete p.wizard; S.target = `${p.id}::${p.models[0]}`; S.wizardDone = true; save(); renderTargets(); renderLog();
     toast(`✓ ${p.name} conectada. ¡Ya puedes escribir!`); $('#input').focus();
   } catch (err) {
     msg.textContent = `No funcionó: ${friendly(err)} Revisa la clave y vuelve a intentarlo.`;
@@ -2162,7 +2486,9 @@ function renderProviders() {
         <button class="btn sm red" data-act="del">✕</button></div>
       <label>ENDPOINT<input data-f="baseUrl" value="${esc(p.baseUrl)}" placeholder="https://…/v1"></label>
       <label>CLAVE API ${help('clave')}<input data-f="apiKey" type="password" autocomplete="off" value="${esc(p.apiKey || '')}" placeholder="${vault.locked ? 'bloqueada con PIN' : 'pega tu clave'}"></label>
-      ${p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
+      ${p.oauth ? `<div class="hint">🔑 Conectada con tu cuenta (solo modelos gratuitos). Quitarla con ✕ borra la clave de este dispositivo; para anularla del todo, revócala en <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai ▸ Keys</a>.</div>`
+        : PRESETS[p.preset]?.keyless ? `<div class="hint">⚡ Sin cuenta ni clave (experimental): puede ir lento o dejar de funcionar. Lo que escribes va a ${esc(p.name)}.</div>`
+        : p.keyUrl ? `<a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">▸ conseguir clave${p.tier === 'free' ? ' gratuita' : ''}</a>` : ''}
       <label>MODELOS (separados por coma) ${help('modelo')}<input data-f="models" value="${esc(p.models.join(', '))}"></label>
       <div class="row2">
         <label>LÍMITE DIARIO (peticiones)<input data-f="dailyLimit" type="number" min="0" step="1" inputmode="numeric" value="${esc(p.dailyLimit || '')}" placeholder="sin límite"></label>
@@ -2199,12 +2525,48 @@ function usageHTML() {
   const head = '<thead><tr><th>IA</th><th>HOY</th><th>TOKENS</th><th>€ HOY</th><th>€ MES</th></tr></thead>';
   return `<h3>📊 CONSUMO ${help('token')}</h3>
     <p class="hint" id="usageSum">${usageSumHTML()}</p>
+    ${quotaHTML()}
+    ${savedHTML()}
     ${rows ? `<table class="usage">${head}<tbody>${rows}</tbody></table>` : '<p class="hint">Aún no has usado ninguna IA hoy.</p>'}
     ${gwRows ? `<h4>🔌 POR EL GATEWAY (otras herramientas)</h4><table class="usage">${head}<tbody>${gwRows}</tbody></table>${gw.cache?.hits ? `<p class="hint">Caché: ${gw.cache.hits} respuestas repetidas servidas sin llamar a ninguna IA.</p>` : ''}` : ''}
     ${unpriced.length ? `<p class="hint warn">⚠️ ${unpriced.map((p) => esc(p.name)).join(', ')}: de pago sin precio. Ponlo en su tarjeta (€ por millón de tokens) para que su gasto cuente${hasBudget() ? '; mientras haya un tope, no se usa' : ''}.</p>` : ''}
     <div class="row2"><label class="field">TOPE € / DÍA<input type="number" id="budgetDay" min="0" step="0.5" inputmode="decimal" value="${esc(b.day || '')}" placeholder="sin tope"></label>
     <label class="field">TOPE € / MES<input type="number" id="budgetMonth" min="0" step="1" inputmode="decimal" value="${esc(b.month || '')}" placeholder="sin tope"></label></div>
+    <label class="field">MONEDA<select id="currencySel" data-noi18n>${Object.entries(CURS).map(([k, v]) => `<option value="${k}" ${k === CUR ? 'selected' : ''}>${v} ${k}</option>`).join('')}</select></label>
+    <p class="hint">Solo cambia el símbolo, no convierte: pon los precios y el tope en la moneda elegida.</p>
     <p class="hint">Vacío o 0 = sin tope. Al llegar al tope, Neura${DESK ? ' y el Gateway' : ''} solo usan IAs gratuitas y tus equipos hasta el día o el mes siguiente. Antes de cada llamada a una IA de pago, Neura le pide como máximo 4.096 tokens de respuesta y <b>reserva</b> su coste máximo (con la entrada estimada a la alta)${DESK ? ' en un saldo único que comparten la app y el Gateway de este PC' : ' en el saldo de este dispositivo'}; si no cabe, no la usa. Si una petición se corta y no se sabe cuánto consumió, se contabiliza lo reservado. Neura controla lo que contabiliza con tus precios y una estimación de la entrada; la factura del proveedor puede incluir otros conceptos y es la que vale. Con <b>LÍMITE DIARIO</b> en la tarjeta de una IA, Neura avisa al 80 % y deja de usarla al llegar.</p>`;
+}
+// Cuota gratuita de hoy por proveedor: peticiones hechas, tu límite, si está en pausa y cuál conviene usar ahora.
+// Los límites reales los fija cada proveedor y cambian: Neura muestra lo que ha visto (pausas por cuota) y lo que tú pusiste.
+const KNOWN_DAY = { openrouter: 50 };
+function quotaHTML() {
+  const U = S.usage?.[today()] || {}, free = S.providers.filter((p) => p.enabled !== false && p.tier === 'free');
+  if (!free.length) return '';
+  const rows = free.map((p) => {
+    const used = Object.entries(U).filter(([k]) => k.startsWith(p.id + '::')).reduce((a, [, u]) => a + u.n + (u.err || 0), 0);
+    const lim = +p.dailyLimit || (p.oauth || p.preset === 'openrouter' ? KNOWN_DAY.openrouter : 0);
+    const cold = p.models.map((m) => `${p.id}::${m}`).filter(cooling);
+    const st = !p.models.length ? '—' : cold.length === p.models.length ? `⏳ ${coolText(cold[0])}` : cold.length ? `✓ ${p.models.length - cold.length}/${p.models.length} ${tr('modelos disponibles')}` : `✓ ${tr('disponible')}`;
+    return `<tr><td data-noi18n>${esc(p.name)}${lim ? `<progress max="${lim}" value="${Math.min(used, lim)}"></progress>` : ''}</td><td>${used}${lim ? ` / ~${lim}` : ''}</td><td class="st">${st}</td></tr>`;
+  }).join('');
+  const best = plan(findT(S.target))[0];
+  return `<h4>⛽ ${tr('CUOTA GRATIS DE HOY')}</h4><table class="usage quota"><thead><tr><th>IA</th><th>${tr('PETICIONES')}</th><th>${tr('ESTADO')}</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="hint">${best ? `${tr('Ahora conviene usar')}: <b data-noi18n>${esc(best.label)}</b>. ` : ''}${tr('Los límites los fija cada proveedor y cambian; «~» es orientativo. Cuando uno se agota, AUTO-SALTO pasa a otro.')}</p>`;
+}
+// Lo que habría costado lo hecho este mes con IAs gratuitas y tus equipos, a precio de un modelo de pago de referencia.
+const REF_PRICE = { in: 2.5, out: 10 }; // por millón de tokens, del orden de GPT-4o
+function savedHTML() {
+  let tin = 0, tout = 0;
+  for (const [d, v] of Object.entries(S.usage || {})) {
+    if (monthOf(d) !== monthOf(today())) continue;
+    for (const [k, u] of Object.entries(v)) {
+      const p = S.providers.find((x) => k.startsWith(x.id + '::'));
+      if (k.startsWith('mcp:') || p?.tier === 'free') { tin += u.in || 0; tout += u.out || 0; }
+    }
+  }
+  const v = (tin * REF_PRICE.in + tout * REF_PRICE.out) / 1e6;
+  if (!tin && !tout) return '';
+  return `<p class="hint saved">💰 ${tr('Este mes, lo que has hecho con IAs gratis y tus equipos habría costado unos')} <b>${eur(v)}</b> ${tr('con un modelo de pago de referencia')} (${REF_PRICE.in} / ${REF_PRICE.out} ${tr('por millón de tokens, del orden de GPT-4o')}; ${fmtTok(tin + tout)} tokens).</p>`;
 }
 function usageSumHTML() {
   const x = spent();
@@ -2219,7 +2581,7 @@ async function diagnose(allModels) {
   const el = () => document.getElementById('diagOut');
   const rows = [];
   const groups = [
-    ...S.providers.filter((p) => p.enabled !== false).map((p) => ({ name: p.name, list: (allModels ? p.models : p.models.filter((m) => S.health[`${p.id}::${m}`]?.reason !== 'RETIRADO').slice(0, 1)).map((m) => findT(`${p.id}::${m}`)).filter(Boolean), noKey: !p.apiKey && p.preset !== 'custom', empty: !p.models.length })),
+    ...S.providers.filter((p) => p.enabled !== false).map((p) => ({ name: p.name, list: (allModels ? p.models : p.models.filter((m) => S.health[`${p.id}::${m}`]?.reason !== 'RETIRADO').slice(0, 1)).map((m) => findT(`${p.id}::${m}`)).filter(Boolean), noKey: !p.apiKey && p.preset !== 'custom' && !PRESETS[p.preset]?.keyless, empty: !p.models.length })),
     ...S.mcp.map((s) => ({ name: `⬡ ${s.name}`, list: (allModels ? s.models || [] : (s.models || []).slice(0, 1)).map((m) => findT(`mcp:${s.id}::${m}`)).filter(Boolean), off: s.status !== 'on' && (s.error || 'sin conexión') })),
   ];
   const paint = () => {
@@ -2280,6 +2642,14 @@ function renderSettings() {
   $('#settings').innerHTML = `
     <h3>🌐 IDIOMA · LANGUAGE</h3>
     ${langSelect('langSel')}
+    ${schedulesHTML()}
+    <h3>🧠 MEMORIA PERSONAL</h3>
+    <label class="auto"><input type="checkbox" id="profileOn" ${S.profile?.on === false ? '' : 'checked'}> USAR MI MEMORIA EN TODAS LAS IAs</label>
+    <textarea id="profileText" class="wide-input" rows="4" placeholder="Ej.: Soy enfermera en Madrid. Prefiero respuestas cortas, con ejemplos y sin tecnicismos. Escribo correos formales.">${esc(S.profile?.text || '')}</textarea>
+    <p class="hint">Lo que pongas aquí lo reciben todas las IAs que uses, para no repetirlo en cada hilo. Se guarda en este dispositivo y viaja con cada pregunta a la IA que responda: no pongas contraseñas ni datos que no compartirías.</p>
+    <h3>🎭 APARIENCIA</h3>
+    ${maskPicker()}
+    <p class="hint">Mando es el aspecto original de Neura; Limpio es claro, para quien se cansa con los fondos oscuros.</p>
     <h3>NIVEL</h3>
     <div class="row wrap"><button class="btn sm ${S.level === 'basic' ? '' : 'ghost'}" data-level="basic">PRINCIPIANTE</button><button class="btn sm ${S.level !== 'basic' ? '' : 'ghost'}" data-level="pro">PROFESIONAL</button><button class="btn sm ghost" id="addStarters">+ HABILIDADES DE INICIO</button></div>
     <p class="hint">Principiante muestra lo esencial y consejos de uso. Profesional añade CONSEJO, HERRAMIENTAS y el resto de opciones avanzadas.</p>
@@ -2443,13 +2813,20 @@ function renderThreads(withCard = true) {
       <label>NOMBRE DEL PROYECTO<input id="prName" value="${esc(pr.name)}" maxlength="80"></label>
       <label>MEMORIA DEL PROYECTO (la reciben todas las IAs en sus hilos)<textarea id="prMemory" rows="4" placeholder="Datos, contexto y preferencias: p. ej. «Tesis sobre energía solar, estilo académico, citar fuentes»">${esc(pr.memory || '')}</textarea></label>
       <label>HABILIDAD POR DEFECTO EN SUS HILOS NUEVOS<select id="prSkill" data-noi18n><option value="">${tr('— ninguna —')}</option>${liveSkills().map((k) => `<option value="${k.id}" ${pr.skill === k.id ? 'selected' : ''}>✦ ${esc(k.name)}</option>`).join('')}</select></label>
+      <label>📚 BIBLIOTECA (las IAs la consultan en los hilos de este proyecto y citan la página)</label>
+      ${libDocs(pr.id).map((d) => `<div class="folder"><span class="mono" data-noi18n>📄 ${esc(d.name)}${d.pages ? ` · ${d.pages} ${tr('págs.')}` : ''}</span><button class="btn sm red" data-libdel="${d.id}" aria-label="${tr('Quitar')}">✕</button></div>`).join('') || `<p class="hint">${tr('Sin documentos. Añade PDF o textos: contratos, apuntes, manuales…')}</p>`}
+      <button class="btn sm" id="libAdd">+ ${tr('AÑADIR DOCUMENTOS')}</button><input type="file" id="libFile" multiple hidden accept="application/pdf,.pdf,text/*,.md,.csv,.json,.txt">
+      <p class="hint">${tr('Se guardan solo en este dispositivo. En cada pregunta se envían a la IA los fragmentos que más se parecen a lo que preguntas.')}</p>
       <div class="row wrap">${thread().project !== pr.id ? '<button class="btn sm" id="prAdd">AÑADIR EL HILO ACTUAL</button>' : ''}<button class="btn sm red" id="prDel">BORRAR PROYECTO</button></div>
     </div>` : '';
   const q = norm($('#threadSearch').value.trim());
   const rows = [];
-  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active) && (!S.project || x.project === S.project)).sort((a, b) => b.ts - a.ts)) {
+  const tagQ = q.startsWith('#') ? q.slice(1) : null;
+  for (const t of S.threads.filter((x) => !x.deleted && (x.messages.length || x.id === S.active) && (!S.project || x.project === S.project)).sort((a, b) => !!b.pinned - !!a.pinned || b.ts - a.ts)) {
     let snip = '';
-    if (q) {
+    if (tagQ != null) { if (!(t.tags || []).some((g) => norm(g).startsWith(tagQ))) continue; }
+    else if (q && (t.tags || []).some((g) => norm(g).includes(q))) { /* coincide por etiqueta */ }
+    else if (q) {
       if (!norm(t.title).includes(q)) {
         const m = t.messages.find((x) => norm(x.content).includes(q));
         if (!m) continue;
@@ -2458,7 +2835,7 @@ function renderThreads(withCard = true) {
       }
     }
     const tp = !S.project && t.project && projects.find((p) => p.id === t.project);
-    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${tp ? `<small class="proj">📁 ${esc(tp.name)}</small> ` : ''}${t.source ? `<small class="proj">↘ ${esc(t.source)}</small> ` : ''}${esc(t.title)}${snip}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
+    rows.push(`<div class="chatItem ${t.id === S.active ? 'on' : ''}" data-tid="${t.id}"><span>${tp ? `<small class="proj">📁 ${esc(tp.name)}</small> ` : ''}${t.source ? `<small class="proj">↘ ${esc(t.source)}</small> ` : ''}${t.pinned ? '📌 ' : ''}${esc(t.title)}${(t.tags || []).map((g) => ` <small class="tagc">#${esc(g)}</small>`).join('')}${snip}${tagEdit === t.id ? `<input class="tagIn" data-tagin="${t.id}" value="${esc((t.tags || []).join(', '))}" placeholder="${tr('trabajo, viaje…')}" aria-label="${tr('Etiquetas')}">` : ''}</span><small>${new Date(t.ts).toLocaleDateString()}</small><button class="btn sm ghost" data-pin="${t.id}" aria-label="${t.pinned ? tr('Desfijar') : tr('Fijar arriba')}" title="${t.pinned ? tr('Desfijar') : tr('Fijar arriba')}">📌</button><button class="btn sm ghost" data-tags="${t.id}" aria-label="${tr('Etiquetas')}" title="${tr('Etiquetas')}">#</button><button class="btn sm red" data-del="${t.id}" aria-label="Borrar hilo">✕</button></div>`);
   }
   $('#threadList').innerHTML = rows.join('') || `<p class="hint">${q ? 'Nada coincide con la búsqueda.' : ''}</p>`;
 }
@@ -3086,12 +3463,39 @@ $('#projectCard').addEventListener('click', (e) => {
   if (e.target.id === 'prDel') {
     if (!confirm(`¿Borrar el proyecto «${pr.name}»? Sus hilos se conservan, sin proyecto.`)) return;
     Object.assign(pr, { deleted: true, memory: '', updatedAt: Date.now() });
+    for (const d of libDocs(pr.id)) blobs.del(d.id).catch(() => {});
+    delete S.library[pr.id];
     S.project = null;
   }
   save(); renderThreads(); renderLog(); syncAll();
 });
+// Etiquetas: se editan en la propia lista (separadas por comas); Intro o salir del campo las guarda.
+let tagEdit = null;
+function saveTags(el) {
+  const t = S.threads.find((x) => x.id === el.dataset.tagin);
+  tagEdit = null;
+  if (!t) return;
+  t.tags = [...new Set(el.value.split(',').map((x) => x.trim().replace(/^#/, '')).filter(Boolean))].slice(0, 8);
+  t.ts = Date.now(); save(); renderThreads(); syncAll();
+}
+$('#threadList').addEventListener('keydown', (e) => { if (e.target.classList.contains('tagIn') && e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
+$('#threadList').addEventListener('focusout', (e) => { if (e.target.classList.contains('tagIn')) saveTags(e.target); });
+$('#projectCard').addEventListener('click', async (e) => {
+  if (e.target.id === 'libAdd') return $('#libFile').click();
+  const del = e.target.dataset?.libdel;
+  if (del && S.project) { S.library[S.project] = libDocs(S.project).filter((d) => d.id !== del); try { await blobs.del(del); } catch {} save(); renderThreads(); }
+});
+$('#projectCard').addEventListener('change', (e) => { if (e.target.id === 'libFile' && S.project) { addToLibrary(S.project, [...e.target.files]); e.target.value = ''; } });
 $('#threadList').addEventListener('click', (e) => {
   if (busy) return toast('Espera a que termine la respuesta');
+  const pin = e.target.dataset.pin, tg = e.target.dataset.tags;
+  if (pin || tg) {
+    const t = S.threads.find((x) => x.id === (pin || tg));
+    if (tg) { tagEdit = tg; renderThreads(); $('#threadList .tagIn')?.focus(); return; }
+    t.pinned = !t.pinned; t.ts = Date.now(); // se sincroniza como cualquier cambio del hilo
+    save(); renderThreads(); syncAll(); return;
+  }
+  if (e.target.classList.contains('tagIn')) return;
   const del = e.target.dataset.del;
   if (del) {
     if (!confirm('¿Borrar este hilo? Se borrará también en los equipos sincronizados.')) return;
@@ -3159,12 +3563,91 @@ input.addEventListener('paste', (e) => {
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) { e.preventDefault(); addFiles(files); }
 });
+// Órdenes rápidas: «/resumir texto». Sin texto, se aplican a la última respuesta.
+const CMDS = [
+  ['resumir', 'Resume en 5 puntos clave, claros y breves'],
+  ['traducir', 'Traduce'],
+  ['corregir', 'Corrige la ortografía, la gramática y el estilo. Devuelve primero el texto corregido y después una lista breve de los cambios'],
+  ['tabla', 'Organiza esta información en una tabla clara'],
+  ['explicar', 'Explícalo de forma sencilla, sin tecnicismos y con un ejemplo'],
+  ['ciegas', ''], ['pasos', ''], ['imagen', ''],
+];
+const CMD_HELP = { resumir: 'resume un texto o la última respuesta', traducir: '«/traducir francés: texto» (por defecto, al inglés)', corregir: 'ortografía, gramática y estilo', tabla: 'lo pone en una tabla', explicar: 'más sencillo y con un ejemplo', ciegas: 'dos IAs responden sin decir cuál es cuál', pasos: 'tarea en varios pasos: planifica, investiga, redacta y revisa', imagen: 'crea una imagen en tu PC' };
+function expandCmd(text) {
+  const m = text.match(/^\/([a-záéíóú]+)\b\s*([\s\S]*)$/i);
+  const c = m && CMDS.find(([k]) => k === m[1].toLowerCase());
+  if (!c || !c[1]) return null;
+  let body = m[2].trim(), lang = c[0] === 'traducir' ? (LANG === 'en' ? 'español' : 'inglés') : '';
+  if (c[0] === 'traducir') { const l = body.match(/^([\p{L} ]{2,20}):\s*([\s\S]*)$/u); if (l) { lang = l[1].trim(); body = l[2]; } }
+  const last = [...thread().messages].reverse().find((x) => x.role === 'assistant' && x.content && !x.error)?.content;
+  const target = body || last;
+  if (!target) return { error: 'Escribe el texto después de la orden, por ejemplo: /' + c[0] + ' …' };
+  const verb = c[0] === 'traducir' ? `${tr('Traduce el texto siguiente y devuelve solo la traducción. Idioma de destino')}: ${tr(lang)}` : c[1];
+  return { text: `${verb}:\n\n${target}`, display: body ? text : `${text} ${tr('(la última respuesta)')}` };
+}
+function renderCmdHint() {
+  const v = input.value, el = $('#skillHint');
+  if (!/^\/[a-záéíóú]*$/i.test(v)) { if (el.dataset.cmd) { el.hidden = true; delete el.dataset.cmd; } return; }
+  const list = CMDS.filter(([k]) => k.startsWith(v.slice(1).toLowerCase()) && (k !== 'imagen' || DESK || S.mcp.some((x) => x.status === 'on')));
+  if (!list.length) { el.hidden = true; return; }
+  el.dataset.cmd = '1';
+  el.innerHTML = `<span>⌘</span>${list.map(([k]) => `<button type="button" class="btn sm ghost" data-cmd="${k}">/${k}</button> <small class="hint">${CMD_HELP[k]}</small>`).join(' · ')}`;
+  el.hidden = false;
+}
+input.addEventListener('input', renderCmdHint);
+$('#skillHint').addEventListener('click', (e) => { const k = e.target.dataset?.cmd; if (k) { input.value = `/${k} `; input.focus(); $('#skillHint').hidden = true; } });
+// ---------- ⚡ Atajo rápido (PC): Ctrl+Mayús+Espacio desde cualquier programa ----------
+// Trae Neura delante; si has copiado un texto, ofrece resumirlo, traducirlo, corregirlo o explicarlo en un toque.
+DESK?.onQuick?.((text) => {
+  input.focus();
+  const el = $('#skillHint'), t = String(text || '').trim();
+  if (!t) return;
+  quickText = t;
+  el.dataset.cmd = '1';
+  el.innerHTML = `<span>📋 ${tr('Con lo que has copiado')} (${t.length} ${tr('caracteres')}):</span> ${['resumir', 'traducir', 'corregir', 'explicar'].map((k) => `<button type="button" class="btn sm" data-quick="${k}">/${k}</button>`).join(' ')} <button type="button" class="btn sm ghost" data-quick="x">✕</button>`;
+  el.hidden = false;
+});
+let quickText = '';
+$('#skillHint').addEventListener('click', (e) => {
+  const k = e.target.dataset?.quick; if (!k) return;
+  $('#skillHint').hidden = true;
+  if (k === 'x' || busy) return;
+  input.value = `/${k} ${quickText}`; quickText = '';
+  $('#composer').requestSubmit();
+});
+// ---------- 📸 Captura y pregunta (PC) ----------
+async function captureScreen() {
+  const data = await DESK.captureScreen().catch(() => null);
+  if (!data) return toast(tr('No se pudo capturar la pantalla.'), true);
+  const bin = atob(data.split(',')[1]), bytes = new Uint8Array(bin.length); // sin fetch(): la CSP no permite leer data: con él
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
+  await addFiles([new File([blob], `${tr('captura')}-${hhmm(Date.now()).replace(':', '')}.jpg`, { type: 'image/jpeg' })]);
+  input.focus(); toast(tr('📸 Captura adjunta: pregunta lo que quieras sobre ella (usa una IA con visión).'));
+}
 $('#composer').onsubmit = (e) => {
   e.preventDefault();
   if (busy) { abortCtl?.abort(); return; }
   const text = input.value.trim();
   if (!text && !attach.length) return;
   if (/^\/imagen\b/i.test(text)) { input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true; return sendImage(text); }
+  const special = text.match(/^\/(ciegas|pasos)\b\s*([\s\S]*)$/i);
+  if (special) {
+    if (!special[2].trim()) return toast(special[1].toLowerCase() === 'ciegas' ? 'Escribe la pregunta después: /ciegas ¿…?' : 'Escribe el objetivo después: /pasos Escribe un informe sobre…', true);
+    input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true;
+    const opt = special[1].toLowerCase() === 'ciegas' ? { blind: true, display: text } : { steps: true, display: text };
+    const files = attach; attach = []; renderAttach();
+    if (guardSend(special[2].trim(), files, opt)) return;
+    return opt.steps ? runSteps(special[2].trim(), files) : send(special[2].trim(), files, opt);
+  }
+  const cmd = text.startsWith('/') && expandCmd(text);
+  if (cmd?.error) return toast(cmd.error, true);
+  if (cmd) {
+    input.value = ''; input.style.height = 'auto'; $('#skillHint').hidden = true;
+    const files = attach; attach = []; renderAttach();
+    if (guardSend(cmd.text, files, { display: cmd.display })) return;
+    return send(cmd.text, files, { display: cmd.display });
+  }
   // Una petición estructurada con huecos sin rellenar suele dar una respuesta genérica.
   if ((text.includes('[completa:') || text.includes(`[${tr('completa')}:`)) && !confirm('Quedan huecos [completa: …] sin rellenar. ¿Enviar igualmente?')) return;
   const files = attach; attach = []; renderAttach(); $('#skillHint').hidden = true;
@@ -3175,6 +3658,8 @@ $('#composer').onsubmit = (e) => {
   send(text, files, opt);
 };
 $('#attachBtn').onclick = () => $('#fileIn').click();
+$('#shotBtn').hidden = !DESK?.captureScreen;
+$('#shotBtn').onclick = captureScreen;
 $('#structBtn').onclick = () => openTemplates();
 $('#fileIn').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
 $('#attachBar').addEventListener('click', (e) => { const i = e.target.dataset.unattach; if (i != null) { attach.splice(+i, 1); renderAttach(); } });
@@ -3190,6 +3675,7 @@ $('#log').addEventListener('click', (e) => {
   if (e.target.dataset?.check) return checkReply(e.target.dataset.check);
   if (e.target.dataset?.adjust) { if (busy) return; const [, t] = ADJUST[+e.target.dataset.adjust]; return send(tr(t)); }
   if (e.target.dataset?.saveimg) return saveImage(e.target.dataset.saveimg);
+  if (e.target.dataset?.openhtml) return openHtml(e.target.dataset.openhtml);
   if (sp) return speak(sp);
   if (skillify) return skillFromReply(skillify);
   const { branch: br, edit } = e.target.dataset || {};
@@ -3249,7 +3735,25 @@ $('#provList').addEventListener('click', async (e) => {
   }
   save(); renderProviders(); renderTargets(); renderLog();
 });
+$('#settings').addEventListener('click', (e) => {
+  const d = e.target.dataset || {};
+  if (e.target.id === 'schAdd') {
+    const name = $('#schName').value.trim(), prompt = $('#schPrompt').value.trim();
+    if (!name || !prompt) return toast(tr('Pon un nombre y qué pedir.'), true);
+    const x = { id: uid(), name, prompt, days: $('#schDays').value, time: $('#schTime').value || '09:00', web: $('#schWeb').checked, last: null, on: true };
+    const now = new Date(), hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    if (x.time <= hm) x.last = today(); // ya pasó su hora hoy: empieza mañana (PROBAR la hace ahora)
+    (S.schedules ||= []).push(x);
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+    save(); renderSettings(); toast(`⏰ ${name}: ${tr('programada')}`);
+  }
+  if (d.scheddel) { S.schedules = S.schedules.filter((x) => x.id !== d.scheddel); save(); renderSettings(); }
+  if (d.schedrun) { if (busy) return toast('Espera a que termine la respuesta'); closeSheets(); runSchedule(S.schedules.find((x) => x.id === d.schedrun)); }
+});
+$('#settings').addEventListener('input', (e) => { if (e.target.id === 'profileText') { S.profile = { ...S.profile, text: e.target.value.slice(0, 4000) }; save(); } });
 $('#settings').addEventListener('change', (e) => {
+  if (e.target.id === 'profileOn') { S.profile = { ...S.profile, on: e.target.checked }; save(); return; }
+  if (e.target.id === 'currencySel') { S.currency = e.target.value; save(); location.reload(); return; }
   if (e.target.id === 'budgetDay' || e.target.id === 'budgetMonth') {
     S.budget = { ...S.budget, [e.target.id === 'budgetDay' ? 'day' : 'month']: Math.max(0, +e.target.value || 0) };
     save(); renderTargets(); repaintUsage(); toast('TOPE DE GASTO GUARDADO');
@@ -3384,6 +3888,15 @@ async function boot() {
   // Abierta desde el QR de un PC: se conecta sola a ese puente.
   const p = parsePair(location.hash);
   if (p) { window.history.replaceState(null, '', location.pathname + location.search); pairWith(p); }
+  const back = !NATIVE && oauthFromUrl(location.href);
+  if (back) { window.history.replaceState(null, '', location.pathname + location.hash); finishOAuth(back); }
+  DESK?.onOAuth?.((d) => finishOAuth(d));
+  const capApp = CAP && window.Capacitor?.Plugins?.App;
+  if (capApp) {
+    const fromLink = (url) => { const r = url && oauthFromUrl(url); if (r && localStorage.getItem(OAUTH_LS)) finishOAuth(r); }; // getLaunchUrl repite el enlace en cada recarga
+    capApp.addListener('appUrlOpen', (ev) => fromLink(ev.url));
+    capApp.getLaunchUrl?.().then((r) => fromLink(r?.url)).catch(() => {});
+  }
   save();
   renderTargets(); renderLog();
   S.mcp.forEach((s) => mcpConnect(s, true).catch(() => {}));
