@@ -1989,6 +1989,7 @@ function logHTML(th) {
 }
 
 function renderLog() {
+  queueMicrotask(() => { refreshSide(); renderStatus(); });
   const log = $('#log');
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   const th = thread();
@@ -2031,7 +2032,7 @@ function homeHTML(n) {
   return `<div class="home">
     <div class="homeHead"><b>¿Qué quieres hacer?</b><span class="hint">${n} modelos listos · AUTO-SALTO ${S.autoSkip ? 'activado' : 'desactivado'}</span></div>
     <div class="homeGrid">${HOME.filter(([k]) => k !== 'council' || S.level !== 'basic').map(([k, ic, t, d]) => `<button type="button" class="homeCard" data-home="${k}"><span>${ic}</span><b>${t}</b><small>${d}</small></button>`).join('')}</div>
-    ${recent.length ? `<div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${t.pinned ? '📌 ' : ''}${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div>` : ''}
+    ${recent.length ? `<div class="recentBox"><div class="homeHead"><b>Hilos recientes</b></div><div class="recent">${recent.map((t) => `<button type="button" class="recentItem" data-tid-open="${t.id}"><span data-noi18n>${t.pinned ? '📌 ' : ''}${esc(t.title)}</span><small>${new Date(t.ts).toLocaleDateString()}</small></button>`).join('')}</div></div>` : ''}
   </div>`;
 }
 $('#log').addEventListener('click', (e) => {
@@ -2443,7 +2444,40 @@ $('#log').addEventListener('click', async (e) => {
   }
 });
 
+// ---------- barra lateral (pantallas anchas), barra de estado e índice de ⚙ ----------
+// En pantallas anchas el panel de hilos queda fijo a la izquierda, como la navegación de CAPAS.
+const wide = () => matchMedia('(min-width: 1100px)').matches;
+let sideReady = false; // la tarjeta del proyecto se pinta la primera vez; luego solo la lista (no se pierde lo que escribes)
+function refreshSide() {
+  const side = $('#sheetThreads');
+  side.setAttribute('aria-hidden', String(!wide() && !side.classList.contains('open')));
+  if (wide() && !side.contains(document.activeElement)) { renderThreads(!sideReady); sideReady = true; }
+}
+matchMedia('(min-width: 1100px)').addEventListener?.('change', () => { if (wide()) renderThreads(); refreshSide(); });
+// Abajo, de un vistazo: qué IA contesta, los modos activos y lo de hoy.
+function renderStatus() {
+  const t = findT(S.target), th = thread(), U = S.usage?.[today()] || {};
+  const n = Object.values(U).reduce((a, u) => a + u.n + (u.err || 0), 0), x = spent();
+  const bits = [
+    `<span class="dot ${t ? 'on' : ''}"></span> <span data-noi18n>${t ? esc(t.label) : tr('Sin IAs conectadas')}</span>`,
+    S.autoSkip ? tr('AUTO-SALTO') : '', th.private ? `🔒 ${tr('PRIVADO')}` : '', S.web && searchReady(th) ? '🌐 WEB' : '', S.council ? `⚖ ${tr('CONSEJO')}` : '',
+    activeSkill() ? `✦ <span data-noi18n>${esc(activeSkill().name)}</span>` : '', activeProject() ? `📁 <span data-noi18n>${esc(activeProject().name)}</span>` : '',
+    `${tr('Hoy')}: ${n} ${tr('peticiones')}`, x.day > 0 ? `${eur(x.day)}` : '',
+  ].filter(Boolean);
+  $('#statusBar').innerHTML = bits.join('<i>·</i>');
+}
+function renderSecNav() {
+  const hs = [...$('#sheetAis').querySelectorAll('h3')];
+  $('#aisNav').innerHTML = `<button type="button" data-sec="top">${tr('IAs')}</button>` + hs.map((h, i) => `<button type="button" data-sec="${i}">${esc((h.childNodes[0]?.textContent || h.textContent).trim())}</button>`).join('');
+}
+$('#aisNav').addEventListener('click', (e) => {
+  const k = e.target.dataset?.sec; if (k == null) return;
+  if (k === 'top') $('#sheetAis .sheet-in').scrollTo({ top: 0, behavior: 'smooth' });
+  else $('#sheetAis').querySelectorAll('h3')[+k]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
 function renderTargets() {
+  queueMicrotask(renderStatus);
   const all = targets();
   if (!all.some((t) => t.key === S.target)) {
     const pid = String(S.target || '').split('::')[0];
@@ -2637,6 +2671,7 @@ const repaintUsage = () => {
   if (!el.contains(document.activeElement)) el.innerHTML = usageHTML(); else $('#usageSum').innerHTML = usageSumHTML();
 };
 function renderSettings() {
+  queueMicrotask(renderSecNav);
   const all = targets();
   const sec = DESK?.secure?.();
   $('#settings').innerHTML = `

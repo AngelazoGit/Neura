@@ -445,3 +445,30 @@ table.quota td.st{text-align:left}
 .preview img{display:block;max-width:100%;max-height:420px}
 .reply [data-openhtml]{margin-top:8px}
 .chip.step{font-size:11px}
+
+/* ===== Barra lateral (pantallas anchas), barra de estado e índice de ⚙ ===== */
+@media (min-width:1100px){
+  #sheetThreads{position:fixed;inset:0 auto 0 0;width:300px;opacity:1;pointer-events:auto;background:none;z-index:5}
+  #sheetThreads .sheet-in{width:300px;transform:none;padding-top:calc(env(safe-area-inset-top) + 12px)}
+  #sheetThreads .close{display:none}
+  #app{margin-left:300px}
+  .empty:has(.home){max-width:920px}
+  .homeGrid{grid-template-columns:repeat(4,1fr)}
+  #sheetThreads .chatItem>small{display:none}
+  #sheetThreads .chatItem{padding:9px 8px}
+  .home .recentBox{display:none}
+}
+#statusBar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;padding:5px 12px calc(env(safe-area-inset-bottom) + 5px);font:11.5px var(--mono);color:var(--dim);border-top:1px solid var(--line);background:var(--chrome)}
+#statusBar i{font-style:normal;opacity:.5}
+#statusBar .dot{width:7px;height:7px}
+#statusBar:empty{display:none}
+@media (max-width:699px){#statusBar{display:none}}
+@media (min-width:700px){#composer{padding-bottom:10px}}
+.secnav{position:sticky;top:-12px;z-index:2;display:flex;gap:6px;overflow-x:auto;padding:8px 0;margin:0 0 6px;background:var(--chrome);scrollbar-width:thin}
+.secnav button{flex:none;white-space:nowrap;font:600 11px var(--cond);padding:5px 9px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer}
+.secnav button:hover{border-color:var(--orange)}
+#sheetAis h3{scroll-margin-top:56px}
+html[data-mask]:not([data-mask=mando]) .secnav button{border-radius:14px}
+@media (min-width:1100px) and (hover:hover){
+  #sheetThreads .chatItem:not(.on):not(:hover):not(:focus-within)>.btn{display:none}
+}

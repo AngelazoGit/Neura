@@ -11,10 +11,10 @@ const user = (extra) => ({
 (async () => {
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'neura-br-'));
   const br = spawn(process.execPath, [path.join(__dirname, '../../bridge/server.mjs')], { env: { ...process.env, PORT: '8796', HOST: '127.0.0.1', NEURA_TOKEN: 'x'.repeat(24), NEURA_DATA: data, NEURA_CONFIG: '/nonexistent.json' } });
-  await new Promise((r) => br.stdout.on('data', (d) => String(d).includes('Backends') && r()));
+  await new Promise((r, ko) => { br.stdout.on('data', (d) => String(d).includes('Backends') && r()); br.on('exit', (c) => ko(new Error('el puente no arrancó (¿puerto 8796 ocupado?) · ' + c))); });
   const b = await chromium.launch();
   const page = async (state) => {
-    const ctx = await b.newContext({ locale: 'es-ES' });
+    const ctx = await b.newContext({ locale: 'es-ES', viewport: { width: 1000, height: 800 } });
     const p = await ctx.newPage();
     p.on('pageerror', (e) => { console.log('PAGEERROR', e.message); failures++; });
     if (state) await p.addInitScript((s) => { if (!sessionStorage.getItem('seeded')) { localStorage.setItem('neura.v1', JSON.stringify(s)); sessionStorage.setItem('seeded', '1'); } }, state);
@@ -54,6 +54,20 @@ const user = (extra) => ({
   await p.keyboard.press('Escape');
   await p.click('[data-tid-open=t1]');
   ok(await p.evaluate(() => S.active === 't1') && /Hola/.test(await p.textContent('#log')), 'un hilo reciente se abre con un toque');
+
+  // ---- Pantalla ancha: barra lateral fija, barra de estado e índice de ⚙ ----
+  await p.setViewportSize({ width: 1280, height: 800 });
+  await p.evaluate(() => { S.active = null; renderLog(); });
+  await p.waitForTimeout(200);
+  ok(await p.isVisible('#threadList') && /Contrato de alquiler/.test(await p.textContent('#threadList')), 'en pantalla ancha los hilos están siempre a la vista a la izquierda');
+  ok(/Groq \/ rapido/.test(await p.textContent('#statusBar')) && /AUTO-SALTO/.test(await p.textContent('#statusBar')), 'la barra de estado muestra la IA que contesta y los modos activos');
+  await p.click('#btnAis');
+  const secs = await p.$$eval('#aisNav button', (b) => b.map((x) => x.textContent));
+  ok(secs.length > 5 && secs.some((x) => /CONSUMO/.test(x)), `⚙ tiene un índice de secciones · ${secs.length}`);
+  await p.click('#aisNav button:has-text("CONSUMO")'); await p.waitForTimeout(600);
+  ok(await p.evaluate(() => { const r = [...document.querySelectorAll('#sheetAis h3')].find((h) => /CONSUMO/.test(h.textContent)).getBoundingClientRect(); return r.top >= 0 && r.top < 200; }), '…y cada botón lleva a su sección');
+  await p.keyboard.press('Escape');
+  ok(await p.isVisible('#threadList'), 'al cerrar ⚙ la barra lateral sigue ahí');
   await p.context().close();
 
   // ---- Principiante: sin la tarjeta del CONSEJO (opción avanzada) ----

@@ -91,8 +91,10 @@ fs.writeFileSync(path.join(UD, 'neura-datos.json'), JSON.stringify({
   // ---- 5. Fijar y etiquetar hilos ----
   await w.click('#btnThreads');
   const first = await w.$eval('#threadList .chatItem:last-child', (x) => x.dataset.tid);
+  await w.hover(`[data-tid="${first}"]`); // en pantalla ancha con ratón, los botones aparecen al pasar por encima
   await w.click(`[data-pin="${first}"]`);
   ok(await w.$eval('#threadList .chatItem', (x) => x.dataset.tid) === first && /📌/.test(await w.textContent('#threadList .chatItem')), 'un hilo fijado sube arriba con 📌');
+  await w.hover(`[data-tid="${first}"]`);
   await w.click(`[data-tags="${first}"]`);
   await w.fill('.tagIn', 'trabajo, idiomas'); await w.press('.tagIn', 'Enter');
   ok(/#trabajo/.test(await w.textContent('#threadList')), 'las etiquetas se ven en la lista');
